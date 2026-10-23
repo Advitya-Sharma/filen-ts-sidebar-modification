@@ -223,10 +223,17 @@ export function paragraphs(
 	runs: readonly { readonly text: string; readonly style: string | undefined }[] | null,
 	link?: string
 ): string {
-	const paragraph = (line: string): string =>
-		link === undefined || line === ""
-			? `<text:p>${line}</text:p>`
-			: `<text:p><text:a xlink:href="${escapeAttribute(link)}" xlink:type="simple">${line}</text:a></text:p>`
+	// A link is a field of the text it holds: around spans LibreOffice reads it without their text, and it drops the
+	// white space elements a field starts or ends with, so those stay outside it.
+	const linked = (body: string): string => {
+		if (link === undefined || body === "") return body
+
+		const edges = /^((?:<text:(?:tab|s)\b[^>]*\/>)*)([\s\S]*?)((?:<text:(?:tab|s)\b[^>]*\/>)*)$/.exec(body)
+		const inner = edges?.[2] ?? body
+
+		return `${edges?.[1] ?? ""}${inner === "" ? "" : `<text:a xlink:href="${escapeAttribute(link)}" xlink:type="simple">${inner}</text:a>`}${edges?.[3] ?? ""}`
+	}
+	const paragraph = (line: string): string => `<text:p>${linked(line)}</text:p>`
 
 	if (runs === null)
 		return text
@@ -243,14 +250,14 @@ export function paragraphs(
 			if (k > 0) lines.push("")
 			if (part === "") return
 
-			const body = paragraphText(part)
+			const body = linked(paragraphText(part))
 
 			lines[lines.length - 1] +=
 				run.style === undefined ? body : `<text:span text:style-name="${escapeAttribute(run.style)}">${body}</text:span>`
 		})
 	}
 
-	return lines.map(paragraph).join("")
+	return lines.map(line => `<text:p>${line}</text:p>`).join("")
 }
 
 function pad(value: number, width = 2): string {
@@ -313,8 +320,8 @@ export interface CellParts {
 	// The document declares LibreOffice's calcext namespace, so is already an extended document (ODF 1.3 Part 3
 	// §2.2.2, foreign attributes §3.17): an error result is marked with calcext:value-type. A conforming one (§2.2.1)
 	// stays conforming: a formula's error result is written as a number with the error's text, which reads back as
-	// the error and is calculated again; an error constant as a formula of that error alone (STRICT_ERRORS), the
-	// errors with no such form refused.
+	// the error and is calculated again. In both, an error constant is a formula of that error alone (STRICT_ERRORS),
+	// the errors with no such form refused.
 	readonly calcext: boolean
 	// Runs' text styles, by run.
 	readonly runStyles: readonly (string | undefined)[] | null
@@ -388,7 +395,9 @@ export function cellMarkup(cell: CellValue, parts: CellParts): string {
 			body = paragraphs(cell.number === 0 ? "FALSE" : "TRUE", null, parts.link)
 			break
 		case Value.ERROR:
-			if (!parts.calcext && kept === undefined && (cell.formula === null || cell.formula === "")) {
+			// An error with no formula of its own is that error's formula alone, as LibreOffice writes one: it reads
+			// calcext:value-type only on a formula cell, and shows any other cell's value (0).
+			if (kept === undefined && (cell.formula === null || cell.formula === "")) {
 				if (!STRICT_ERRORS.has(cell.text)) throw new CellRefused("errorValue")
 
 				attributes += ` table:formula="${escapeAttribute(`of:=${cell.text}`)}"`
@@ -400,8 +409,11 @@ export function cellMarkup(cell: CellValue, parts: CellParts): string {
 		case Value.TEXT:
 			attributes += ' office:value-type="string"'
 
-			// A formula's text result exactly (its text:p collapses white space); typed text is its paragraphs.
-			if (cell.formula !== null || kept !== undefined) attributes += ` office:string-value="${escapeAttribute(cell.text)}"`
+			// A formula's text result exactly (its text:p collapses white space); typed text is its paragraphs, but for
+			// text starting with "#", which LibreOffice 7.5 takes for an error's name where no string value says it is text
+			// (and aborts on one it does not know, such as "#" alone).
+			if (cell.formula !== null || kept !== undefined || cell.text.startsWith("#"))
+				attributes += ` office:string-value="${escapeAttribute(cell.text)}"`
 
 			body = paragraphs(cell.text, null, parts.link)
 			break

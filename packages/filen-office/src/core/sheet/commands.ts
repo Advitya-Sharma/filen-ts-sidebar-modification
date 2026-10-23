@@ -25,6 +25,7 @@ import { xlsxPrintFeature } from "./print/xlsx"
 import { digitWidthFeature } from "../xlsx/edit/digitWidth"
 import { chartsFeature } from "../xlsx/charts/feature"
 import { drawingsFeature } from "../xlsx/drawings/feature"
+import { saveAsFormatFeature } from "../ods/convert/feature"
 import { defineSheetFeature, sheetRegistry, type SheetFeature } from "./registry"
 import { RenderStyleTable, SheetSession, sessionFeature } from "./session"
 
@@ -137,6 +138,7 @@ export const XLSX_FEATURES: readonly SheetFeature<XlsxDocument>[] = [
 	sortFeature,
 	filterFeature,
 	dataValidationFeature,
+	saveAsFormatFeature,
 	// Last: a rule's look goes over what the features before it gave the cell.
 	conditionalFormattingFeature
 ]

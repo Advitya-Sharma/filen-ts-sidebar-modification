@@ -322,12 +322,14 @@ export function dataStyles(code: string, name: string): DataStyleResult {
 	if (positive === undefined) return { refused: "empty" }
 
 	if (text !== null) {
+		// A reader takes the first map whose condition holds (§16.3): with a zero section the positive one is for more
+		// than zero, as Excel's sections are.
 		const maps = [
-			map("value()>=0", sub(positive)),
+			map(zero === undefined ? "value()>=0" : "value()>0", sub(positive)),
 			map("value()<0", sub(negative ?? { ...positive, body: `<number:text>-</number:text>${positive.body}` }))
 		]
 
-		if (zero !== undefined) maps.splice(1, 0, map("value()=0", sub(zero)))
+		if (zero !== undefined) maps.push(map("value()=0", sub(zero)))
 
 		out.push({ name, markup: element(text as Section, name, maps.join("")) })
 

@@ -18,6 +18,7 @@ import { mediaInUse, releaseUnusedMedia, settleMedia } from "../../core/docx/obj
 import { compositionMarked, flushComposition } from "../../core/docx/review/track"
 import type { DocxPrepareOptions, DocxPreparedSave, DocxSaveInput, DocxSaveTimings } from "../../core/docx/write/save"
 import type { Slicing } from "../../core/slicing"
+import type { DocxAbortSignal } from "./protection"
 import { HitTester } from "../../core/text/index"
 import type { XmlDocument } from "../../core/xml/index"
 import { DocxEngine, type DocxEngineOpen, type DocxEngineServices } from "./engine"
@@ -122,8 +123,9 @@ export interface DocxEditingHost {
 	// not change the documents meanwhile (they are read once, as the save starts). Rejects with a
 	// DocxSaveError when the writer refuses, with a DocxClosedError when the document closed first. An encrypted
 	// document's file is then sealed and checked (DocxEditingOptions.encryption); a failure there rejects with a
-	// DocxSealError, nothing handed out.
-	save(sessions?: readonly DocxEditorSession[]): Promise<DocxWritten>
+	// DocxSealError, nothing handed out. `signal`: a write nothing stores (Download as) may be given up: it ends at
+	// its next slice or stage and rejects with an AbortError, nothing handed out.
+	save(sessions?: readonly DocxEditorSession[], options?: { readonly signal?: DocxAbortSignal }): Promise<DocxWritten>
 	// The writer and the part half of gate 2 alone, in slices (nothing zipped or stored): whether, and what,
 	// a save of `sessions` would write.
 	prepare(sessions?: readonly DocxEditorSession[]): Promise<DocxPreparedSave>
@@ -186,6 +188,31 @@ export interface DocxLaterProof {
 export interface DocxEditingWriter {
 	readonly prepare: (input: DocxSaveInput, options: DocxPrepareOptions) => Promise<DocxPreparedSave>
 	readonly zipper?: DocxZipperFactory
+}
+
+// Why a write given up (its signal) ended.
+function abortError(): Error {
+	const error = new Error("The write was aborted")
+
+	error.name = "AbortError"
+
+	return error
+}
+
+function throwIfAborted(signal: DocxAbortSignal | undefined): void {
+	if (signal?.aborted === true) throw abortError()
+}
+
+// `slicing` that ends the write at its next pause once `signal` aborts.
+function abortableSlicing(slicing: Slicing, signal: DocxAbortSignal): Slicing {
+	return {
+		sliceMs: slicing.sliceMs,
+		now: slicing.now,
+		pause: async () => {
+			await slicing.pause()
+			throwIfAborted(signal)
+		}
+	}
 }
 
 // Top-level blocks proved per run, and the size (positions) a run stops before: each run is proved a block
@@ -398,7 +425,11 @@ export function inThreadEditingHost(
 			release()
 		}
 	}
-	const prepare = (sessions: readonly DocxEditorSession[] | undefined, checksums: boolean): Promise<DocxPreparedSave> => {
+	const prepare = (
+		sessions: readonly DocxEditorSession[] | undefined,
+		checksums: boolean,
+		signal?: DocxAbortSignal
+	): Promise<DocxPreparedSave> => {
 		const input = flushed()
 
 		if (editing.writer === undefined) return Promise.reject(new Error("This editing host has no writer"))
@@ -411,22 +442,35 @@ export function inThreadEditingHost(
 				sessions: sessions ?? input.sessions,
 				...(input.docs === undefined ? {} : { docs: input.docs })
 			},
-			{ slicing: writing.slicing, checksums }
+			{ slicing: signal === undefined ? writing.slicing : abortableSlicing(writing.slicing, signal), checksums }
 		)
 	}
-	const save = (sessions?: readonly DocxEditorSession[]): Promise<DocxWritten> => held(() => written(sessions))
-	const written = async (sessions?: readonly DocxEditorSession[]): Promise<DocxWritten> => {
+	const save = (sessions?: readonly DocxEditorSession[], options: { readonly signal?: DocxAbortSignal } = {}): Promise<DocxWritten> =>
+		held(() => written(sessions, options.signal))
+	const written = async (
+		sessions: readonly DocxEditorSession[] | undefined,
+		signal: DocxAbortSignal | undefined
+	): Promise<DocxWritten> => {
+		throwIfAborted(signal)
+
 		// Handles added after this may be on their way into a command: the release below keeps them.
 		const through = saveInput?.context.media.lastHandle ?? 0
-		const prepared = await prepare(sessions, true)
+		const prepared = await prepare(sessions, true, signal)
 
 		if (writing === undefined) throw new DocxClosedError()
 
-		const { slicing, zipper } = writing
-		const zipped = await zipper.zip(prepared)
+		throwIfAborted(signal)
+
+		const slicing = signal === undefined ? writing.slicing : abortableSlicing(writing.slicing, signal)
+		const zipped = await writing.zipper.zip(prepared)
+
+		throwIfAborted(signal)
+
 		const sealer = editing.encryption
 		const sealing = slicing.now()
 		const bytes = sealer === undefined ? zipped.bytes : await sealer.seal(zipped.bytes, { slicing })
+
+		throwIfAborted(signal)
 		const sealMs = slicing.now() - sealing
 
 		// A zip must never leave an encrypted document's save.

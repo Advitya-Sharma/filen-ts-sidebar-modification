@@ -103,6 +103,31 @@ export function DestinationEntries({ family, actions, paste, clear, offline: off
 						<FileSpreadsheetIcon aria-hidden="true" />
 						{t("driveNewOfficeXlsx")}
 					</Item>
+					<Separator />
+					<Sub>
+						<SubTrigger>
+							<FilesIcon aria-hidden="true" />
+							{t("driveNewOfficeOpenDocument")}
+						</SubTrigger>
+						<SubContent>
+							<Item
+								onClick={() => {
+									actions.newOffice("odt")
+								}}
+							>
+								<FileTextIcon aria-hidden="true" />
+								{t("driveNewOfficeOdt")}
+							</Item>
+							<Item
+								onClick={() => {
+									actions.newOffice("ods")
+								}}
+							>
+								<FileSpreadsheetIcon aria-hidden="true" />
+								{t("driveNewOfficeOds")}
+							</Item>
+						</SubContent>
+					</Sub>
 				</SubContent>
 			</Sub>
 			<Separator />

@@ -48,6 +48,9 @@ export const docxRtf = pool.rtf
 // OpenDocument text documents opened for editing: the same, saved as ODT (the source-preserving ODT writer).
 export const docxOdt = pool.odt
 
+// Text documents converted to another format (Download as ▸ .docx / .odt), in the same worker.
+export const docxConvert = pool.convert
+
 // Starts the worker while a document still downloads, so its script is parsed by the time the bytes arrive.
 export function prewarmDocxWorker(): void {
 	pool.prewarm()

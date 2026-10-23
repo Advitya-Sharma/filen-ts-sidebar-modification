@@ -17,6 +17,7 @@ import { ChartRefused, writeOdsCharts } from "../charts/write"
 import { currentSection, sectionText, sheetFeatures, type SheetFeatures } from "./features"
 import { ValidationRefused } from "./validations"
 import { FilterRefused, filterRange } from "./filters"
+import type { NewTable } from "./table"
 import { NameRefused, namesPlan, scopeSheetName } from "./names"
 import type { SourceAxis } from "./axis"
 import { proveSpan } from "./span"
@@ -39,6 +40,8 @@ export interface OdsSaveOptions {
 	readonly inflate?: InflateHook
 	// Nothing was edited: the source as it is.
 	readonly untouched?: boolean
+	// What new tables hold beyond the model, by sheet (a conversion's page setup and conditional formats).
+	readonly newTables?: ReadonlyMap<number, NewTable>
 }
 
 const CONTENT = "content.xml"
@@ -310,7 +313,9 @@ export async function saveOds(document: XlsxDocument, options: OdsSaveOptions = 
 			const table = source.tables[entry.id]
 			const own = table !== undefined && table.id === entry.id && "rowAxis" in model ? table : null
 
-			features.set(entry.id, await sheetFeatures(document.workbook, source, model, entry.name, own, taken))
+			if (clock?.due === true) await clock.pause()
+
+			features.set(entry.id, await sheetFeatures(document.workbook, source, model, entry.name, own, taken, clock))
 		}
 
 		const styles = new OdsStyleWriter(source.styles, document.styles)
@@ -327,7 +332,8 @@ export async function saveOds(document: XlsxDocument, options: OdsSaveOptions = 
 			filters,
 			names,
 			clock,
-			nullDate: document.workbook.date1904 ? NULL_DATE_1904 : NULL_DATE_1899
+			nullDate: document.workbook.date1904 ? NULL_DATE_1904 : NULL_DATE_1899,
+			...(options.newTables !== undefined && { newTables: options.newTables })
 		})
 		const content = new ContentBytes(writer, source, clock)
 		const others: PartChange[] = [...charts.replace]

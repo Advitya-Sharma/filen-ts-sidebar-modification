@@ -660,28 +660,112 @@ function checkSectionCounts(
 	}
 }
 
+const EMPTY_BYTES = new Uint8Array(0)
+const EMPTY_DOCUMENT = parseXml(encodeUtf8("<empty/>"))
+
+// Rewritten rows parsed together, at most this many bytes of them: a part every row of which was rewritten is never
+// held whole, nor its parse.
+const ROW_CHUNK_BYTES = 1 << 20
+
 async function checkSheet(written: WrittenSheet, draft: XlsxDraft, outcome: Outcome, clock: SliceClock | undefined): Promise<void> {
 	const workbook = draft.input.workbook
 	const sheet = written.entry.model as XlsxSheetModel
 	const name = written.part
 	const order = sheetOrder(written.entry)
 	const open = written.rootOpen
+	const close = closeTag(open)
+	const dataOpen = encodeUtf8(`<${qualify(written.prefix, "sheetData")}>`)
+	const dataClose = encodeUtf8(`</${qualify(written.prefix, "sheetData")}>`)
 	const chunks: Uint8Array[] = [open]
 
 	// Well formed: the new markup in the part's root, every copy (whole elements of a well-formed source) left out.
+	// The rows rewritten are each whole elements of sheetData, so the part is well formed when the rest is and each
+	// run of them is in the root's sheetData: they are parsed in runs below, before anything else is checked.
 	for (const markup of written.written.values()) chunks.push(markup)
 
-	// Renumbered and spliced rows are their source bytes with values replaced, as copies are: checked below.
-	if (written.rows !== null) {
-		chunks.push(encodeUtf8(`<${qualify(written.prefix, "sheetData")}>`))
-		for (const row of written.rows) if (!row.spliced && !row.renumbered) chunks.push(row.bytes)
-		chunks.push(encodeUtf8(`</${qualify(written.prefix, "sheetData")}>`))
+	if (written.rows !== null) chunks.push(dataOpen, dataClose)
+
+	chunks.push(close)
+
+	const parse = (bytes: Uint8Array): Promise<XmlDocument> | XmlDocument =>
+		clock === undefined ? parseChecked(name, bytes) : parseCheckedSliced(name, bytes, clock)
+
+	await parse(join(chunks))
+
+	// The rows rewritten anew (renumbered and spliced rows are their source bytes with values replaced, as copies are:
+	// checked below), each run parsed in the root's sheetData and read back against the store. A row that reads back
+	// otherwise fails once every run is known to be well formed and every check before the rows has passed, as when
+	// the part was parsed whole.
+	const fresh = written.rows === null ? [] : written.rows.filter(row => !row.spliced && !row.renumbered)
+	// The first row that failed (null: after the last row), with its failure.
+	let rowFailure: { readonly row: WrittenRow | null; readonly error: unknown } | null = null
+	let checked = 0
+
+	// The rows and the row elements read are paired in one sequence across the runs, as one parse of the part paired
+	// them: an empty row takes the next element, wherever that lies.
+	let nextRow = 0
+	// The part as once parsed whole: its root's start tag, the new sections and sheetData's start, then the rows.
+	const head = chunks.reduce((size, chunk) => size + chunk.length, 0) - dataClose.length - close.length
+	let rowsBefore = 0
+	const check = (row: WrittenRow, document: XmlDocument | null, node: number, bytes: Uint8Array): void => {
+		if (rowFailure !== null) return
+
+		try {
+			checkRow(name, sheet, sheet.store.blocks[row.block] as XlsxRowBlock, row.index, document ?? EMPTY_DOCUMENT, node, bytes)
+		} catch (error) {
+			if (!(error instanceof XlsxWriteError)) throw error
+
+			rowFailure = { row, error }
+		}
 	}
 
-	chunks.push(closeTag(open))
+	for (let first = 0; first < fresh.length;) {
+		let last = first
+		let size = 0
 
-	const joined = join(chunks)
-	const document = clock === undefined ? parseChecked(name, joined) : await parseCheckedSliced(name, joined, clock)
+		while (last < fresh.length && (last === first || size + (fresh[last]?.bytes.length ?? 0) <= ROW_CHUNK_BYTES))
+			size += fresh[last++]?.bytes.length ?? 0
+
+		const bytes = join([open, dataOpen, ...fresh.slice(first, last).map(row => row.bytes), dataClose, close])
+		const document = await Promise.resolve()
+			.then(() => parse(bytes))
+			.catch((error: unknown) => {
+				// Where the part as parsed whole has the byte: its head and the rows before this run, not the run's own.
+				if (!(error instanceof XlsxWriteError)) throw error
+
+				const prefix = open.length + dataOpen.length
+
+				throw new XlsxWriteError(
+					error.reason,
+					error.message.replace(/byte (\d+)/, (whole, at: string) =>
+						Number(at) < prefix ? whole : `byte ${String(head + rowsBefore + Number(at) - prefix)}`
+					)
+				)
+			})
+
+		for (let k = first; k < last; k++) rowsBefore += fresh[k]?.bytes.length ?? 0
+		const data = childElement(document, document.documentElement(), "sheetData")
+
+		for (let node = data < 0 ? -1 : document.firstChildElement(data); node >= 0; node = document.nextSiblingElement(node)) {
+			if (++checked % ROWS_PER_CHECK === 0 && clock?.due === true) await clock.pause()
+
+			const row = fresh[nextRow++]
+
+			// An element after the part's last row: sheetData may hold none there.
+			if (row === undefined) {
+				rowFailure ??= { row: null, error: new XlsxWriteError("malformedPart", `${name}: an element after the last row`) }
+
+				break
+			}
+
+			check(row, document, node, bytes)
+		}
+
+		first = last
+	}
+
+	// Rows no element was read for.
+	for (; nextRow < fresh.length; nextRow++) check(fresh[nextRow] as WrittenRow, null, -1, EMPTY_BYTES)
 
 	if (orderInversions(written.names, order) > orderInversions(written.sourceNames, order))
 		fail("elementOrder", `${name}: sections out of schema order`)
@@ -689,7 +773,7 @@ async function checkSheet(written: WrittenSheet, draft: XlsxDraft, outcome: Outc
 	checkSectionCounts(name, written.names, written.sourceNames, written.written)
 
 	const relationships = await outcome.relationships(name)
-	const relationshipsPrefix = boundPrefix(join([open, closeTag(open)]))
+	const relationshipsPrefix = boundPrefix(join([open, close]))
 
 	for (const [section, markup] of written.written) {
 		checkMarkupReferences(`${name} ${section}`, markup, workbook.styles.dxfs.length, relationships, relationshipsPrefix)
@@ -698,33 +782,19 @@ async function checkSheet(written: WrittenSheet, draft: XlsxDraft, outcome: Outc
 	if (written.rows !== null) {
 		await checkStore(sheet, name, draft.cellXfCount, draft.sharedStringCount, clock)
 
-		// The rows in the parsed markup, in the order they were written.
-		const data = childElement(document, document.documentElement(), "sheetData")
-		let node = data < 0 ? -1 : document.firstChildElement(data)
-
 		const spliced: WrittenRow[] = []
-		let checked = 0
 
-		for (const row of written.rows as readonly WrittenRow[]) {
-			const block = sheet.store.blocks[row.block] as XlsxRowBlock
-
+		// In the order the rows were written, as the part's own parse checked them.
+		for (const row of written.rows) {
 			if (++checked % ROWS_PER_CHECK === 0 && clock?.due === true) await clock.pause()
 
-			if (row.spliced) {
-				spliced.push(row)
-
-				continue
-			}
-
-			if (row.renumbered) {
-				checkRenumbered(name, block, row.index, row.bytes, written.prefix)
-
-				continue
-			}
-
-			checkRow(name, sheet, block, row.index, document, node, joined)
-			node = node < 0 ? -1 : document.nextSiblingElement(node)
+			if (row === rowFailure?.row) throw rowFailure.error
+			if (row.spliced) spliced.push(row)
+			else if (row.renumbered)
+				checkRenumbered(name, sheet.store.blocks[row.block] as XlsxRowBlock, row.index, row.bytes, written.prefix)
 		}
+
+		if (rowFailure !== null && rowFailure.row === null) throw rowFailure.error
 
 		await checkSplicedRows(name, sheet, spliced, written.prefix, draft.sharedStringCount, clock)
 		await checkSharedFormulas(name, sheet, clock)

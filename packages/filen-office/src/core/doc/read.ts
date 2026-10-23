@@ -2,7 +2,7 @@ import { CfbError, CfbFile, isCompoundFile } from "../cfb/index"
 import { isEncryptedContainer } from "../encryption/container"
 import { bytesSource, type ByteSource } from "../opc/io"
 import { Bytes, le16, le32, utf16 } from "./bytes"
-import { CLEAR_WORD_BYTES, type DocCipherScheme, type DocDecryption, docCipherScheme, docKey } from "./decrypt"
+import { CLEAR_WORD_BYTES, cryptoApiHeaderProblem, type DocCipherScheme, type DocDecryption, docCipherScheme, docKey } from "./decrypt"
 import { DocError, corrupt } from "./errors"
 import { type DocFib, type FcName, readFib } from "./fib"
 import { type FkpRuns, readChpxRuns, readPapxRuns, runCovering } from "./fkp"
@@ -175,6 +175,10 @@ export async function readDocFile(source: ByteSource, options: DocReadOptions = 
 
 	if (fib.fEncrypted) {
 		const scheme = docCipherScheme(fib.fObfuscated, tableBytes)
+		const damaged = scheme === "cryptoApiRc4" && tableBytes !== undefined ? cryptoApiHeaderProblem(tableBytes, fib.lKey) : undefined
+
+		// A damaged EncryptionHeader is refused as such before any password is asked for (no password reads it).
+		if (damaged !== undefined) throw corrupt(damaged)
 
 		if (scheme === "unknown" || options.decryption === undefined)
 			throw new DocError("encrypted", `the document is encrypted (${scheme})`, { encryption: scheme })

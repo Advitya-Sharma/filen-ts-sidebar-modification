@@ -1,3 +1,5 @@
 export { blankDocx, type BlankDocxOptions } from "./docx"
 export { blankXlsx, type BlankXlsxOptions } from "./xlsx"
+export { blankOdt, type BlankOdtOptions } from "./odt"
+export { blankOds, type BlankOdsOptions } from "./ods"
 export { templateLocale, type TemplateLocale, type TemplatePaper } from "./locale"

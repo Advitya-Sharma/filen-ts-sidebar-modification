@@ -17,15 +17,16 @@ export function DownloadAsPasswordDialog() {
 	}
 
 	const name = (ask ?? shown)?.name ?? ""
+	const copy = (ask ?? shown)?.purpose === "copy"
 
 	return (
 		<DocxPasswordPrompt
 			open={ask !== null}
-			title={t("preview:previewOfficePdfPasswordTitle")}
-			body={t("drive:driveDownloadAsPasswordBody", { name })}
+			title={copy ? t("drive:driveDownloadAsPasswordCopyTitle") : t("preview:previewOfficePdfPasswordTitle")}
+			body={copy ? t("drive:driveDownloadAsPasswordCopyBody", { name }) : t("drive:driveDownloadAsPasswordBody", { name })}
 			wrongMessage={t("preview:previewOfficePdfPasswordWrong")}
 			label={t("preview:previewOfficePdfPasswordLabel")}
-			submitLabel={t("preview:previewOfficePdfPasswordSubmit")}
+			submitLabel={copy ? t("drive:driveDownloadAsPasswordCopySubmit") : t("preview:previewOfficePdfPasswordSubmit")}
 			progressLabel={t("preview:previewOfficePdfPasswordChecking")}
 			onOpenChange={open => {
 				if (!open) ask?.settle(false)

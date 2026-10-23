@@ -57,6 +57,7 @@ import { DocxPasswordGate, type PasswordVerdict } from "@/features/preview/compo
 import { DocxEditView, DocxProtectedEditView, type DocxSaveSource } from "@/features/preview/components/docxEditor"
 import { DocxFileMenu } from "@/features/preview/components/docxFileMenu"
 import { useDocxPdfExport, type DocxPdfExportTarget } from "@/features/preview/hooks/useDocxPdfExport"
+import { DownloadAsItemProvider } from "@/features/drive/components/editorDownloadAs"
 import { DocxToolbar, type DocxLegacyInfo, type PasswordIntegrity } from "@/features/preview/components/docxToolbar"
 import { RtfDocument } from "@/features/preview/components/rtfDocument"
 import { useTrustedLinkGate } from "@/lib/trustedLinks/useTrustedLinkGate"
@@ -118,7 +119,16 @@ function sourceFor(content: DocxContent, mode: DocxMarkupMode, format: "docx" | 
 	return { host: content.host, bytes: content.bytes, options: { fontUrls: DOCX_FONT_URLS, view: markupInfo(mode).view, format } }
 }
 
-export function DocxViewer({ item, alt, variant, editing, canSaveCopy, onOpenFile }: DocxViewerProps) {
+// The document's File menus offer Download as for this file (editorDownloadAs.tsx).
+export function DocxViewer(props: DocxViewerProps) {
+	return (
+		<DownloadAsItemProvider item={props.item}>
+			<DocxViewerBody {...props} />
+		</DownloadAsItemProvider>
+	)
+}
+
+function DocxViewerBody({ item, alt, variant, editing, canSaveCopy, onOpenFile }: DocxViewerProps) {
 	// Editing or viewing is decided as the file mounts. The editor keeps the document it opened across the
 	// user's own saves (each makes the file a new version under a new uuid): its bytes stay the ones it read.
 	const format = docxFormatOf(alt)

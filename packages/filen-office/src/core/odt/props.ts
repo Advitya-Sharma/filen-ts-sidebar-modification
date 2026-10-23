@@ -445,6 +445,9 @@ export interface ParagraphOptions {
 	readonly fontSize: number
 	// Indents of the list level the paragraph is in, written when its own do not win.
 	readonly listIndent?: { readonly left: number; readonly firstLine: number }
+	// fo:hyphenate of the same style's own text properties, where ODF has it: WordprocessingML has it per
+	// paragraph (w:suppressAutoHyphens).
+	readonly hyphenate?: string | undefined
 }
 
 const LEADERS: Readonly<Record<string, string>> = { ".": "dot", "-": "hyphen", _: "underscore", "·": "middleDot" }
@@ -544,7 +547,8 @@ export function paragraphProperties(
 
 	if (stops !== undefined) tail += tabs(stops, options)
 
-	const hyphenate = own.get("fo:hyphenate")
+	// On paragraph properties fo:hyphenate is no ODF attribute; earlier saves of this writer put it there.
+	const hyphenate = options.hyphenate ?? own.get("fo:hyphenate")
 
 	if (hyphenate !== undefined) tail += onOff("suppressAutoHyphens", hyphenate !== "true")
 

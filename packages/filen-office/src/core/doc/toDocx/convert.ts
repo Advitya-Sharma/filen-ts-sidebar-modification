@@ -76,6 +76,29 @@ export interface Conversion {
 	readonly formFields: ReadonlyMap<number, string>
 	readonly ids: { docPr: number; revision: number; order: number }
 	readonly objectPreviews: ReadonlyMap<number, string>
+	// Text boxes a group's text box shows (the others show from their own anchor, or after the body).
+	readonly shownBoxes: Set<number>
+}
+
+// The shapes of a group, its subgroups' included.
+function members(group: ArtShape): ArtShape[] {
+	return (group.children ?? []).flatMap(child => (child.children === undefined ? [child] : members(child)))
+}
+
+const GTEXT_UNICODE = 0x00c0
+
+function wordArtText(shape: ArtShape): string | undefined {
+	const text = complexText(shape.properties.get(GTEXT_UNICODE))
+
+	return text === undefined || text.trim() === "" ? undefined : text
+}
+
+function wordArtParagraph(value: string): string {
+	const runs = value
+		.split(/\r\n|\r|\n/u)
+		.map(line => `<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t xml:space="preserve">${text(line)}</w:t></w:r></w:p>`)
+
+	return runs.join("")
 }
 
 function revisionAttrs(conversion: Conversion, revision: DocRevision): string {
@@ -635,7 +658,27 @@ export class StoryWriter {
 		if (shape.children !== undefined) {
 			conversion.report.note("group")
 
-			return this.placeholderDrawing(width, height, placeholder)
+			// The group drawn as a placeholder; the text its shapes hold (text boxes, WordArt) in text boxes of the
+			// group's size where the group is, so no text is left out.
+			let out = this.placeholderDrawing(width, height, placeholder)
+
+			for (const member of members(shape)) {
+				const text = this.boxText(member)
+
+				if (text === undefined) continue
+
+				const look = shapeLook(member, PRESETS.get(member.shapeType) ?? "rect", true)
+
+				out += anchor(
+					shapeGraphic(width, height, look, text, {}),
+					width,
+					height,
+					this.name("Text Box", complexText(member.properties.get(PID.description))),
+					this.placement(placeholder, shape)
+				)
+			}
+
+			return out
 		}
 
 		const transform = shapeTransform(shape)
@@ -658,6 +701,22 @@ export class StoryWriter {
 
 		const preset = PRESETS.get(shape.shapeType)
 		const box = conversion.textBoxes.get(placeholder.spid)
+		const wordArt = box === undefined ? wordArtText(shape) : undefined
+
+		if (wordArt !== undefined) {
+			// WordArt (gtextUNICODE, MS-ODRAW geometry text): its text in a text box of the shape's size.
+			conversion.report.note("wordArt")
+
+			const look: ShapeLook = { preset: "rect", fill: undefined, line: undefined, lineWidth: 0, textBox: true, insets: [0, 0, 0, 0] }
+
+			return anchor(
+				shapeGraphic(width, height, look, wordArtParagraph(wordArt), transform),
+				width,
+				height,
+				this.name("WordArt", description),
+				this.placement(placeholder, shape)
+			)
+		}
 
 		if (preset === undefined && box === undefined) {
 			conversion.report.note(shape.shapeType === 75 ? "picture" : "shape")
@@ -679,6 +738,28 @@ export class StoryWriter {
 		const name = this.name(box !== undefined ? "Text Box" : "Shape", description)
 
 		return anchor(shapeGraphic(width, height, look, content, transform), width, height, name, this.placement(placeholder, shape))
+	}
+
+	// A group member's text, as text box content: its text box story's, or its WordArt text; undefined for none.
+	private boxText(member: ArtShape): string | undefined {
+		const conversion = this.conversion
+		const box = conversion.textBoxes.get(member.spid)
+
+		if (box !== undefined) {
+			conversion.shownBoxes.add(member.spid)
+
+			const content = new StoryWriter(conversion, this.part, box.story.kind, box.story.start, box.story.end).write()
+
+			return content.includes("<w:p>") || content.includes("<w:p/>") ? content : `${content}<w:p/>`
+		}
+
+		const wordArt = wordArtText(member)
+
+		if (wordArt === undefined) return undefined
+
+		conversion.report.note("wordArt")
+
+		return wordArtParagraph(wordArt)
 	}
 
 	private table(table: DocTable): void {

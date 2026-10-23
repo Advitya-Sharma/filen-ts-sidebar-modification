@@ -82,7 +82,7 @@ function refusalOf(error: DocError): DocxLegacyRefusal {
 }
 
 // CryptoAPI RC4 keys hash with SHA-1 on the platform's WebCrypto; without it the file cannot be decrypted here.
-function decryptionOf(password: string): DocDecryption {
+export function decryptionOf(password: string): DocDecryption {
 	return {
 		password,
 		sha1: data =>

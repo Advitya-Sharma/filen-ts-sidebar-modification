@@ -22,7 +22,7 @@ import type { OdsContent, OdsTable, OdsTableProtection } from "./read/content"
 import { NULL_DATE_1899, NULL_DATE_1904 } from "./read/values"
 import type { OdsCellStyles } from "./styles/cell"
 import type { OdsSettings, OdsTableView } from "./settings"
-import { featureParts, type OdsFeatureParts } from "./features"
+import { featurePartsSteps, type OdsFeatureParts } from "./features"
 import { NO_CHARTS, type OdsChartParts } from "./charts/read"
 
 // The read content as the xlsx workbook model: one sheet entry and model per table, the workbook's names, and an
@@ -212,14 +212,15 @@ function absolute(range: SheetRange): string {
 	return `$${column(range.startCol)}$${range.startRow + 1}:$${column(range.endCol)}$${range.endRow + 1}`
 }
 
-export function buildSheets(
+// The workbook's sheets and parts from what was read, in steps (featurePartsSteps' turns), for a sliced open.
+export function* buildSheetsSteps(
 	content: OdsContent,
 	styles: OdsCellStyles,
 	settings: OdsSettings,
 	issues: OdsIssues,
 	prefixes: ReadonlyMap<string, string>,
 	charts: OdsChartParts = NO_CHARTS
-): OdsWorkbookParts {
+): Generator<void, OdsWorkbookParts> {
 	const entries: XlsxSheetEntry[] = []
 	const models: XlsxSheetModel[] = []
 	const definedNames: XlsxDefinedName[] = []
@@ -228,7 +229,7 @@ export function buildSheets(
 		0,
 		content.tables.findIndex(table => table.name === activeName)
 	)
-	const features: OdsFeatureParts = featureParts(content, styles, issues, prefixes, charts, content.unheld)
+	const features: OdsFeatureParts = yield* featurePartsSteps(content, styles, issues, prefixes, charts, content.unheld)
 
 	content.tables.forEach((table: OdsTable, index) => {
 		const id = index
@@ -255,7 +256,12 @@ export function buildSheets(
 
 		model.cols = built.cols
 		model.merges = built.merges
-		model.format = { ...DEFAULT_FORMAT, defaultRowHeight: built.defaultRowHeight, defaultColPx: built.defaultColPx }
+		model.format = {
+			...DEFAULT_FORMAT,
+			defaultRowHeight: built.defaultRowHeight,
+			customHeight: built.defaultRowSet,
+			defaultColPx: built.defaultColPx
+		}
 		model.view = { ...view(settings.tables.get(table.name), settings, index === activeTab), rightToLeft: tableStyle.rightToLeft }
 		model.protection = sheetProtection(table.protection)
 		model.tabColor = tableStyle.tabColor < 0 ? null : { argb: (0xff000000 | tableStyle.tabColor) >>> 0 }

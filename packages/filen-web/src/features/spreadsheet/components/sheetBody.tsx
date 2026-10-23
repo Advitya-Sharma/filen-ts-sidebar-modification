@@ -67,6 +67,7 @@ import { useSheetConditional } from "@/features/spreadsheet/data/cfExtension"
 import { useSheetFormula } from "@/features/spreadsheet/formulaBar/useSheetFormula"
 import { useSheetTouch } from "@/features/spreadsheet/touch/useSheetTouch"
 import { useSheetPrint } from "@/features/spreadsheet/print/useSheetPrint"
+import { commitForExport, liveConversion } from "@/features/spreadsheet/save/sheetConvert"
 import { resolveTheme, useTheme } from "@/providers/themeProvider"
 import { log } from "@/lib/log"
 
@@ -271,6 +272,10 @@ export function SheetBody({
 
 	// Excel's "CSV UTF-8": the sheet on show, as each cell shows; a password-protected workbook's cells stay sealed.
 	// Neither CSV nor PDF of a file that may not be downloaded.
+	// An export stopped by a formula the sheet cannot read says so as the sheet does (one toast, however often asked).
+	const sayInvalidEntry = (): void => {
+		toast.error(t("previewSpreadsheetFormulaInvalid"), { id: "sheet-entry-invalid" })
+	}
 	const downloadCsv =
 		downloadable && handle.info.encrypted === undefined && grid.failed === null
 			? () => {
@@ -280,8 +285,7 @@ export function SheetBody({
 						return
 					}
 
-					void model
-						.commitEditing(null)
+					void commitForExport(model, sayInvalidEntry)
 						.then(done => (done ? downloadSheetCsv(handle, sheet, grid.sheets.length, alt) : null))
 						.then(
 							result => {
@@ -317,7 +321,7 @@ export function SheetBody({
 					}
 
 					startPdf(async () => {
-						if (!(await model.commitEditing(null))) {
+						if (!(await commitForExport(model, sayInvalidEntry))) {
 							return null
 						}
 
@@ -608,6 +612,7 @@ export function SheetBody({
 						text={text}
 						onDownloadCsv={downloadCsv}
 						onDownloadPdf={downloadPdf}
+						liveConversion={liveConversion(handle, kind, alt, () => commitForExport(model, sayInvalidEntry))}
 						onPrint={print.open}
 						onSaveAsXlsx={
 							onSaveAsXlsx === undefined

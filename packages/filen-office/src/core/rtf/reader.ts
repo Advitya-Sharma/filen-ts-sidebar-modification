@@ -148,6 +148,11 @@ interface ShapeState {
 	ignoreX: boolean
 	ignoreY: boolean
 	textbox: boolean
+	// WordArt's text (the gtextUNICODE property), "" for none.
+	wordArt: string
+	// A group (\\shpgrp), and the group a shape is in.
+	readonly group: boolean
+	readonly parent: ShapeState | undefined
 }
 
 interface Frame {
@@ -175,6 +180,9 @@ interface Frame {
 }
 
 interface FieldState {
+	// Its begin's index among the document's field begins (written as a marker: a form field's w:ffData is read
+	// after the begin is).
+	begin: number
 	begun: boolean
 	separated: boolean
 	lock: boolean
@@ -1814,6 +1822,13 @@ class Reader {
 		if (frame.ignorable) {
 			frame.ignorable = false
 
+			if (name === "formfield") {
+				this.formField()
+				this.skipGroup(name)
+
+				return
+			}
+
 			if (!IGNORABLE_READ.has(name) && !SKIPPED.has(name) && !PRESERVED_KIND.has(name)) {
 				if (DESTINATIONS.has(name) && this.destination(name)) return
 
@@ -1824,6 +1839,8 @@ class Reader {
 		}
 
 		if (SKIPPED.has(name) || PRESERVED_KIND.has(name)) {
+			if (name === "formfield") this.formField()
+
 			this.skipGroup(name)
 
 			return
@@ -2087,13 +2104,19 @@ class Reader {
 			}
 			case "shp":
 			case "shpgrp": {
-				if (story === undefined || name === "shpgrp") {
+				// A shape of a group: in the story the group is in.
+				const parent = frame.dest.kind === "shape" && frame.dest.shape.group ? frame.dest.shape : undefined
+				const host = story ?? parent?.story
+
+				if (host === undefined) {
 					this.skipGroup(name, name === "shpgrp" ? "shapeGroup" : "shape")
 					return true
 				}
 
 				const shape: ShapeState = {
-					story,
+					story: host,
+					group: name === "shpgrp",
+					parent,
 					picture: undefined,
 					name: "",
 					left: 0,
@@ -2109,7 +2132,8 @@ class Reader {
 					relVProp: -1,
 					ignoreX: false,
 					ignoreY: false,
-					textbox: false
+					textbox: false,
+					wordArt: ""
 				}
 				const start = this.frame.start
 
@@ -2117,8 +2141,11 @@ class Reader {
 				frame.onEnd = () => {
 					const end = this.tokens.position
 
-					this.preserve(shape.textbox ? "textbox" : "shape", shape.name, start, end)
+					// A group's shapes are in its source range.
+					if (parent === undefined)
+						this.preserve(shape.group ? "shapeGroup" : shape.textbox ? "textbox" : "shape", shape.name, start, end)
 					if (shape.picture !== undefined) this.anchoredPicture(shape)
+					if (shape.wordArt !== "" && !shape.textbox) this.wordArt(shape)
 				}
 				return true
 			}
@@ -2131,9 +2158,12 @@ class Reader {
 				}
 				return false
 			case "shptxt":
-				if (frame.dest.kind === "shape") frame.dest.shape.textbox = true
-				this.skipGroup(name, "textbox")
-				return true
+				if (frame.dest.kind !== "shape") {
+					this.skipGroup(name, "textbox")
+					return true
+				}
+
+				return this.shapeText(frame.dest.shape)
 			case "sp":
 				if (frame.dest.kind === "shape" || frame.dest.kind === "picprop") return true
 				return this.ignoreGroup()
@@ -2368,7 +2398,16 @@ class Reader {
 
 		story.touch(this.frame.start)
 
-		const field: FieldState = { begun: false, separated: false, lock: false, dirty: false, story, instruction: "", result: false }
+		const field: FieldState = {
+			begin: -1,
+			begun: false,
+			separated: false,
+			lock: false,
+			dirty: false,
+			story,
+			instruction: "",
+			result: false
+		}
 
 		this.fields.push(field)
 		this.frame.dest = { kind: "ignore" }
@@ -2400,6 +2439,91 @@ class Reader {
 		story.inline(xml, props.xml(this.doc), props.deleted ? "delText" : "t", this.revision(props))
 	}
 
+	// A form field's properties (\\*\\formfield, RTF 1.9.1): its field's w:ffData (ECMA-376 Part 1 §17.16.17), read
+	// ahead in the group (which stays in the source, as before).
+	private formField(): void {
+		const field = this.fields.at(-1)
+
+		if (field === undefined || field.begin < 0) return
+
+		const ahead = new RtfTokenizer(this.bytes, this.tokens.position)
+		const words = new Map<string, number>()
+		const texts = new Map<string, string>()
+		const items: string[] = []
+		// Text bytes in the field's code page, characters after \uN skipped as \ucN says (per group), as the body's are.
+		const codepage = this.codepage()
+		const ucs: number[] = [this.frame.uc]
+		const pending: number[] = []
+		let depth = 1
+		// The text destination being read (\ffname...) and the depth its group opened at.
+		let destination = ""
+		let at = 0
+		let text = ""
+		let skip = 0
+		const flush = (): void => {
+			if (pending.length === 0) return
+
+			text += decodeCodepage(Uint8Array.from(pending), 0, pending.length, codepage)
+			pending.length = 0
+		}
+		const byte = (value: number): void => {
+			if (skip > 0) skip--
+			else pending.push(value)
+		}
+
+		while (depth > 0) {
+			const kind = ahead.next()
+
+			if (kind === Token.End) break
+			if (kind === Token.GroupStart) {
+				depth++
+				ucs.push(ucs.at(-1) ?? 1)
+
+				continue
+			}
+
+			if (kind === Token.GroupEnd) {
+				if (destination !== "" && depth === at) {
+					flush()
+
+					if (destination === "ffl") items.push(text)
+					else texts.set(destination, text)
+
+					destination = ""
+					text = ""
+				}
+
+				depth--
+				ucs.pop()
+				skip = 0
+
+				continue
+			}
+
+			if (kind === Token.Word) {
+				if (ahead.name === "uc") ucs[ucs.length - 1] = Math.max(0, Math.min(ahead.param, 64))
+				else if (destination === "" && FORM_TEXTS.has(ahead.name)) {
+					destination = ahead.name
+					at = depth
+				} else if (destination === "") words.set(ahead.name, ahead.param)
+				else if (ahead.name === "u") {
+					flush()
+					text += String.fromCharCode(ahead.param < 0 ? ahead.param + 65_536 : ahead.param)
+					skip = ucs.at(-1) ?? 1
+				}
+
+				continue
+			}
+
+			if (destination === "") continue
+
+			if (kind === Token.Text) for (let k = ahead.textStart; k < ahead.textEnd; k++) byte(this.bytes[k] ?? 0)
+			else if (kind === Token.Hex && ahead.value >= 0) byte(ahead.value)
+		}
+
+		this.doc.formField(field.begin, ffData(words, texts, items))
+	}
+
 	private fieldInstructions(): boolean {
 		const field = this.fields.at(-1)
 
@@ -2407,10 +2531,10 @@ class Reader {
 
 		if (!field.begun) {
 			field.begun = true
-			this.inlineIn(
-				field.story,
-				`<w:fldChar w:fldCharType="begin"${field.lock ? ' w:fldLock="1"' : ""}${field.dirty ? ' w:dirty="1"' : ""}/>`
+			field.begin = this.doc.fieldBegin(
+				`<w:fldChar w:fldCharType="begin"${field.lock ? ' w:fldLock="1"' : ""}${field.dirty ? ' w:dirty="1"' : ""}`
 			)
+			this.inlineIn(field.story, `${MARK}F${String(field.begin)}${MARK}`)
 		}
 
 		this.frame.dest = { kind: "story", story: field.story, mode: "instr" }
@@ -2606,7 +2730,77 @@ class Reader {
 
 			for (const block of content.blocks) story.insert(block, depthInTable)
 
+			story.relationships.push(...content.relationships)
+
 			this.preserve("drawingObject", "do", start, this.tokens.position)
+		}
+
+		return true
+	}
+
+	// WordArt: its text as a paragraph positioned as the shape (as a text box's are), centred; the shape stays in
+	// the source.
+	private wordArt(shape: ShapeState): void {
+		const para = new ParaProps()
+
+		para.frame = this.shapeFrame(shape)
+		para.jc = "center"
+
+		const content = new Story(this.doc)
+
+		content.text(shape.wordArt, "", "t", "")
+		// Ends in the shape's own range (its closing brace), as a text box's paragraphs do: the proof reads it with
+		// the shape.
+		content.paragraph(
+			para.xml(this.doc, list => this.doc.numId(list)),
+			0,
+			false,
+			this.tokens.start
+		)
+
+		for (const block of content.blocks) shape.story.insert(block, this.frame.para.depth())
+	}
+
+	// The paragraph frame (w:framePr) a shape's text is positioned in: where the shape is, its size.
+	private shapeFrame(shape: ShapeState): Positioned {
+		const place = shapePlace(shape)
+		const box = newFrame()
+
+		box.hAnchor = place.relH === "page" ? "page" : place.relH === "margin" ? "margin" : "text"
+		box.vAnchor = place.relV === "page" ? "page" : place.relV === "margin" ? "margin" : "text"
+		box.x = place.left
+		box.y = place.top
+		box.width = Math.max(0, place.right - place.left)
+		box.height = Math.max(0, place.bottom - place.top)
+		box.wrap = shape.wrap === 1 ? "notBeside" : shape.wrap === 3 ? "none" : "around"
+
+		return box
+	}
+
+	// A text box's text (\\shptxt): its paragraphs positioned as the shape (w:framePr: where it is and its size, as
+	// the Word 6/95 \\do text boxes are), before the paragraph it is anchored in. The box's line, fill and shape
+	// stay in the source (reported as the text box kept so).
+	private shapeText(shape: ShapeState): boolean {
+		const frame = this.frame
+		const box = this.shapeFrame(shape)
+
+		shape.textbox = true
+
+		const content = new Story(this.doc)
+		const depthInTable = frame.para.depth()
+
+		frame.box = box
+		frame.dest = { kind: "story", story: content, mode: "text" }
+		frame.para = new ParaProps()
+		frame.paraOwned = true
+		frame.onEnd = () => {
+			this.flush()
+			content.finish(this.paraXml(new ParaProps(), new CharProps(), undefined), this.tokens.start)
+
+			for (const block of content.blocks) shape.story.insert(block, depthInTable)
+
+			// Pictures in the box are related from the part the box's paragraphs are written to.
+			shape.story.relationships.push(...content.relationships)
 		}
 
 		return true
@@ -2631,11 +2825,13 @@ class Reader {
 
 		if (picture === undefined) return
 
+		const place = shapePlace(shape)
+
 		const story = shape.story
 		const id = this.doc.media(story, picture)
 		const docPr = this.doc.nextDrawingId()
-		const width = Math.max(1, shape.right - shape.left)
-		const height = Math.max(1, shape.bottom - shape.top)
+		const width = Math.max(1, place.right - place.left)
+		const height = Math.max(1, place.bottom - place.top)
 		const cx = Math.round(width * 635)
 		const cy = Math.round(height * 635)
 		const relH =
@@ -2643,12 +2839,12 @@ class Reader {
 				? (["margin", "page", "column", "character", "leftMargin", "rightMargin", "insideMargin", "outsideMargin"][
 						shape.relHProp
 					] ?? "column")
-				: shape.relH
+				: place.relH
 		const relV =
 			shape.ignoreY && shape.relVProp >= 0
 				? (["margin", "page", "paragraph", "line", "topMargin", "bottomMargin", "insideMargin", "outsideMargin"][shape.relVProp] ??
 					"paragraph")
-				: shape.relV
+				: place.relV
 		const side = ["bothSides", "left", "right", "largest"][shape.wrapSide] ?? "bothSides"
 		const wrap =
 			shape.wrap === 1
@@ -2663,7 +2859,7 @@ class Reader {
 
 		this.inlineIn(
 			story,
-			`<w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="${docPr}" behindDoc="${shape.behind ? 1 : 0}" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="${relH}"><wp:posOffset>${Math.round(shape.left * 635)}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="${relV}"><wp:posOffset>${Math.round(shape.top * 635)}</wp:posOffset></wp:positionV><wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>${wrap}<wp:docPr id="${docPr}" name="Picture ${docPr}"/>${graphic(id, { ...picture, cx, cy }, docPr)}</wp:anchor></w:drawing>`
+			`<w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="${docPr}" behindDoc="${shape.behind ? 1 : 0}" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="${relH}"><wp:posOffset>${Math.round(place.left * 635)}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="${relV}"><wp:posOffset>${Math.round(place.top * 635)}</wp:posOffset></wp:positionV><wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>${wrap}<wp:docPr id="${docPr}" name="Picture ${docPr}"/>${graphic(id, { ...picture, cx, cy }, docPr)}</wp:anchor></w:drawing>`
 		)
 	}
 
@@ -2723,6 +2919,7 @@ class Reader {
 		if (name === "posrelh") shape.relHProp = Number(value)
 		else if (name === "posrelv") shape.relVProp = Number(value)
 		else if (name === "fBehindDocument") shape.behind = value === "1"
+		else if (name === "gtextUNICODE") shape.wordArt = value
 	}
 
 	private pictWord(picture: PictureBuilder, name: string, param: number, hasParam: boolean): void {
@@ -4306,4 +4503,99 @@ export function symbolField(instruction: string): string | undefined {
 	}
 
 	return `<w:t>${escapeText(String.fromCodePoint(code))}</w:t>`
+}
+
+// Where a shape is: its own place, or for a shape of a group the group's place (a group's shapes are placed in its
+// coordinate space, which the reader does not scale: they show at the group's corner, each at its own size).
+function shapePlace(shape: ShapeState): { left: number; top: number; right: number; bottom: number; relH: string; relV: string } {
+	let outer = shape
+
+	while (outer.parent !== undefined) outer = outer.parent
+
+	if (outer === shape) return shape
+
+	return {
+		left: outer.left,
+		top: outer.top,
+		right: outer.left + (shape.right - shape.left),
+		bottom: outer.top + (shape.bottom - shape.top),
+		relH: outer.relH,
+		relV: outer.relV
+	}
+}
+
+// Destinations of \\formfield holding text.
+const FORM_TEXTS = new Set(["ffname", "ffdeftext", "ffformat", "ffhelptext", "ffstattext", "ffentrymcr", "ffexitmcr", "ffl"])
+const TEXT_TYPES = ["regular", "number", "date", "currentDate", "currentTime", "calculated"]
+
+// w:ffData (ECMA-376 Part 1 §17.16.17) of a form field's RTF properties: \\fftype 0 text, 1 check box, 2 drop-down.
+// The longest value each form field text may be, in UTF-16 units, as Office and the Open XML SDK validate them (the
+// schema's own maxLength is looser: ECMA-376 Part 1 §17.18 ST_FFName 65, ST_FFHelpTextVal 256): a name 20, a macro 33,
+// help 255, status 140, a default or drop-down entry 255, a format 64; 25 drop-down entries, an index among them, a
+// maximum length up to 32767. Longer values are cut to them.
+const FORM_TEXT_LIMITS: Readonly<Record<string, number>> = {
+	ffname: 20,
+	ffentrymcr: 33,
+	ffexitmcr: 33,
+	ffhelptext: 255,
+	ffstattext: 140,
+	ffdeftext: 255,
+	ffformat: 64,
+	ffl: 255
+}
+const FORM_LIST_ENTRIES = 25
+const FORM_MAX_LENGTH = 32_767
+
+// `text` cut to `limit` UTF-16 units, never inside a surrogate pair.
+function cutUtf16(text: string, limit: number): string {
+	if (text.length <= limit) return text
+
+	const code = text.charCodeAt(limit - 1)
+
+	return text.slice(0, code >= 0xd800 && code <= 0xdbff ? limit - 1 : limit)
+}
+
+function ffData(words: ReadonlyMap<string, number>, texts: ReadonlyMap<string, string>, items: readonly string[]): string {
+	const clamp = (name: string, text: string): string => cutUtf16(text, FORM_TEXT_LIMITS[name] ?? text.length)
+	const value = (name: string): string => ` w:val="${escapeAttribute(clamp(name, texts.get(name) ?? ""))}"`
+	const type = words.get("fftype") ?? 0
+	let out = `<w:ffData><w:name${value("ffname")}/><w:enabled/><w:calcOnExit w:val="${words.get("ffrecalc") === 1 ? 1 : 0}"/>`
+
+	if (texts.has("ffentrymcr")) out += `<w:entryMacro${value("ffentrymcr")}/>`
+	if (texts.has("ffexitmcr")) out += `<w:exitMacro${value("ffexitmcr")}/>`
+	if (texts.has("ffhelptext")) out += `<w:helpText w:type="text"${value("ffhelptext")}/>`
+	if (texts.has("ffstattext")) out += `<w:statusText w:type="text"${value("ffstattext")}/>`
+
+	if (type === 1) {
+		const size = words.get("ffhps")
+
+		out += `<w:checkBox>${size === undefined || size <= 0 || words.get("ffsize") === 0 ? "<w:sizeAuto/>" : `<w:size w:val="${size}"/>`}<w:default w:val="${words.get("ffdefres") === 1 ? 1 : 0}"/>`
+		out += words.has("ffres") && words.get("ffres") !== 25 ? `<w:checked w:val="${words.get("ffres") === 1 ? 1 : 0}"/>` : ""
+		out += "</w:checkBox>"
+	} else if (type === 2) {
+		const result = words.get("ffres")
+
+		// An index among the entries kept (\\ffres 25: none chosen).
+		const last = Math.max(0, Math.min(items.length, FORM_LIST_ENTRIES) - 1)
+
+		out += "<w:ddList>"
+		out += result !== undefined && result !== 25 && result >= 0 ? `<w:result w:val="${Math.min(result, last)}"/>` : ""
+		out += `<w:default w:val="${Math.min(Math.max(0, words.get("ffdefres") ?? 0), last)}"/>`
+		out += items
+			.slice(0, FORM_LIST_ENTRIES)
+			.map(item => `<w:listEntry w:val="${escapeAttribute(clamp("ffl", item))}"/>`)
+			.join("")
+		out += "</w:ddList>"
+	} else {
+		const kind = TEXT_TYPES[words.get("fftypetxt") ?? 0] ?? "regular"
+		const max = words.get("ffmaxlen") ?? 0
+
+		out += `<w:textInput>${kind === "regular" ? "" : `<w:type w:val="${kind}"/>`}`
+		out += texts.has("ffdeftext") ? `<w:default${value("ffdeftext")}/>` : ""
+		out += max > 0 ? `<w:maxLength w:val="${Math.min(max, FORM_MAX_LENGTH)}"/>` : ""
+		out += texts.has("ffformat") ? `<w:format${value("ffformat")}/>` : ""
+		out += "</w:textInput>"
+	}
+
+	return `${out}</w:ffData>`
 }

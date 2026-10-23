@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import type { File as SdkFile } from "@filen/sdk-rs"
-import { OpcPackage, bytesSource } from "@filen/office/core/opc"
+import { ZipArchive, bytesSource } from "@filen/office/core/opc"
 
 const { uploadFileBytes, nameTakenInDirectory, driveListingQueryUpdate, cachedListing, isDriveListingCurrent, toastInfo } = vi.hoisted(
 	() => ({
@@ -44,6 +44,8 @@ import { narrowItem } from "@/features/drive/lib/item"
 const TAKEN = "A file or directory with this name already exists here."
 const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+const ODT_MIME = "application/vnd.oasis.opendocument.text"
+const ODS_MIME = "application/vnd.oasis.opendocument.spreadsheet"
 
 beforeEach(() => {
 	nameTakenInDirectory.mockResolvedValue(false)
@@ -94,8 +96,19 @@ async function openOffice(): Promise<void> {
 	})
 }
 
-async function choose(entry: "Document (.docx)" | "Spreadsheet (.xlsx)"): Promise<HTMLInputElement> {
+async function openOpenDocument(): Promise<void> {
 	await openOffice()
+	await act(async () => {
+		fireEvent.click(await screen.findByRole("menuitem", { name: "OpenDocument" }))
+		await Promise.resolve()
+	})
+}
+
+type Entry = "Document (.docx)" | "Spreadsheet (.xlsx)" | "Text (.odt)" | "Spreadsheet (.ods)"
+
+async function choose(entry: Entry): Promise<HTMLInputElement> {
+	if (entry.endsWith("(.odt)") || entry.endsWith("(.ods)")) await openOpenDocument()
+	else await openOffice()
 	fireEvent.click(await screen.findByRole("menuitem", { name: entry }))
 
 	const field = await screen.findByLabelText("Name")
@@ -111,7 +124,12 @@ function submit(field: HTMLInputElement, name?: string): void {
 }
 
 async function part(bytes: Uint8Array, name: string): Promise<string> {
-	return new TextDecoder().decode(await (await OpcPackage.open(bytesSource(bytes))).read(name))
+	const zip = await ZipArchive.open(bytesSource(bytes))
+	const entry = zip.get(name)
+
+	if (entry === undefined) throw new Error(`No part ${name}`)
+
+	return new TextDecoder().decode(await zip.read(entry))
 }
 
 describe("New ▸ Office", () => {
@@ -121,6 +139,27 @@ describe("New ▸ Office", () => {
 
 		expect((await screen.findByRole("menuitem", { name: "Document (.docx)" })).textContent).toBe("Document (.docx)")
 		expect(screen.getByRole("menuitem", { name: "Spreadsheet (.xlsx)" }).textContent).toBe("Spreadsheet (.xlsx)")
+	})
+
+	it("offers OpenDocument ▸ Text and Spreadsheet after the Office Open XML entries, a rule between", async () => {
+		renderMenu()
+		await openOffice()
+
+		const office = (await screen.findByRole("menuitem", { name: "Document (.docx)" })).closest("[role=menu]")
+
+		expect(
+			[...(office?.querySelectorAll("[role=menuitem], [role=separator]") ?? [])].map(entry =>
+				entry.getAttribute("role") === "separator" ? "─" : entry.textContent
+			)
+		).toEqual(["Document (.docx)", "Spreadsheet (.xlsx)", "─", "OpenDocument"])
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("menuitem", { name: "OpenDocument" }))
+			await Promise.resolve()
+		})
+
+		expect((await screen.findByRole("menuitem", { name: "Text (.odt)" })).textContent).toBe("Text (.odt)")
+		expect(screen.getByRole("menuitem", { name: "Spreadsheet (.ods)" }).textContent).toBe("Spreadsheet (.ods)")
 	})
 
 	it("is disabled offline where the menu stays open offline", () => {
@@ -213,6 +252,43 @@ describe("New ▸ Office", () => {
 
 		expect([name, mime]).toEqual(["Budget.xlsx", XLSX_MIME])
 		expect(await part(bytes ?? new Uint8Array(), "xl/workbook.xml")).toContain('<sheet name="Sheet1"')
+	})
+
+	it("uploads a blank OpenDocument text document under its type and opens it", async () => {
+		uploadFileBytes.mockResolvedValue(created("Letter.odt"))
+		const { openPreview } = renderMenu()
+		const field = await choose("Text (.odt)")
+
+		expect(screen.getByRole("heading", { name: "New document" })).toBeTruthy()
+		expect(field.value).toBe("Untitled document.odt")
+		submit(field, "Letter")
+
+		await waitFor(() => {
+			expect(openPreview).toHaveBeenCalledOnce()
+		})
+
+		const [parent, bytes, name, mime] = uploadFileBytes.mock.calls[0] ?? []
+
+		expect([parent, name, mime]).toEqual(["parent", "Letter.odt", ODT_MIME])
+		expect(await part(bytes ?? new Uint8Array(), "styles.xml")).toContain('style:font-name="Calibri" fo:font-size="11pt"')
+	})
+
+	it("uploads a blank OpenDocument spreadsheet with its sheet in the user's language", async () => {
+		uploadFileBytes.mockResolvedValue(created("Budget.ods"))
+		const { openPreview } = renderMenu()
+		const field = await choose("Spreadsheet (.ods)")
+
+		expect(screen.getByRole("heading", { name: "New spreadsheet" })).toBeTruthy()
+		submit(field, "Budget")
+
+		await waitFor(() => {
+			expect(openPreview).toHaveBeenCalledOnce()
+		})
+
+		const [, bytes, name, mime] = uploadFileBytes.mock.calls[0] ?? []
+
+		expect([name, mime]).toEqual(["Budget.ods", ODS_MIME])
+		expect(await part(bytes ?? new Uint8Array(), "content.xml")).toContain('table:name="Sheet1"')
 	})
 
 	it("says when the new file's name hides it from the listing", async () => {

@@ -9,7 +9,7 @@ import { mockSharedFile } from "@/tests/fixtures/sdk"
 vi.mock("@/queries/client", () => ({ queryClient: new QueryClient() }))
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
-import { canDownloadAs, downloadAsSource, downloadAsTargets } from "@/features/drive/lib/downloadAs.logic"
+import { DOWNLOAD_AS_TARGETS, canDownloadAs, downloadAsSource, downloadAsTargets } from "@/features/drive/lib/downloadAs.logic"
 import { applyOfflineGate, driveItemActions } from "@/features/drive/components/itemMenu.logic"
 import { driveBulkActions, isBulkActionOfflineDisabled } from "@/features/drive/components/bulkActionBar.logic"
 import { aggregateDriveSelectionFlags } from "@/features/drive/lib/selectionFlags"
@@ -89,9 +89,42 @@ describe("downloadAsSource", () => {
 
 describe("downloadAsTargets", () => {
 	it("offers PDF for documents, spreadsheets and a mix of both", () => {
-		expect(downloadAsTargets([file("a.docx")])).toEqual([["pdf"]])
-		expect(downloadAsTargets([file("a.ods")])).toEqual([["pdf"]])
+		expect(downloadAsTargets([file("a.docx")])[0]).toEqual(["pdf"])
+		expect(downloadAsTargets([file("a.ods")])[0]).toEqual(["pdf"])
 		expect(downloadAsTargets([file("a.rtf"), file("b.xls")])).toEqual([["pdf"]])
+	})
+
+	it("offers the editable formats a document converts to after the PDF, never the file's own", () => {
+		for (const extension of ["docx", "docm", "dotx", "dotm"])
+			expect(downloadAsTargets([file(`a.${extension}`)]), extension).toEqual([["pdf"], ["odt"]])
+		for (const extension of ["odt", "ott"]) expect(downloadAsTargets([file(`a.${extension}`)]), extension).toEqual([["pdf"], ["docx"]])
+		for (const extension of ["rtf", "doc", "dot"])
+			expect(downloadAsTargets([file(`a.${extension}`)]), extension).toEqual([["pdf"], ["docx", "odt"]])
+	})
+
+	it("offers the editable formats a spreadsheet converts to after the PDF, never the file's own", () => {
+		for (const extension of ["xlsx", "xlsm", "xltx", "xltm"])
+			expect(downloadAsTargets([file(`a.${extension}`)]), extension).toEqual([["pdf"], ["ods"]])
+		for (const extension of ["ods", "ots"]) expect(downloadAsTargets([file(`a.${extension}`)]), extension).toEqual([["pdf"], ["xlsx"]])
+		for (const extension of ["xls", "xlt", "csv", "tsv", "tab"])
+			expect(downloadAsTargets([file(`a.${extension}`)]), extension).toEqual([["pdf"], ["xlsx", "ods"]])
+	})
+
+	it("offers in bulk only the formats every file converts to and none is already in", () => {
+		expect(downloadAsTargets([file("a.docx"), file("b.rtf")])).toEqual([["pdf"], ["odt"]])
+		expect(downloadAsTargets([file("a.docx"), file("b.odt")])).toEqual([["pdf"]])
+		expect(downloadAsTargets([file("a.xls"), file("b.csv")])).toEqual([["pdf"], ["xlsx", "ods"]])
+		expect(downloadAsTargets([file("a.docx"), file("b.ods")])).toEqual([["pdf"]])
+	})
+
+	it("names each target's download by its own extension", () => {
+		expect(Object.fromEntries(Object.entries(DOWNLOAD_AS_TARGETS).map(([target, def]) => [target, def.extension]))).toEqual({
+			pdf: "pdf",
+			docx: "docx",
+			odt: "odt",
+			xlsx: "xlsx",
+			ods: "ods"
+		})
 	})
 
 	it("offers nothing when any item exports to nothing, or for no items", () => {

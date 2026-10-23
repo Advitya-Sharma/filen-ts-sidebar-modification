@@ -1,4 +1,4 @@
-import type { SliceClock } from "../../slicing"
+import { runSliced, type SliceClock } from "../../slicing"
 import type { SharedStrings } from "../../xlsx/model/sharedStrings"
 import { SHEET_MAX_COLS } from "../../sheet/protocol"
 import { CellKind } from "../../xlsx/model/types"
@@ -8,7 +8,7 @@ import type { OdsCellStyles } from "../styles/cell"
 import { OdsReadError } from "./errors"
 import { A, E, OdsScanner, UNKNOWN, type ScanHandler } from "./scan"
 import { OdsSheetBuilder, type OdsBuiltSheet, type OdsCellInput, type OdsRowInput } from "./sheet"
-import { capturedElement } from "./captured"
+import { capturedElement, capturedValidationsSteps } from "./captured"
 import { dateValue, durationValue, nullDate, NULL_DATE_1899 } from "./values"
 import type { OdfElement } from "../../odf/tree"
 import { decodeUtf8 } from "../../xml/index"
@@ -51,6 +51,8 @@ export interface OdsContent {
 	readonly nullDate: number
 	readonly calculation: OdfElement | undefined
 	readonly validations: OdfElement | undefined
+	// The validations' messages by name, their text in document order.
+	readonly validationMessages: ReadonlyMap<string, { readonly help: string; readonly error: string }>
 	readonly names: readonly OdfElement[]
 	readonly databaseRanges: OdfElement | undefined
 	readonly structureProtected: boolean
@@ -136,6 +138,8 @@ export class ContentReader implements ScanHandler {
 	private captures = 0
 	private calculation: OdfElement | undefined
 	private validations: OdfElement | undefined
+	private validationMessages = new Map<string, { help: string; error: string }>()
+	private pendingValidations: { readonly markup: Uint8Array; readonly prefixes: ReadonlyMap<string, string> } | null = null
 	private databaseRanges: OdfElement | undefined
 	private nullDateDays = NULL_DATE_1899
 	private structureProtected = false
@@ -238,14 +242,30 @@ export class ContentReader implements ScanHandler {
 		}
 
 		this.scanner.end()
+		await runSliced(this.settleValidations(), clock)
 
 		return this.content()
+	}
+
+	// The validations captured, read (capturedValidationsSteps).
+	private *settleValidations(): Generator<void, void> {
+		const pending = this.pendingValidations
+
+		if (pending === null) return
+
+		this.pendingValidations = null
+		;({ element: this.validations, messages: this.validationMessages } = yield* capturedValidationsSteps(
+			pending.markup,
+			pending.prefixes
+		))
 	}
 
 	// A small piece of markup read at once (a few rows the writer reads back as the reader does).
 	readBytes(bytes: Uint8Array): OdsContent {
 		this.scanner.push(bytes)
 		this.scanner.end()
+
+		for (const steps = this.settleValidations(); steps.next().done !== true;);
 
 		return this.content()
 	}
@@ -256,6 +276,7 @@ export class ContentReader implements ScanHandler {
 			nullDate: this.nullDateDays,
 			calculation: this.calculation,
 			validations: this.validations,
+			validationMessages: this.validationMessages,
 			names: this.names,
 			databaseRanges: this.databaseRanges,
 			structureProtected: this.structureProtected,
@@ -436,7 +457,8 @@ export class ContentReader implements ScanHandler {
 				break
 			}
 			case E["table:content-validations"]:
-				this.validations = capturedElement(markup, prefixes)
+				// Read once the stream is through, in steps (a sheet's many validations are one element).
+				this.pendingValidations = { markup: markup.slice(), prefixes }
 				break
 			case E["table:named-expressions"]:
 				if (this.table === null) this.names.push(capturedElement(markup, prefixes))
@@ -752,7 +774,9 @@ export class ContentReader implements ScanHandler {
 
 		let valueType = NONE
 
-		if (scanner.is(A["calcext:value-type"], "error")) {
+		// An error result is a formula's (LibreOffice reads calcext:value-type on a formula cell only, and shows any
+		// other cell's value).
+		if (scanner.is(A["calcext:value-type"], "error") && scanner.has(A["table:formula"])) {
 			valueType = ERROR
 		} else {
 			switch (scanner.match(A["office:value-type"], VALUE_TYPES)) {
@@ -765,6 +789,9 @@ export class ContentReader implements ScanHandler {
 				case 3:
 					valueType = STRING
 					this.stringValue = scanner.attribute(A["office:string-value"])
+
+					// An error result without its formula: LibreOffice shows the paragraph's text, not an empty value.
+					if (this.stringValue === "" && scanner.is(A["calcext:value-type"], "error")) this.stringValue = undefined
 					break
 				case 4:
 					valueType = DATE

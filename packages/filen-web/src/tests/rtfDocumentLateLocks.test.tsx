@@ -28,6 +28,7 @@ vi.mock("@/features/preview/lib/docxEngine", () => ({
 					take: () => Promise.resolve(new Uint8Array([1, 2, 3])),
 					prove: () => state.prove(),
 					write: () => Promise.reject(new Error("no writes in this test")),
+					convertEdited: () => Promise.reject(new Error("no conversions in this test")),
 					release: () => {
 						state.released += 1
 					}

@@ -196,22 +196,31 @@ export async function unlockOfficePackage(
 		await verifyStandard(key, info)
 
 		const plaintext = await decryptStandard(key, encryptedPackage, size, turns)
-		// Only H0 of the Agile encryptor a seal will write is taken now: the password is not kept, and the spin
-		// waits for a seal (a session that only views never pays it).
-		const salt = randomBytes(UPGRADE_SALT_SIZE)
-		const h0 = await firstHash(UPGRADE_HASH, salt, password)
 
-		return {
-			ok: true,
-			key: register("standard", undefined, { h0, salt, spinCount: upgradeSpinCount }),
-			plaintext,
-			integrity: "unchecked"
-		}
+		return { ok: true, key: await upgradeKey("standard", password, upgradeSpinCount), plaintext, integrity: "unchecked" }
 	} catch (error) {
 		if (error instanceof OfficeCryptoError) return { ok: false, reason: error.code, message: error.message }
 
 		throw error
 	}
+}
+
+// Only H0 of the Agile encryptor a seal will write is taken now: the password is not kept, and the spin waits for a
+// seal (a session that only views never pays it).
+async function upgradeKey(scheme: OfficeKey["scheme"], password: string, spinCount: number): Promise<OfficeKey> {
+	const salt = randomBytes(UPGRADE_SALT_SIZE)
+	const h0 = await firstHash(UPGRADE_HASH, salt, password)
+
+	return register(scheme, undefined, { h0, salt, spinCount })
+}
+
+// A new key for `password`, for a file that had no Office encryption to keep (a Word 97–2003 document's password to
+// open, carried over to the .docx it converts to): sealed as Agile with a new intermediate key and a password key
+// encryptor of `spinCount` spins (§2.3.4.10-§2.3.4.11), derived at the first seal. Release it once done.
+export function passwordOfficeKey(password: string, spinCount = AGILE_DEFAULT_SPIN_COUNT): Promise<OfficeKey> {
+	if (!Number.isInteger(spinCount) || spinCount < 0 || spinCount > MAX_SPIN_COUNT) throw new RangeError("spinCount is out of range")
+
+	return upgradeKey("agile", password, spinCount)
 }
 
 // Drops the key's state; an upgrade spin under way stops at its next turn.

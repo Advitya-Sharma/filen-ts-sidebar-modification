@@ -15,10 +15,14 @@ export const previewDocxLegacy = {
 	previewDocxLegacyShapes_one: "{{count}} drawing shape, shown as a placeholder",
 	/** Docx viewer — as previewDocxLegacyShapes_one, for several */
 	previewDocxLegacyShapes_other: "{{count}} drawing shapes, shown as placeholders",
-	/** Docx viewer — not-converted list item: groups of shapes shown as placeholder boxes */
-	previewDocxLegacyGroups_one: "{{count}} group of shapes, shown as a placeholder",
+	/** Docx viewer — not-converted list item: groups of shapes shown as placeholder boxes, with the text their shapes hold in text boxes */
+	previewDocxLegacyGroups_one: "{{count}} group of shapes, shown as a placeholder with its text",
 	/** Docx viewer — as previewDocxLegacyGroups_one, for several */
-	previewDocxLegacyGroups_other: "{{count}} groups of shapes, shown as placeholders",
+	previewDocxLegacyGroups_other: "{{count}} groups of shapes, shown as placeholders with their text",
+	/** Docx viewer — not-converted list item: WordArt (decorative text, e.g. a "DRAFT" watermark) shown as plain text in a box */
+	previewDocxLegacyWordArt_one: "{{count}} WordArt item, shown as plain text",
+	/** Docx viewer — as previewDocxLegacyWordArt_one, for several */
+	previewDocxLegacyWordArt_other: "{{count}} WordArt items, shown as plain text",
 	/** Docx viewer — not-converted list item: embedded objects (spreadsheets, charts…) of which only the picture is kept */
 	previewDocxLegacyObjects_one: "{{count}} embedded object, shown as its picture",
 	/** Docx viewer — as previewDocxLegacyObjects_one, for several */

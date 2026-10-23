@@ -4,8 +4,10 @@
 export type DocNotConvertedKind =
 	// A floating shape other than a picture, text box or simple preset shape: shown as a placeholder picture.
 	| "shape"
-	// A group of shapes: shown as a placeholder picture.
+	// A group of shapes: shown as a placeholder picture, the text its shapes hold in text boxes where it is.
 	| "group"
+	// WordArt: its text in a text box of the shape's size (not drawn as WordArt).
+	| "wordArt"
 	// The data of an embedded object (only its picture is shown).
 	| "embeddedObject"
 	// A picture whose data could not be read or is in a format the document cannot show: a placeholder picture.

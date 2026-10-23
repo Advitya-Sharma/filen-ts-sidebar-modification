@@ -6,6 +6,7 @@ import { runCreateFile, type CreateFileOutcome } from "@/features/drive/lib/crea
 import {
 	OFFICE_FILE_MIME,
 	freeOfficeFileName,
+	isOfficeDocumentKind,
 	normalizeOfficeFileName,
 	officeFileBytes,
 	type NewOfficeKind
@@ -56,7 +57,8 @@ export function useNewOfficeFile({ parentUuid, openPreview, hiddenNotice }: UseN
 	const [takenName, setTakenName] = useState<string | null>(null)
 
 	// Read in the render that opens the dialog, which already points at the directory the action chose.
-	const untitled = shownKind === "docx" ? t("driveNewDocxUntitled") : t("driveNewXlsxUntitled")
+	const document = isOfficeDocumentKind(shownKind)
+	const untitled = document ? t("driveNewDocxUntitled") : t("driveNewXlsxUntitled")
 	const initialName = kind === null ? "" : freeOfficeFileName(untitled, kind, currentNames(parentUuid))
 
 	function normalized(name: string): string {
@@ -120,8 +122,8 @@ export function useNewOfficeFile({ parentUuid, openPreview, hiddenNotice }: UseN
 				open={kind !== null}
 				pending={pending}
 				// The kind shown stays while the dialog closes, so its title does not change mid-animation.
-				title={shownKind === "docx" ? t("driveNewDocxTitle") : t("driveNewXlsxTitle")}
-				body={shownKind === "docx" ? t("driveNewDocxBody") : t("driveNewXlsxBody")}
+				title={document ? t("driveNewDocxTitle") : t("driveNewXlsxTitle")}
+				body={document ? t("driveNewDocxBody") : t("driveNewXlsxBody")}
 				label={t("driveNewOfficeFileLabel")}
 				initialValue={initialName}
 				selectBaseName

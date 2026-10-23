@@ -17,7 +17,7 @@ import { SourceAxis } from "./axis"
 import { SheetView } from "./sheet"
 import { TagKind, TagStream, tagAttributes, type StreamHandler } from "./stream"
 import { OdsStyleWriter } from "./styles"
-import { TableWriter, type TableContext } from "./table"
+import { NO_NEW_TABLE, TableWriter, type NewTable, type TableContext } from "./table"
 import { NO_FEATURES, type SheetFeatures } from "./features"
 import type { ScopeNames } from "./names"
 import { nameKey } from "../features"
@@ -104,6 +104,8 @@ export interface ContentPlan {
 	readonly clock?: SliceClock | undefined
 	// How the sheets moved, where what names cells by address outside the model (unheld.ts) follows; null for none.
 	readonly shifter?: Shifter | null
+	// What new tables hold beyond the model, by sheet.
+	readonly newTables?: ReadonlyMap<number, NewTable>
 }
 
 // The declarations the root lacks for the prefixes the writer uses; a prefix bound to another namespace refuses.
@@ -151,7 +153,16 @@ class DeferredRow {
 	}
 }
 
-type Piece = string | Uint8Array | DeferredRow
+// Markup made as the stream takes it (a table written from the model), so it is never held whole.
+class LazyPieces {
+	readonly pieces: () => Iterable<string>
+
+	constructor(pieces: () => Iterable<string>) {
+		this.pieces = pieces
+	}
+}
+
+type Piece = string | Uint8Array | DeferredRow | LazyPieces
 
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
 	if (a.length !== b.length) return false
@@ -276,6 +287,8 @@ export class ContentWriter implements StreamHandler {
 		const rows = source === null ? undefined : this.plan.source.unheld.rows.get(source.name)
 
 		writer.features = this.plan.features?.get(entry.id) ?? NO_FEATURES
+
+		if (source === null) writer.fresh = this.plan.newTables?.get(entry.id) ?? NO_NEW_TABLE
 		writer.unheldRows = rows ?? null
 
 		if (this.shifter !== null && source !== null && rows !== undefined)
@@ -317,6 +330,12 @@ export class ContentWriter implements StreamHandler {
 			}
 			const markedRows = new Set(view.marked)
 			const rows = new Set<number>([...view.marked, ...(this.plan.features?.get(entry.id)?.rows ?? [])])
+			const added = source === null ? this.plan.newTables?.get(entry.id) : undefined
+
+			// A new table's page breaks: their rows, and their columns' styles.
+			for (const row of added?.rowBreaks ?? []) rows.add(row)
+			for (const col of added?.colBreaks ?? [])
+				styles.column(view.columnPx(model.cols.find(range => col >= range.first && col <= range.last)), true)
 
 			for (const block of view.store.blocks) {
 				for (let i = 0; i < block.rowCount; i++) {
@@ -539,7 +558,13 @@ export class ContentWriter implements StreamHandler {
 		if (source !== null && source.hidden === hidden && source.rightToLeft === rightToLeft && source.tabColor === tab)
 			return source.styleName
 
-		return this.plan.styles.table(source?.styleName, !hidden, rightToLeft, tab)
+		return this.plan.styles.table(
+			source?.styleName,
+			!hidden,
+			rightToLeft,
+			tab,
+			source === null ? this.plan.newTables?.get(entry.id)?.masterPage : undefined
+		)
 	}
 
 	// --- Output ---
@@ -638,11 +663,31 @@ export class ContentWriter implements StreamHandler {
 		}
 	}
 
-	private freshTable(entry: XlsxSheetEntry): string {
+	private freshTable(entry: XlsxSheetEntry): LazyPieces {
 		const writer = this.writerFor(entry)
 		const style = this.tableStyle(entry, null)
+		const protection = (entry.model as XlsxSheetModel).protection
+		const tag = protectedTag(
+			replaceAttribute(
+				`<table:table table:name="${escapeAttribute(entry.name)}"${style === undefined ? "" : ` table:style-name="${escapeAttribute(style)}"`}>`,
+				"table:print-ranges",
+				this.printArea(entry)
+			),
+			protection
+		)
 
-		return `<table:table table:name="${escapeAttribute(entry.name)}"${style === undefined ? "" : ` table:style-name="${escapeAttribute(style)}"`}>${writer.columns()}${writer.rowsEnd()}</table:table>`
+		const head = `${tag}${protectionChild(protection, this.plan.source.prefixes)}${writer.columns()}`
+		// The sheet's own names, after its rows (ODF 1.3 Part 3 §9.1.2).
+		const names = this.namesChanged(entry.id) ? (this.plan.names?.get(entry.id)?.added ?? []) : []
+		const end = this.plan.newTables?.get(entry.id)?.end ?? ""
+
+		this.namesDone.add(entry.id)
+
+		return new LazyPieces(function* () {
+			yield head
+			yield* writer.rowsEndPieces()
+			yield `${names.length === 0 ? "" : `<table:named-expressions>${names.join("")}</table:named-expressions>`}${end}</table:table>`
+		})
 	}
 
 	// --- Stream ---
@@ -692,7 +737,10 @@ export class ContentWriter implements StreamHandler {
 
 		if (this.out === pieces) this.out = this.main
 
-		for (const piece of pieces) yield piece instanceof DeferredRow ? this.rendered(piece) : piece
+		for (const piece of pieces) {
+			if (piece instanceof LazyPieces) yield* piece.pieces()
+			else yield piece instanceof DeferredRow ? this.rendered(piece) : piece
+		}
 	}
 
 	// Where the empty tag being handled starts (its end is handled at once), -1 for none.

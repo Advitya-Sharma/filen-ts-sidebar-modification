@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest"
-import { OpcPackage, bytesSource } from "@filen/office/core/opc"
+import { ZipArchive, bytesSource } from "@filen/office/core/opc"
 import { OFFICE_FILE_MIME, freeOfficeFileName, normalizeOfficeFileName, officeFileBytes } from "@/features/drive/lib/createOfficeFile"
 
 async function part(bytes: Uint8Array, name: string): Promise<string> {
-	return new TextDecoder().decode(await (await OpcPackage.open(bytesSource(bytes))).read(name))
+	const zip = await ZipArchive.open(bytesSource(bytes))
+	const entry = zip.get(name)
+
+	if (entry === undefined) throw new Error(`No part ${name}`)
+
+	return new TextDecoder().decode(await zip.read(entry))
 }
 
 describe("normalizeOfficeFileName", () => {
@@ -11,6 +16,8 @@ describe("normalizeOfficeFileName", () => {
 		expect(normalizeOfficeFileName("Report", "docx")).toBe("Report.docx")
 		expect(normalizeOfficeFileName("Report.txt", "docx")).toBe("Report.txt.docx")
 		expect(normalizeOfficeFileName(".budget", "xlsx")).toBe(".budget.xlsx")
+		expect(normalizeOfficeFileName("Report.docx", "odt")).toBe("Report.docx.odt")
+		expect(normalizeOfficeFileName("Budget", "ods")).toBe("Budget.ods")
 	})
 
 	it("keeps the extension the name already ends with, in any case", () => {
@@ -45,10 +52,28 @@ describe("officeFileBytes", () => {
 		expect(await part(bytes, "xl/workbook.xml")).toContain('<sheet name="Tabelle1" sheetId="1" r:id="rId1"/>')
 	})
 
-	it("uploads each kind under its Office Open XML type", () => {
+	it("builds a blank OpenDocument text document in the user's language and paper", async () => {
+		const bytes = await officeFileBytes("odt", { locale: "de-DE", sheetName: "Sheet1" })
+		const styles = await part(bytes, "styles.xml")
+
+		expect(await part(bytes, "mimetype")).toBe("application/vnd.oasis.opendocument.text")
+		expect(styles).toContain('fo:font-size="11pt" fo:language="de" fo:country="DE"')
+		expect(styles).toContain('fo:page-width="21cm" fo:page-height="29.7cm"')
+	})
+
+	it("builds a blank OpenDocument spreadsheet whose sheet has the localized name", async () => {
+		const bytes = await officeFileBytes("ods", { locale: "en-US", sheetName: "Tabelle1" })
+
+		expect(await part(bytes, "mimetype")).toBe("application/vnd.oasis.opendocument.spreadsheet")
+		expect(await part(bytes, "content.xml")).toContain('<table:table table:name="Tabelle1"')
+	})
+
+	it("uploads each kind under its Office Open XML or OpenDocument type", () => {
 		expect(OFFICE_FILE_MIME).toEqual({
 			docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-			xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+			xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			odt: "application/vnd.oasis.opendocument.text",
+			ods: "application/vnd.oasis.opendocument.spreadsheet"
 		})
 	})
 })

@@ -91,3 +91,61 @@ export function capturedText({ document, namespaces, node }: Captured, skip: Rea
 
 	return lines.join("\n")
 }
+
+// Each content validation's help and error messages (by table:name) as their text in document order (capturedText):
+// the element tree keeps an element's character data apart from its children, which loses where a text:s was.
+// Validations captured between yields.
+const VALIDATIONS_PER_STEP = 256
+
+// table:content-validations parsed once, in steps: the element, and each validation's messages, their text in
+// document order.
+export function* capturedValidationsSteps(
+	markup: Uint8Array,
+	prefixes: ReadonlyMap<string, string>
+): Generator<void, { readonly element: OdfElement; readonly messages: Map<string, { help: string; error: string }> }> {
+	const captured = parseCaptured(markup, prefixes)
+	const { document, namespaces, node } = captured
+	const children: OdfElement[] = []
+	const messages = new Map<string, { help: string; error: string }>()
+	let text = ""
+	let step = 0
+
+	yield
+
+	for (let child = document.firstChild(node); child >= 0; child = document.nextSibling(child)) {
+		const kind = document.kind(child)
+
+		if (kind === NodeKind.Text || kind === NodeKind.CData) text += document.text(child)
+		if (kind !== NodeKind.Element) continue
+		if (++step % VALIDATIONS_PER_STEP === 0) yield
+
+		children.push(readElement(document, namespaces, child, 1))
+
+		if (elementName(document, namespaces, child) !== "table:content-validation") continue
+
+		const name = canonicalAttributes(document, namespaces, child).get("table:name")
+
+		if (name === undefined) continue
+
+		const own = { help: "", error: "" }
+
+		for (let message = document.firstChildElement(child); message >= 0; message = document.nextSiblingElement(message)) {
+			const which = elementName(document, namespaces, message)
+
+			if (which === "table:help-message") own.help = capturedText({ document, namespaces, node: message })
+			else if (which === "table:error-message") own.error = capturedText({ document, namespaces, node: message })
+		}
+
+		messages.set(name, own)
+	}
+
+	return {
+		element: {
+			name: elementName(document, namespaces, node),
+			attributes: canonicalAttributes(document, namespaces, node),
+			children,
+			text
+		},
+		messages
+	}
+}

@@ -4,7 +4,7 @@ import { OdfStyleResolver } from "../odf/resolve"
 import { OpcPackage } from "../opc/package"
 import type { ByteSource } from "../opc/io"
 import type { InflateHook } from "../opc/zipReader"
-import { sliceClock, type Slicing } from "../slicing"
+import { runSliced, sliceClock, type Slicing } from "../slicing"
 import { XlsxReadError } from "../xlsx/read/errors"
 import { DEFAULT_XLSX_LIMITS, type XlsxLimits } from "../xlsx/read/limits"
 import { XlsxParts } from "../xlsx/package/parts"
@@ -18,7 +18,7 @@ import { ContentReader, type OdsContent } from "./read/content"
 import { OdsReadError } from "./read/errors"
 import { OdsCellStyles } from "./styles/cell"
 import { numFmtLocaleFor } from "./styles/locale"
-import { buildSheets, type OdsWorkbookParts } from "./workbook"
+import { buildSheetsSteps, type OdsWorkbookParts } from "./workbook"
 import { readSettings } from "./settings"
 import { setOdsSource } from "./source"
 import { cellPrint, withCached } from "./unheld"
@@ -140,7 +140,7 @@ async function open(source: ByteSource, options: OdsOpenOptions): Promise<OdsOpe
 		tables: content.tables.map((table, index) => ({ index, name: table.name, shapes: table.shapes, frames: table.frames })),
 		issues
 	})
-	const built: OdsWorkbookParts = buildSheets(content, styles, settings, issues, prefixes, charts)
+	const built: OdsWorkbookParts = await runSliced(buildSheetsSteps(content, styles, settings, issues, prefixes, charts), clock)
 	const opc = OpcPackage.fromParts(built.parts)
 	const parts = new XlsxParts(opc, await opc.contentTypes())
 	const models = new Map<number, XlsxSheetModel>()

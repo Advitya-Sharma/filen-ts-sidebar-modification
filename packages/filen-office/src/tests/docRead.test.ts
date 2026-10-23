@@ -3,6 +3,7 @@ import { cfbBytes } from "@filen/office/core/cfb"
 import { bytesSource } from "@filen/office/core/opc"
 import { DocError, docText, readDoc, type DocModel, type DocTable } from "@filen/office/core/doc"
 import { buildDoc, lists, plc, prl, stsh, type DocSpec } from "./docFixtures"
+import { encryptedDoc } from "./docDecryptFixtures"
 
 async function read(spec: DocSpec): Promise<DocModel> {
 	return readDoc(bytesSource(await buildDoc(spec)))
@@ -245,13 +246,18 @@ describe("Word binary refusals", () => {
 	it("names the encryption scheme of an encrypted file", async () => {
 		const flags = 0x0200 | 0x0100
 		const rc4 = await refusal(await buildDoc({ pieces: [{ text: "x\r" }], flags, tablePrefix: Uint8Array.of(1, 0, 1, 0) }))
-		const cryptoApi = await refusal(await buildDoc({ pieces: [{ text: "x\r" }], flags, tablePrefix: Uint8Array.of(2, 0, 2, 0) }))
+		// RC4 CryptoAPI is told by its EncryptionHeader too (a header too damaged to read is refused as corrupt).
+		const cryptoApi = await refusal(
+			(await encryptedDoc({ pieces: [{ text: "x\r" }] }, { scheme: "cryptoApiRc4", password: "pw" })).bytes
+		)
+		const damaged = await refusal(await buildDoc({ pieces: [{ text: "x\r" }], flags, tablePrefix: Uint8Array.of(2, 0, 2, 0) }))
 		const xor = await refusal(await buildDoc({ pieces: [{ text: "x\r" }], flags: flags | 0x8000 }))
 
-		expect([rc4, cryptoApi, xor].map(error => [error.code, error.encryption])).toEqual([
+		expect([rc4, cryptoApi, xor, damaged].map(error => [error.code, error.encryption])).toEqual([
 			["encrypted", "rc4"],
 			["encrypted", "cryptoApiRc4"],
-			["encrypted", "xor"]
+			["encrypted", "xor"],
+			["corrupt", undefined]
 		])
 	})
 

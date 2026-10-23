@@ -672,6 +672,7 @@ export class Translator implements PropsSink {
 				indents: style.ownIndent,
 				ownIndents: true,
 				fontSize: style.fontSize,
+				hyphenate: style.text.get("fo:hyphenate"),
 				...(indent === undefined ? {} : { listIndent: indent })
 			},
 			this

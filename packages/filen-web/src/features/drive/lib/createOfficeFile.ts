@@ -1,12 +1,19 @@
-import { blankDocx, blankXlsx } from "@filen/office/core/templates"
+import { blankDocx, blankOds, blankOdt, blankXlsx } from "@filen/office/core/templates"
 import { extensionOf } from "@/features/drive/lib/preview.logic"
 
 // The blank office files New ▸ Office creates.
-export type NewOfficeKind = "docx" | "xlsx"
+export type NewOfficeKind = "docx" | "xlsx" | "odt" | "ods"
 
 export const OFFICE_FILE_MIME: Readonly<Record<NewOfficeKind, string>> = {
 	docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-	xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	odt: "application/vnd.oasis.opendocument.text",
+	ods: "application/vnd.oasis.opendocument.spreadsheet"
+}
+
+// A text document (docx, odt) rather than a spreadsheet: the dialog's wording.
+export function isOfficeDocumentKind(kind: NewOfficeKind): boolean {
+	return kind === "docx" || kind === "odt"
 }
 
 // The kind's extension added unless the name already ends with it: a blank .docx named "notes.txt" would open as text.
@@ -34,5 +41,14 @@ export interface OfficeTemplateLocale {
 }
 
 export function officeFileBytes(kind: NewOfficeKind, { locale, sheetName }: OfficeTemplateLocale): Promise<Uint8Array> {
-	return kind === "docx" ? blankDocx({ locale }) : blankXlsx({ locale, sheetName })
+	switch (kind) {
+		case "docx":
+			return blankDocx({ locale })
+		case "xlsx":
+			return blankXlsx({ locale, sheetName })
+		case "odt":
+			return blankOdt({ locale })
+		case "ods":
+			return blankOds({ locale, sheetName })
+	}
 }

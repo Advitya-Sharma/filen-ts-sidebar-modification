@@ -19,6 +19,10 @@ export interface SheetValidations {
 	// Where names change along a row: its rules' first columns and the columns after their last.
 	bounds(row: number): readonly number[]
 	readonly rows: ReadonlySet<number>
+	// Rows where the rules along a row change (each rule's first row and the row after its last), and the last row a
+	// rule is on (-1 for none).
+	readonly breaks: ReadonlySet<number>
+	readonly lastRow: number
 	// New table:content-validation elements.
 	readonly fresh: readonly string[]
 }
@@ -31,10 +35,25 @@ interface Rule {
 	readonly ranges: readonly SheetRange[]
 }
 
-function rules(markup: string): Rule[] {
+// The last section read and its rules: a conversion checks, writes and proves the same section in turn.
+let lastRules: { readonly markup: string; readonly rules: readonly Rule[] } | null = null
+
+function rules(markup: string): readonly Rule[] {
+	if (lastRules !== null && lastRules.markup === markup) return lastRules.rules
+
+	const read = readRules(markup)
+
+	lastRules = { markup, rules: read }
+
+	return read
+}
+
+function readRules(markup: string): Rule[] {
 	if (markup.trim() === "") return []
 
 	const bytes = encodeUtf8(markup)
+	// Byte offsets are the text's own where it is ASCII: a rule's markup sliced, not decoded again.
+	const ascii = bytes.length === markup.length
 	const document: XmlDocument = parseXml(bytes)
 	const root = document.documentElement()
 	const out: Rule[] = []
@@ -61,7 +80,11 @@ function rules(markup: string): Rule[] {
 		})
 
 		out.push({
-			key: validationRuleKey(decodeUtf8(bytes.subarray(document.start(node), document.end(node)))),
+			key: validationRuleKey(
+				ascii
+					? markup.slice(document.start(node), document.end(node))
+					: decodeUtf8(bytes.subarray(document.start(node), document.end(node)))
+			),
 			attributes,
 			formula1,
 			formula2,
@@ -178,16 +201,6 @@ export interface Rect {
 	readonly name: string
 }
 
-function namesAt(rects: readonly Rect[], row: number, col: number): string | undefined {
-	for (const rect of rects) {
-		const range = rect.range
-
-		if (row >= range.startRow && row <= range.endRow && col >= range.startCol && col <= range.endCol) return rect.name
-	}
-
-	return undefined
-}
-
 // A dataValidations section as rectangles each naming its rule (by its key): what two sheets compare by.
 export function validationRects(markup: string): Rect[] {
 	return rules(markup).flatMap(rule => rule.ranges.map(range => ({ range, name: rule.key })))
@@ -195,35 +208,171 @@ export function validationRects(markup: string): Rect[] {
 
 // Whether two sets of rectangles name the same rule on every cell.
 export function sameRects(a: readonly Rect[], b: readonly Rect[]): boolean {
-	const rows = new Set<number>()
+	// Rows between two bounds (a rectangle's first row, the row after its last) are covered alike: one of each, the
+	// rectangles covering it found by a sweep down the rows.
+	const bounds = new Set<number>()
 
-	for (const rect of [...a, ...b])
-		for (let row = rect.range.startRow; row <= rect.range.endRow && rows.size < 2_000_000; row++) rows.add(row)
+	for (const rect of [...a, ...b]) bounds.add(rect.range.startRow).add(rect.range.endRow + 1)
 
-	const cells = (rects: readonly Rect[], row: number): string => {
-		const out: string[] = []
+	const sweepA = new Sweep(a)
+	const sweepB = new Sweep(b)
 
-		for (const rect of rects) {
-			if (row < rect.range.startRow || row > rect.range.endRow) continue
-
-			for (let col = rect.range.startCol; col <= rect.range.endCol; col++) out.push(`${col}:${rect.name}`)
-		}
-
-		return out.sort().join("|")
-	}
-
-	for (const row of rows) if (cells(a, row) !== cells(b, row)) return false
+	for (const row of [...bounds].sort((x, y) => x - y)) if (sweepA.cells(row) !== sweepB.cells(row)) return false
 
 	return true
 }
 
-// A row's names as column runs, for comparing two of them.
-function rowKey(rects: readonly Rect[], row: number): string {
-	return rects
-		.filter(rect => row >= rect.range.startRow && row <= rect.range.endRow)
-		.map(rect => `${rect.range.startCol}-${rect.range.endCol}:${rect.name}`)
-		.sort()
-		.join("|")
+// The rectangles covering each row, for rows asked in ascending order.
+class Sweep {
+	private readonly sorted: readonly Rect[]
+	private next = 0
+	private active: Rect[] = []
+
+	constructor(rects: readonly Rect[]) {
+		this.sorted = [...rects].sort((x, y) => x.range.startRow - y.range.startRow)
+	}
+
+	// The covered cells of `row` with the rules naming them, in one text: runs of columns alike (the names on them),
+	// so rectangles cut differently over the same cells read the same, and a full-width rule costs no more than one cell.
+	cells(row: number): string {
+		while (this.next < this.sorted.length && (this.sorted[this.next]?.range.startRow ?? 0) <= row)
+			this.active.push(this.sorted[this.next++] as Rect)
+
+		this.active = this.active.filter(rect => rect.range.endRow >= row)
+
+		// A sweep along the columns: the names on from each bound to the next, a run while they stay the same.
+		const events = this.active
+			.flatMap(rect => [
+				{ at: rect.range.startCol, name: rect.name, delta: 1 },
+				{ at: rect.range.endCol + 1, name: rect.name, delta: -1 }
+			])
+			.sort((x, y) => x.at - y.at)
+		const on = new Map<string, number>()
+		const runs: string[] = []
+		let previous = ""
+		let runStart = -1
+
+		for (let k = 0; k < events.length;) {
+			const at = events[k]?.at ?? 0
+
+			for (; k < events.length && events[k]?.at === at; k++) {
+				const event = events[k] as { at: number; name: string; delta: number }
+				const count = (on.get(event.name) ?? 0) + event.delta
+
+				if (count === 0) on.delete(event.name)
+				else on.set(event.name, count)
+			}
+
+			const names = [...on]
+				.map(([name, count]) => `${name}*${String(count)}`)
+				.sort()
+				.join(",")
+
+			if (names === previous) continue
+			if (previous !== "") runs.push(`${String(runStart)}-${String(at - 1)}:${previous}`)
+
+			previous = names
+			runStart = at
+		}
+
+		return runs.join("|")
+	}
+}
+
+// The rectangles covering a row, the same between two of their bounds (a first row, the row after a last): worked out
+// once per stretch by a sweep down the rows (asked in ascending order; a row above the last asked starts it again),
+// held by first column for a name found by binary search.
+class RowCover {
+	private readonly sorted: readonly { readonly rect: Rect; readonly order: number }[]
+	private next = 0
+	private active: { readonly rect: Rect; readonly order: number }[] = []
+	// The stretch worked out, [from, to), and its rectangles by first column.
+	private from = 0
+	private to = -1
+	private byCol: { readonly rect: Rect; readonly order: number }[] = []
+	private disjoint = true
+
+	constructor(rects: readonly Rect[]) {
+		this.sorted = rects.map((rect, order) => ({ rect, order })).sort((x, y) => x.rect.range.startRow - y.rect.range.startRow)
+	}
+
+	private settle(row: number): void {
+		if (row >= this.from && row < this.to) return
+		if (row < this.from) {
+			this.next = 0
+			this.active = []
+		}
+
+		while (this.next < this.sorted.length && (this.sorted[this.next]?.rect.range.startRow ?? 0) <= row)
+			this.active.push(this.sorted[this.next++] as { rect: Rect; order: number })
+
+		this.active = this.active.filter(item => item.rect.range.endRow >= row)
+
+		// Until the next rectangle starts or an active one ends.
+		let to = (this.sorted[this.next]?.rect.range.startRow ?? Number.MAX_SAFE_INTEGER) as number
+
+		for (const item of this.active) to = Math.min(to, item.rect.range.endRow + 1)
+
+		this.from = row
+		this.to = to
+		this.byCol = [...this.active].sort((x, y) => x.rect.range.startCol - y.rect.range.startCol)
+		this.disjoint = this.byCol.every((item, k) => k === 0 || (this.byCol[k - 1]?.rect.range.endCol ?? -1) < item.rect.range.startCol)
+	}
+
+	// The first rectangle (in the rules' order) naming the cell.
+	name(row: number, col: number): string | undefined {
+		this.settle(row)
+
+		if (!this.disjoint) {
+			let best: { rect: Rect; order: number } | undefined
+
+			for (const item of this.byCol)
+				if (col >= item.rect.range.startCol && col <= item.rect.range.endCol && (best === undefined || item.order < best.order))
+					best = item
+
+			return best?.rect.name
+		}
+
+		let low = 0
+		let high = this.byCol.length - 1
+		let found = -1
+
+		while (low <= high) {
+			const middle = (low + high) >> 1
+
+			if ((this.byCol[middle]?.rect.range.startCol ?? 0) <= col) {
+				found = middle
+				low = middle + 1
+			} else high = middle - 1
+		}
+
+		const item = this.byCol[found]
+
+		return item !== undefined && col <= item.rect.range.endCol ? item.rect.name : undefined
+	}
+
+	bounds(row: number): number[] {
+		this.settle(row)
+
+		return this.byCol.flatMap(item => [item.rect.range.startCol, item.rect.range.endCol + 1])
+	}
+}
+
+// The next free number of each set of names in use (`taken` only grows): a name is found past the last one given,
+// never by probing from 1 again.
+const nextFree = new WeakMap<Set<string>, number>()
+
+function freeName(taken: Set<string>): string {
+	let n = nextFree.get(taken) ?? 1
+
+	while (taken.has(`valF${String(n)}`)) n++
+
+	const name = `valF${String(n)}`
+
+	taken.add(name)
+	nextFree.set(taken, n + 1)
+
+	return name
 }
 
 // A sheet's validations where an edit changed them (its dataValidations section written), null where it did not.
@@ -236,6 +385,27 @@ export function sheetValidations(
 	current: string | null,
 	taken: Set<string>
 ): SheetValidations | null {
+	const steps = sheetValidationsSteps(workbook, model, sheetName, table, current, taken)
+
+	for (;;) {
+		const step = steps.next()
+
+		if (step.done === true) return step.value
+	}
+}
+
+// Rules worked through between yields.
+const RULES_PER_STEP = 256
+
+// sheetValidations as steps: it yields every RULES_PER_STEP rules, so a sliced run gives the host its turns.
+export function* sheetValidationsSteps(
+	workbook: XlsxWorkbookModel,
+	model: XlsxSheetModel,
+	sheetName: string,
+	table: OdsTableSource | null,
+	current: string | null,
+	taken: Set<string>
+): Generator<void, SheetValidations | null> {
 	const axes = model as { rowAxis?: SourceAxis; colAxis?: SourceAxis }
 	const rowAxis = axes.rowAxis ?? SourceAxis.identity(0)
 	const colAxis = axes.colAxis ?? SourceAxis.identity(0)
@@ -254,20 +424,15 @@ export function sheetValidations(
 	const fresh: string[] = []
 	const named: Rect[] = []
 
+	let step = 0
+
 	for (const rule of now) {
+		if (++step % RULES_PER_STEP === 0) yield
+
 		let name = table?.validationNames.get(rule.key)
 
 		if (name === undefined) {
-			for (let n = 1; ; n++) {
-				const candidate = `valF${String(n)}`
-
-				if (!taken.has(candidate)) {
-					name = candidate
-					taken.add(candidate)
-
-					break
-				}
-			}
+			name = freeName(taken)
 
 			fresh.push(element(rule, name, sheetName))
 		}
@@ -287,6 +452,8 @@ export function sheetValidations(
 		)
 
 		for (const rule of source) {
+			if (++step % RULES_PER_STEP === 0) yield
+
 			const name = table.validationNames.get(rule.key)
 
 			if (name === undefined) continue
@@ -306,19 +473,44 @@ export function sheetValidations(
 		}
 	}
 
+	const cover = new RowCover(named)
 	const rows = new Set<number>()
-	const candidates = new Set<number>()
+	const breaks = new Set<number>()
+	let lastRow = -1
 
-	for (const rect of [...named, ...before]) for (let row = rect.range.startRow; row <= rect.range.endRow; row++) candidates.add(row)
-	for (const row of candidates) if (rowKey(named, row) !== rowKey(before, row)) rows.add(row)
+	for (const rect of named) {
+		breaks.add(rect.range.startRow).add(rect.range.endRow + 1)
+		lastRow = Math.max(lastRow, rect.range.endRow)
+	}
+
+	// A new table's rows are all written: none differs from a source.
+	if (table !== null) {
+		// Between two bounds of either set the rows are covered alike: compared once per stretch, its rows taken whole.
+		const edges = new Set<number>()
+
+		for (const rect of [...named, ...before]) edges.add(rect.range.startRow).add(rect.range.endRow + 1)
+
+		const sorted = [...edges].sort((x, y) => x - y)
+		const now = new Sweep(named)
+		const was = new Sweep(before)
+
+		for (let k = 0; k + 1 < sorted.length; k++) {
+			if (k % RULES_PER_STEP === RULES_PER_STEP - 1) yield
+
+			const from = sorted[k] ?? 0
+
+			if (now.cells(from) === was.cells(from)) continue
+
+			for (let row = from; row < (sorted[k + 1] ?? from); row++) rows.add(row)
+		}
+	}
 
 	return {
-		name: (row, col) => namesAt(named, row, col),
-		bounds: row =>
-			named
-				.filter(rect => row >= rect.range.startRow && row <= rect.range.endRow)
-				.flatMap(rect => [rect.range.startCol, rect.range.endCol + 1]),
+		name: (row, col) => cover.name(row, col),
+		bounds: row => cover.bounds(row),
 		rows,
+		breaks,
+		lastRow,
 		fresh
 	}
 }

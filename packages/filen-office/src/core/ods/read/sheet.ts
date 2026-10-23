@@ -127,6 +127,8 @@ export interface OdsBuiltSheet {
 	// Rows of properties alone (a height, hidden), as runs: the store holds none of them.
 	readonly rowRuns: XlsxRowRun[]
 	readonly defaultRowHeight: number
+	// Most rows of the default height have it set by their style (customHeight, ECMA-376 Part 1 §18.3.1.81).
+	readonly defaultRowSet: boolean
 	readonly defaultColPx: number
 	// Cells naming each content validation, as rectangles [startRow, startCol, endRow, endCol].
 	readonly validations: ReadonlyMap<string, readonly (readonly [number, number, number, number])[]>
@@ -194,6 +196,8 @@ export class OdsSheetBuilder {
 	private readonly propertyRuns: PropertyRun[] = []
 	// Rows by height in points, for the default.
 	private readonly heights = new Map<number, number>()
+	// Rows of each height whose style sets it (not LibreOffice's optimal height).
+	private readonly setHeights = new Map<number, number>()
 	private readonly rowBreaks: number[] = []
 	private readonly colBreaks: number[] = []
 	headerRows: [number, number] | null = null
@@ -220,7 +224,15 @@ export class OdsSheetBuilder {
 	private richString(cell: OdsCellInput): number {
 		const text = xstring(cell.text)
 		const runs: XlsxRichRun[] = []
-		const marks = cell.runs ?? [{ start: 0, style: undefined }]
+		const given = cell.runs ?? [{ start: 0, style: undefined }]
+		const first = given[0]
+		// Text before the first mark (empty paragraphs' line ends) is the cell's own: the first run starts at 0.
+		const marks =
+			first === undefined || first.start <= 0
+				? given
+				: first.style === undefined
+					? [{ start: 0, style: undefined }, ...given.slice(1)]
+					: [{ start: 0, style: undefined }, ...given]
 
 		for (let k = 0; k < marks.length; k++) {
 			const mark = marks[k]
@@ -442,6 +454,7 @@ export class OdsSheetBuilder {
 			(Math.min(7, input.outline) << RowFlag.OUTLINE_SHIFT)
 
 		if (!Number.isNaN(height)) this.heights.set(height, (this.heights.get(height) ?? 0) + repeat)
+		if (!Number.isNaN(height) && style.custom) this.setHeights.set(height, (this.setHeights.get(height) ?? 0) + repeat)
 
 		if (this.runs.pending) this.runs.endRows(first, first + repeat)
 
@@ -674,6 +687,7 @@ export class OdsSheetBuilder {
 			styleRuns: this.runs.finish(),
 			rowRuns,
 			defaultRowHeight: defaultHeight,
+			defaultRowSet: (this.setHeights.get(defaultHeight) ?? 0) * 2 > (this.heights.get(defaultHeight) ?? 0),
 			defaultColPx,
 			validations: this.validations,
 			notes: this.notes,

@@ -227,6 +227,21 @@ export class DocumentParts implements StoryContext {
 		return this.nextIdValue++
 	}
 
+	// Field begins: each w:fldChar begin's start tag (without its end), and the w:ffData a form field gives it.
+	private readonly fieldBegins: { readonly tag: string; ffData: string }[] = []
+
+	fieldBegin(tag: string): number {
+		this.fieldBegins.push({ tag, ffData: "" })
+
+		return this.fieldBegins.length - 1
+	}
+
+	formField(begin: number, ffData: string): void {
+		const entry = this.fieldBegins[begin]
+
+		if (entry !== undefined) entry.ffData = ffData
+	}
+
 	nextDrawingId(): number {
 		return this.drawingId++
 	}
@@ -798,6 +813,13 @@ export class DocumentParts implements StoryContext {
 					return this.notes[Number(value)]?.kind === "endnote" ? "<w:endnoteRef/>" : "<w:footnoteRef/>"
 				case "C":
 					return `<w:commentReference w:id="${value}"/>`
+				case "F": {
+					const begin = this.fieldBegins[Number(value)]
+
+					if (begin === undefined) return ""
+
+					return begin.ffData === "" ? `${begin.tag}/>` : `${begin.tag}>${begin.ffData}</w:fldChar>`
+				}
 				default: {
 					const id = commentByTag.get(value)
 

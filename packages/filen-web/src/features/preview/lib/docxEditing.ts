@@ -1,6 +1,7 @@
 import type { Node } from "prosemirror-model"
 import { findUnsavableBlocks, type DocxEditorSession } from "@filen/office/core/docx/edit"
 import { DocxSaveError, prepareDocxSave, writerProof } from "@filen/office/core/docx/write"
+import type { ConvertEdited } from "@/features/preview/lib/docxLiveFile"
 import { fetchFontAssets, windowServices, type DocxUnlockedDocument } from "@filen/office/dom/docx"
 import {
 	docxSealer,
@@ -53,6 +54,8 @@ const zipper = docxZipWorker(() => {
 export interface DocxEditingBackend {
 	readonly proof: NonNullable<DocxEditingOptions["proof"]>
 	readonly writer: DocxEditingWriter
+	// The document's edits converted to .docx where it is held, without its own writer (an ODT document, for Download as).
+	readonly convertEdited?: ConvertEdited
 }
 
 // `writeUnlocked`: the document's password to modify was given (docxWriteProtection.tsx). `encryption`: it was

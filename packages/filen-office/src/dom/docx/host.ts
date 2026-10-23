@@ -3,11 +3,27 @@ import type { OfficeKeyTransfer } from "../encryption/webCrypto"
 import { DocxEngine, type DocxEngineServices } from "./engine"
 import type { DocxAnnotations } from "./annotations"
 import { docxLegacyServer, type DocxConvertAnswer, type DocxLegacy, type DocxLegacyOpen, type DocxLegacyOptions } from "./legacy"
-import { heldSource, type DocxDocumentUnlock, type DocxProtectedOpen, type DocxProtection, type DocxProtectionOptions } from "./protection"
+import {
+	heldSource,
+	type DocxAbortSignal,
+	type DocxDocumentUnlock,
+	type DocxProtectedOpen,
+	type DocxProtection,
+	type DocxProtectionOptions
+} from "./protection"
 import { docxProtectionServer, type DocxProtectVerdict, type DocxUnlockAnswer } from "./protectionWorker"
 import { DocxRtfRefusal, type DocxRtf, type DocxRtfEdits, type DocxRtfOpen, type RtfLockedBlock } from "./rtf"
 import { RtfAborted } from "../../core/rtf/write/writer"
 import { docxRtfServer, type DocxRtfOpened, type DocxRtfWritten, type DocxSourceFormat } from "./rtfWorker"
+import {
+	answerOf,
+	docxConvertServer,
+	type DocxConversion,
+	type DocxConverter,
+	type TextSourceFormat,
+	type TextTargetFormat
+} from "./convert"
+import type { TextConversion } from "../../core/convert/text/index"
 import type { DocxEvent, DocxFindOptions, DocxSessionApi, DocxLocation, DocxMedia, DocxObjectData, DocxOpenOptions } from "./protocol"
 
 // Two ways to run the engine behind the same DocxSessionApi: in a worker (web), talking over a small
@@ -71,14 +87,25 @@ type Method = "objects" | "media" | "locate" | "find" | "annotations"
 // once (with the password to open an encrypted one, kept for that request only), the package it becomes is held,
 // "take" copies it and engine sessions open it with `doc`. An RTF document (rtf.ts)
 // likewise: "rtf" hands the worker a copy of the file, read into its package and held with it; "rtfProve" and "rtfWrite"
-// are calls on it. An OpenDocument text document goes the same way ("rtf" with its format).
+// are calls on it. An OpenDocument text document goes the same way ("rtf" with its format). A text conversion
+// (convert.ts) is a session too: "textConvert" hands the worker a copy of the file and "textConverted" the result.
 type ToWorker =
 	| { readonly t: "open"; readonly s: number; readonly size: number; readonly options: DocxOpenOptions; readonly doc?: number }
 	| { readonly t: "protect"; readonly s: number; readonly size: number }
 	| { readonly t: "convert"; readonly s: number; readonly size: number; readonly password?: string }
 	| { readonly t: "rtf"; readonly s: number; readonly bytes: Uint8Array; readonly format?: DocxSourceFormat }
+	| {
+			readonly t: "textConvert"
+			readonly s: number
+			readonly bytes: Uint8Array
+			readonly from: TextSourceFormat
+			readonly to: TextTargetFormat
+			// A Word 97–2003 document's password to open, for this request only.
+			readonly password?: string
+	  }
 	| { readonly t: "rtfProve"; readonly s: number; readonly id: number }
 	| { readonly t: "rtfWrite"; readonly s: number; readonly id: number; readonly edits: DocxRtfEdits }
+	| { readonly t: "rtfConvert"; readonly s: number; readonly id: number; readonly edits: DocxRtfEdits }
 	| { readonly t: "unlock"; readonly s: number; readonly id: number; readonly password: string }
 	| { readonly t: "take"; readonly s: number; readonly id: number }
 	| { readonly t: "key"; readonly s: number; readonly id: number }
@@ -102,6 +129,7 @@ type FromWorker =
 	| { readonly t: "protected"; readonly s: number; readonly verdict?: DocxProtectVerdict; readonly error?: string }
 	| { readonly t: "converted"; readonly s: number; readonly answer?: DocxConvertAnswer; readonly error?: string }
 	| { readonly t: "rtfOpened"; readonly s: number; readonly answer?: DocxRtfOpened; readonly error?: string }
+	| { readonly t: "textConverted"; readonly s: number; readonly answer?: TextConversion; readonly error?: string }
 	| {
 			readonly t: "rtfProved"
 			readonly s: number
@@ -110,6 +138,7 @@ type FromWorker =
 			readonly error?: string
 	  }
 	| { readonly t: "rtfWritten"; readonly s: number; readonly id: number; readonly answer?: DocxRtfWritten; readonly error?: string }
+	| { readonly t: "rtfConverted"; readonly s: number; readonly id: number; readonly answer?: TextConversion; readonly error?: string }
 	| { readonly t: "unlocked"; readonly s: number; readonly id: number; readonly answer?: DocxUnlockAnswer; readonly error?: string }
 	| {
 			readonly t: "taken"
@@ -164,6 +193,7 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 	const protection = docxProtectionServer()
 	const legacy = docxLegacyServer()
 	const rtf = docxRtfServer()
+	const converter = docxConvertServer()
 	// Reads of the page's bytes for a protected file being classified or unlocked, or a Word binary file converted.
 	const protectReads = new Map<number, { reads: WorkerSession["reads"]; nextRead: number }>()
 	const pageSource = (id: number, size: number, reads: { reads: WorkerSession["reads"]; nextRead: number }): ByteSource => ({
@@ -290,6 +320,26 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 
 				break
 			}
+			case "textConvert": {
+				if (protectReads.has(id) || sessions.has(id) || !(message.bytes instanceof Uint8Array)) return
+				if (!TEXT_SOURCES.has(message.from) || !TEXT_TARGETS.has(message.to)) return
+
+				const password = typeof message.password === "string" ? message.password : undefined
+
+				converter.convert(id, message.bytes, message.from, message.to, password).then(
+					answer => {
+						const buffer = answer.ok ? bufferOf(answer.bytes) : undefined
+
+						post({ t: "textConverted", s: id, answer }, buffer === undefined ? [] : [buffer])
+					},
+					(error: unknown) => {
+						converter.close(id)
+						post({ t: "textConverted", s: id, error: messageOf(error) })
+					}
+				)
+
+				break
+			}
 			case "rtfProve": {
 				const call = message.id
 
@@ -314,6 +364,22 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 						),
 					(error: unknown) => {
 						if (!(error instanceof RtfAborted)) post({ t: "rtfWritten", s: id, id: call, error: messageOf(error) })
+					}
+				)
+
+				break
+			}
+			case "rtfConvert": {
+				const call = message.id
+
+				rtf.convertEdited(id, call, message.edits).then(
+					answer => {
+						const buffer = answer.ok ? bufferOf(answer.bytes) : undefined
+
+						post({ t: "rtfConverted", s: id, id: call, answer }, buffer === undefined ? [] : [buffer])
+					},
+					(error: unknown) => {
+						if (!(error instanceof RtfAborted)) post({ t: "rtfConverted", s: id, id: call, error: messageOf(error) })
 					}
 				)
 
@@ -373,6 +439,7 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 				break
 			case "abort":
 				protection.abort(id, message.id)
+				rtf.abort(id, message.id)
 
 				break
 			case "read": {
@@ -453,7 +520,7 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 
 				for (const pending of reads?.reads.values() ?? []) pending.reject(new Error("closed"))
 
-				if (protection.close(id) || legacy.close(id) || rtf.close(id)) break
+				if (protection.close(id) || legacy.close(id) || rtf.close(id) || converter.close(id)) break
 
 				const session = sessions.get(id)
 
@@ -487,6 +554,8 @@ export interface DocxWorkerPool {
 	readonly rtf: DocxRtf
 	// OpenDocument text documents, the same way (the ODT writer).
 	readonly odt: DocxRtf
+	// Text documents converted to another format (convert.ts).
+	readonly convert: DocxConverter
 	// Starts the worker ahead of the first document (its script is parsed while the file downloads).
 	prewarm(): void
 	dispose(): void
@@ -685,6 +754,19 @@ export function docxWorkerPool(create: () => DocxWorkerLike, idleMs = 60_000): D
 	const odt: DocxRtf = {
 		open: (bytes, options = {}) => openRtf(connect, () => nextSession++, scheduleIdle, openSession, bytes, options, "odt")
 	}
+	const convert: DocxConverter = {
+		convert: (bytes, from, to, options = {}) =>
+			convertInWorker(
+				connect,
+				() => nextSession++,
+				scheduleIdle,
+				options.owned === true ? bytes : bytes.slice(),
+				from,
+				to,
+				options.signal,
+				options.password
+			)
+	}
 
 	return {
 		host,
@@ -692,6 +774,7 @@ export function docxWorkerPool(create: () => DocxWorkerLike, idleMs = 60_000): D
 		legacy,
 		rtf,
 		odt,
+		convert,
 		prewarm() {
 			scheduleIdle(connect())
 		},
@@ -712,6 +795,71 @@ export function docxWorkerPool(create: () => DocxWorkerLike, idleMs = 60_000): D
 }
 
 const SIGNAL_POLL_MS = 10
+
+// Read through a call: a check before an await would narrow the flag for the rest of the function.
+function isAborted(signal: DocxAbortSignal | undefined): boolean {
+	return signal?.aborted === true
+}
+
+const TEXT_SOURCES: ReadonlySet<unknown> = new Set<TextSourceFormat>(["docx", "odt", "rtf", "doc"])
+const TEXT_TARGETS: ReadonlySet<unknown> = new Set<TextTargetFormat>(["docx", "odt"])
+
+// The page's side of a text conversion in the worker: `bytes` (the caller's copy) is transferred there, the converted
+// file comes back transferred. The signal closes the job (the worker ends it at its next slice); the job keeps the worker alive.
+function convertInWorker(
+	connect: () => Connection,
+	nextId: () => number,
+	scheduleIdle: (connection: Connection) => void,
+	bytes: Uint8Array,
+	from: TextSourceFormat,
+	to: TextTargetFormat,
+	signal: DocxAbortSignal | undefined,
+	password: string | undefined
+): Promise<DocxConversion> {
+	if (signal?.aborted === true) return Promise.resolve({ kind: "aborted" })
+
+	const current = connect()
+	const id = nextId()
+
+	return new Promise((resolve, reject) => {
+		let done = false
+		const finish = (answer: DocxConversion | Error): void => {
+			if (done) return
+
+			done = true
+			current.sessions.delete(id)
+			current.failures.delete(id)
+			signal?.removeEventListener?.("abort", abort)
+			scheduleIdle(current)
+
+			if (answer instanceof Error) reject(answer)
+			else resolve(answer)
+		}
+		const abort = (): void => {
+			if (done) return
+
+			current.worker.post({ t: "close", s: id } satisfies ToWorker, [])
+			finish({ kind: "aborted" })
+		}
+
+		current.failures.set(id, () => {
+			finish(new Error("The document worker failed"))
+		})
+		current.sessions.set(id, message => {
+			if (message.t !== "textConverted") return
+
+			if (message.answer === undefined) finish(new Error(message.error ?? "The conversion failed"))
+			else finish(signal?.aborted === true ? { kind: "aborted" } : answerOf(message.answer))
+		})
+		signal?.addEventListener?.("abort", abort)
+		const buffer = bufferOf(bytes)
+
+		current.worker.post(
+			{ t: "textConvert", s: id, bytes, from, to, ...(password === undefined ? {} : { password }) } satisfies ToWorker,
+			buffer === undefined ? [] : [buffer]
+		)
+	})
+}
 
 // The page's side of a protected file in the worker: reads of `source` answered while it is classified and
 // unlocked, then calls on the held document. Its session keeps the worker alive until released.
@@ -1136,7 +1284,7 @@ function openRtf(
 			return
 		}
 
-		if (message.t === "taken" || message.t === "rtfProved" || message.t === "rtfWritten") {
+		if (message.t === "taken" || message.t === "rtfProved" || message.t === "rtfWritten" || message.t === "rtfConverted") {
 			const pending = calls.get(message.id)
 
 			calls.delete(message.id)
@@ -1197,6 +1345,47 @@ function openRtf(
 							if (!reply.answer.ok) throw new DocxRtfRefusal(reply.answer.reason, reply.answer.message)
 
 							return reply.answer.bytes
+						},
+						async convertEdited(edits, convertOptions = {}) {
+							const signal = convertOptions.signal
+
+							if (signal?.aborted === true) return { kind: "aborted" }
+
+							const parts = edits.parts.map(([name, part]) => [name, part.slice()] as const)
+							let callId = 0
+							let onAbort: (() => void) | undefined
+							const aborted = new Promise<"aborted">(resolve => {
+								onAbort = () => {
+									if (!closed) worker.post({ t: "abort", s: id, id: callId } satisfies ToWorker, [])
+
+									resolve("aborted")
+								}
+								signal?.addEventListener?.("abort", onAbort)
+							})
+
+							try {
+								const reply = await Promise.race([
+									call(
+										next => {
+											callId = next
+
+											return { t: "rtfConvert", s: id, id: next, edits: { parts, removed: edits.removed } }
+										},
+										parts.map(([, part]) => part.buffer as ArrayBuffer)
+									),
+									aborted
+								])
+
+								if (reply === "aborted" || isAborted(signal)) return { kind: "aborted" }
+								if (reply.t !== "rtfConverted" || reply.answer === undefined)
+									throw new Error(
+										reply.t === "rtfConverted" ? (reply.error ?? "") : "The document could not be converted"
+									)
+
+								return answerOf(reply.answer)
+							} finally {
+								if (onAbort !== undefined) signal?.removeEventListener?.("abort", onAbort)
+							}
 						},
 						release: close
 					}

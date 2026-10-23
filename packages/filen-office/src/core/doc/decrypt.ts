@@ -249,30 +249,46 @@ async function rc4Key(lKey: number, table: Uint8Array, password: string): Promis
 // AlgID RC4, AlgIDHash SHA-1, KeySize 40–128 bits), EncryptionVerifier (§2.3.3: 16-byte salt and verifier, 20-byte
 // verifier hash). §2.3.5.2: H0 = SHA-1(salt + password), key(block) = SHA-1(H0 + block) cut to KeySize; a 40-bit key is
 // padded with zeros to 128 bits.
-async function cryptoApiKey(lKey: number, table: Uint8Array, decryption: DocDecryption): Promise<DocKey> {
-	const end = lKey
+// What makes an RC4 CryptoAPI EncryptionHeader and EncryptionVerifier unreadable ([MS-OFFCRYPTO] §2.3.5.1, §2.3.3) within
+// the first `lKey` bytes of the Table stream, else undefined. The structure is checked without the password, so a
+// damaged file is refused before one is asked for; only the verifier's hash needs the key.
+export function cryptoApiHeaderProblem(table: Uint8Array, lKey: number): string | undefined {
+	const end = Math.min(lKey, table.length)
 
-	if (end < 12) throw corrupt("the RC4 CryptoAPI EncryptionHeader is truncated")
+	if (end < 12) return "the RC4 CryptoAPI EncryptionHeader is truncated"
 
 	const headerSize = le32(table, 8)
 	const verifierAt = 12 + headerSize
 
-	if (headerSize < 32 || verifierAt + 4 + SALT + SALT + 4 + SHA1_BYTES > end)
-		throw corrupt("the RC4 CryptoAPI EncryptionHeader is truncated")
+	if (headerSize < 32 || verifierAt + 4 + SALT + SALT + 4 + SHA1_BYTES > end) return "the RC4 CryptoAPI EncryptionHeader is truncated"
 
-	const algId = le32(table, 12 + 8)
-	const algIdHash = le32(table, 12 + 12)
+	// Another cipher is no damage: it is told apart as such (cryptoApiCipher).
+	if (cryptoApiCipher(table, end) === "other") return undefined
+
 	const keySize = le32(table, 12 + 16) || 40
 
-	if (algId !== 0x6801 || (algIdHash !== 0x8004 && algIdHash !== 0))
-		throw new DocError("encrypted", "a CryptoAPI cipher other than RC4 with SHA-1", { encryption: "unknown" })
-
-	if (keySize < 40 || keySize > 128 || keySize % 8 !== 0) throw corrupt(`RC4 CryptoAPI KeySize ${keySize}`)
+	if (keySize < 40 || keySize > 128 || keySize % 8 !== 0) return `RC4 CryptoAPI KeySize ${keySize}`
 
 	const saltSize = le32(table, verifierAt)
 	const hashSize = le32(table, verifierAt + 4 + SALT + SALT)
 
-	if (saltSize !== SALT || hashSize !== SHA1_BYTES) throw corrupt("the RC4 CryptoAPI EncryptionVerifier is malformed")
+	if (saltSize !== SALT || hashSize !== SHA1_BYTES) return "the RC4 CryptoAPI EncryptionVerifier is malformed"
+
+	return undefined
+}
+
+async function cryptoApiKey(lKey: number, table: Uint8Array, decryption: DocDecryption): Promise<DocKey> {
+	const end = lKey
+	const problem = cryptoApiHeaderProblem(table, lKey)
+
+	if (problem !== undefined) throw corrupt(problem)
+
+	if (cryptoApiCipher(table, end) === "other")
+		throw new DocError("encrypted", "a CryptoAPI cipher other than RC4 with SHA-1", { encryption: "unknown" })
+
+	const headerSize = le32(table, 8)
+	const verifierAt = 12 + headerSize
+	const keySize = le32(table, 12 + 16) || 40
 
 	const salt = table.subarray(verifierAt + 4, verifierAt + 4 + SALT)
 	const encoded = utf16le(decryption.password)
@@ -341,7 +357,48 @@ export function docCipherScheme(fObfuscated: boolean, table: Uint8Array | undefi
 	const minor = le16(table, 2)
 
 	if (major === 1 && minor === 1) return "rc4"
-	if (major >= 2 && major <= 4 && minor === 2) return "cryptoApiRc4"
+	// RC4 CryptoAPI only when its EncryptionHeader names RC4 with SHA-1 ([MS-OFFCRYPTO] §2.3.5.1, §2.3.2): another
+	// CryptoAPI cipher is told apart before any password is asked for.
+	// A malformed header is still RC4 CryptoAPI by its version: the key derivation refuses it as damaged.
+	if (major >= 2 && major <= 4 && minor === 2) return cryptoApiCipher(table, table.length) === "other" ? "unknown" : "cryptoApiRc4"
 
 	return "unknown"
+}
+
+const F_CRYPTOAPI = 0x04
+const F_AES = 0x20
+const ALG_RC4 = 0x6801
+const ALG_AES_128 = 0x660e
+const ALG_AES_256 = 0x6610
+const ALG_SHA1 = 0x8004
+
+// The cipher a CryptoAPI EncryptionHeader names ([MS-OFFCRYPTO] §2.3.2: Flags, SizeExtra, AlgID, AlgIDHash after
+// the 12-byte prefix of version, flags and header size, within the first `end` bytes): RC4 with SHA-1, another cipher
+// (AES), or a header too short or without fCryptoAPI to say. AlgID 0 is the default the flags name: AES with fAES,
+// else RC4 (§2.3.2, §2.3.5.1); AlgIDHash 0 is SHA-1.
+function cryptoApiCipher(table: Uint8Array, end: number): "rc4" | "other" | "malformed" {
+	if (end < 12 || table.length < 12) return "malformed"
+
+	const headerSize = le32(table, 8)
+
+	if (headerSize < 32 || 12 + headerSize > Math.min(end, table.length)) return "malformed"
+
+	const flags = le32(table, 12)
+
+	if ((flags & F_CRYPTOAPI) === 0) return "malformed"
+
+	const algId = le32(table, 12 + 8)
+	const algIdHash = le32(table, 12 + 12)
+	const cipher =
+		algId === 0
+			? (flags & F_AES) === 0
+				? "rc4"
+				: "aes"
+			: algId === ALG_RC4
+				? "rc4"
+				: algId >= ALG_AES_128 && algId <= ALG_AES_256
+					? "aes"
+					: "other"
+
+	return cipher === "rc4" && (algIdHash === ALG_SHA1 || algIdHash === 0) ? "rc4" : "other"
 }

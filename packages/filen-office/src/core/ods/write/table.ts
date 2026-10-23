@@ -21,6 +21,29 @@ import { patchAttributes, type Shifter } from "../unheld"
 const encoder = new TextEncoder()
 const decoder = { decode: (bytes: Uint8Array): string => decodeUtf8(bytes) }
 
+// What a new table holds beyond the model (a conversion's page setup and conditional formats).
+export interface NewTable {
+	// The master page its style names (ODF 1.3 Part 3 §16.9), else "Default".
+	readonly masterPage?: string
+	// Rows and columns a new page starts at (fo:break-before, §20.191).
+	readonly rowBreaks?: ReadonlySet<number>
+	readonly colBreaks?: ReadonlySet<number>
+	// Rows and columns repeated on every printed page (table:table-header-rows, -columns, §9.1.7, §9.1.12).
+	readonly titleRows?: TitleSpan | null
+	readonly titleCols?: TitleSpan | null
+	// Frames anchored to cells (draw:frame, ODF 1.3 Part 3 §10.4.3), by "row,col": markup each cell holds.
+	readonly frames?: ReadonlyMap<string, string>
+	// Markup it ends with (after its rows and names).
+	readonly end?: string
+}
+
+export interface TitleSpan {
+	readonly first: number
+	readonly last: number
+}
+
+export const NO_NEW_TABLE: NewTable = {}
+
 export interface TableContext {
 	readonly styles: OdsStyleWriter
 	readonly cellStyles: OdsCellStyles
@@ -273,6 +296,9 @@ function startsWithName(tag: Uint8Array, name: Uint8Array): boolean {
 	return after === 32 || after === 9 || after === 10 || after === 13 || after === 47 || after === 62
 }
 
+// Rows of a table written from the model joined into one piece of the stream.
+const ROWS_PER_PIECE = 512
+
 export class TableWriter {
 	private readonly context: TableContext
 	readonly entry: XlsxSheetEntry
@@ -313,6 +339,8 @@ export class TableWriter {
 	private defaultStyle: { name: string; custom: boolean } | null = null
 	// Notes and links an edit changed, and the rows they are on.
 	features: SheetFeatures = NO_FEATURES
+	// A new table's page breaks and print titles.
+	fresh: NewTable = NO_NEW_TABLE
 	// Rows holding what the model does not carry that names cells by address (unheld.ts), with how the sheets moved:
 	// written with those addresses moved. Null where nothing moved.
 	unheld: TableUnheld | null = null
@@ -352,16 +380,26 @@ export class TableWriter {
 	// how a reader tells the default.
 	columns(): string {
 		const width = Math.max(this.width(), 1)
-		const total = Math.min(SHEET_MAX_COLS, width > 1024 ? SHEET_MAX_COLS : 1024)
+		// A new table's columns reach the grid's last, every one as wide as the model has it (a reader takes its own
+		// default for columns a table does not declare).
+		const total = Math.min(SHEET_MAX_COLS, width > 1024 || this.source === null ? SHEET_MAX_COLS : 1024)
 		const ranges = [...this.model.cols].sort((a, b) => a.first - b.first)
 		const parts: string[] = []
 		let col = 0
+		// Columns in groups as deep as their outline levels (table:table-column-group, ODF 1.3 Part 3 §9.1.10).
+		let level = 0
+		const nest = (to: number): void => {
+			for (; level < to; level++) parts.push("<table:table-column-group>")
+			for (; level > to; level--) parts.push("</table:table-column-group>")
+		}
 
-		const emit = (count: number, range: XlsxColRange | undefined): void => {
-			if (count <= 0) return
-
+		// A new table's page breaks start a run of their own, its print titles are a run of their own.
+		const breaks = [...(this.fresh.colBreaks ?? [])].sort((a, b) => a - b)
+		const titles = this.fresh.titleCols ?? null
+		let nextBreak = 0
+		const write = (from: number, count: number, range: XlsxColRange | undefined): void => {
 			const px = this.view.columnPx(range)
-			const style = this.context.styles.column(px, false)
+			const style = this.context.styles.column(px, breaks[nextBreak] === from)
 			const hidden = range !== undefined && (range.flags & ColFlag.HIDDEN) !== 0
 			const cellStyle = range === undefined || range.style <= 0 ? this.context.styles.cell(0) : this.context.styles.cell(range.style)
 			let tag = `<table:table-column table:style-name="${escapeAttribute(style)}"`
@@ -372,16 +410,41 @@ export class TableWriter {
 
 			parts.push(`${tag}/>`)
 		}
+		const emit = (from: number, count: number, range: XlsxColRange | undefined): void => {
+			if (count <= 0) return
+
+			nest(range === undefined ? 0 : (range.flags & ColFlag.OUTLINE_MASK) >> ColFlag.OUTLINE_SHIFT)
+
+			const end = from + count
+
+			for (let at = from; at < end;) {
+				let stop = end
+
+				// A column starting a page alone: every column of a repeated one would.
+				while (nextBreak < breaks.length && (breaks[nextBreak] ?? 0) < at) nextBreak++
+				if (breaks[nextBreak] === at) stop = at + 1
+				else if (nextBreak < breaks.length) stop = Math.min(stop, breaks[nextBreak] ?? stop)
+				if (titles !== null) stop = Math.min(stop, at < titles.first ? titles.first : at <= titles.last ? titles.last + 1 : stop)
+				if (titles !== null && at === titles.first) parts.push("<table:table-header-columns>")
+
+				write(at, stop - at, range)
+
+				if (titles !== null && stop === titles.last + 1) parts.push("</table:table-header-columns>")
+
+				at = stop
+			}
+		}
 
 		for (const range of ranges) {
 			if (range.first >= total) break
 
-			emit(range.first - col, undefined)
-			emit(Math.min(range.last + 1, total) - Math.max(range.first, col), range)
+			emit(col, range.first - col, undefined)
+			emit(Math.max(range.first, col), Math.min(range.last + 1, total) - Math.max(range.first, col), range)
 			col = Math.min(range.last + 1, total)
 		}
 
-		emit(total - col, undefined)
+		emit(col, total - col, undefined)
+		nest(0)
 
 		return parts.join("")
 	}
@@ -778,14 +841,48 @@ export class TableWriter {
 	// Rows past the source's last: written from the model up to the last row it holds anything on (a new sheet
 	// at least one, a table holding one row at least, ODF 1.3 Part 3 §9.1.2).
 	rowsEnd(): string {
-		const out: string[] = []
+		return [...this.rowsEndPieces()].join("")
+	}
+
+	// rowsEnd in pieces of some rows each, for a writer that streams them.
+	*rowsEndPieces(): Generator<string> {
+		let out: string[] = []
 		const last = Math.max(this.lastModelRow(), this.source === null ? 0 : -1)
 
 		const wrote = this.nextTarget <= last
+		// A new sheet's rows in groups as deep as their outline levels (table:table-row-group, ODF 1.3 Part 3 §9.1.9).
+		let level = 0
+		const grouped = this.source === null
+		const nest = (to: number): void => {
+			for (; level < to; level++) out.push("<table:table-row-group>")
+			for (; level > to; level--) out.push("</table:table-row-group>")
+		}
 
-		for (let row = this.nextTarget; row <= last;) row = this.spanFresh(row, last + 1, out)
+		const titles = this.fresh.titleRows ?? null
+
+		for (let row = this.nextTarget; row <= last;) {
+			if (grouped) nest((this.view.rowProps(row).flags & RowFlag.OUTLINE_MASK) >> RowFlag.OUTLINE_SHIFT)
+
+			// Print titles are a run of their own.
+			const stop =
+				titles === null
+					? last + 1
+					: Math.min(last + 1, row < titles.first ? titles.first : row <= titles.last ? titles.last + 1 : last + 1)
+
+			if (titles !== null && row === titles.first) out.push("<table:table-header-rows>")
+
+			row = this.spanFresh(row, stop, out)
+
+			if (titles !== null && row === titles.last + 1) out.push("</table:table-header-rows>")
+
+			if (out.length >= ROWS_PER_PIECE) {
+				yield out.join("")
+				out = []
+			}
+		}
 
 		this.nextTarget = Math.max(this.nextTarget, last + 1)
+		nest(0)
 
 		// Rows written or changed are followed by the rest of the grid at the sheet's default height, as LibreOffice
 		// writes a table: a reader takes the commonest height for the rows a table does not reach, which the rows
@@ -811,7 +908,7 @@ export class TableWriter {
 			this.nextTarget = SHEET_MAX_ROWS
 		}
 
-		return out.join("")
+		if (out.length > 0) yield out.join("")
 	}
 
 	private lastModelRow(): number {
@@ -826,7 +923,14 @@ export class TableWriter {
 
 		// Rows a note, a link or a validation is on.
 		for (const row of this.features.rows) last = Math.max(last, row)
-		for (const map of [this.features.notes, this.features.links])
+
+		// A new table's validations, whose rows none of the above names, its page breaks and print titles.
+		if (this.source === null) {
+			last = Math.max(last, this.features.validations?.lastRow ?? -1, this.fresh.titleRows?.last ?? -1)
+
+			for (const row of this.fresh.rowBreaks ?? []) last = Math.max(last, row)
+		}
+		for (const map of [this.features.notes, this.features.links, this.fresh.frames])
 			for (const cell of map?.keys() ?? []) last = Math.max(last, Number(cell.split(",")[0]))
 
 		return Math.min(SHEET_MAX_ROWS - 1, last)
@@ -848,9 +952,15 @@ export class TableWriter {
 		// Rows only covered by the same merges (none starting on them) are alike: their covered cells.
 		const inside = merges.every(merge => merge.startRow < from)
 		const lastInside = merges.reduce((last, merge) => Math.min(last, merge.endRow), SHEET_MAX_ROWS - 1)
-		const featured = (row: number): boolean => this.featureColsOf(row).length > 0 || this.features.rows.has(row)
+		// A new table's rows alike but for their validations' names hold the same ones up to the next break.
+		const validations = this.source === null ? this.features.validations : null
+		const featured = (row: number): boolean =>
+			validations === null ? this.featureColsOf(row).length > 0 || this.features.rows.has(row) : this.noteOrLink(row)
 
-		if (cells.length === 0 && !styled && inside && !featured(from) && this.view.rowStyle(from) < 0) {
+		// A row starting a page stands alone: every row of a repeated one would.
+		const breaks = this.fresh.rowBreaks
+
+		if (cells.length === 0 && !styled && inside && !featured(from) && this.view.rowStyle(from) < 0 && breaks?.has(from) !== true) {
 			// Empty rows alike: up to the next row with anything of its own.
 			let next = from + 1
 			const store = this.view.storeRowsIn(from + 1, to)[0] ?? to
@@ -868,8 +978,10 @@ export class TableWriter {
 					other.flags !== props.flags ||
 					!sameHeight(other.heightPt, props.heightPt) ||
 					next > lastInside ||
-					!sameMerges(this.view.mergesIn(next), merges) ||
-					featured(next)
+					(this.mergeBreaks().has(next) && !sameMerges(this.view.mergesIn(next), merges)) ||
+					featured(next) ||
+					validations?.breaks.has(next) === true ||
+					breaks?.has(next) === true
 				)
 					break
 
@@ -887,7 +999,11 @@ export class TableWriter {
 	}
 
 	private rowOpen(props: { heightPt: number; flags: number }, count: number, row: number): string {
-		const style = this.context.styles.row(this.view.height(props), (props.flags & RowFlag.CUSTOM_HEIGHT) !== 0, false)
+		const style = this.context.styles.row(
+			this.view.height(props),
+			(props.flags & RowFlag.CUSTOM_HEIGHT) !== 0,
+			this.fresh.rowBreaks?.has(row) === true
+		)
 		let tag = `<table:table-row table:style-name="${escapeAttribute(style)}"`
 
 		if (count > 1) tag += ` table:number-rows-repeated="${count}"`
@@ -908,11 +1024,33 @@ export class TableWriter {
 	// Columns of a row with a note or a link an edit changed, by row.
 	private featureCols: Map<number, number[]> | null = null
 
-	private featureColsOf(row: number): readonly number[] {
+	// Rows where the merges a row is in may change: each merge's first row and the row after its last.
+	private mergeBreaksSet: Set<number> | null = null
+
+	private mergeBreaks(): ReadonlySet<number> {
+		if (this.mergeBreaksSet === null) {
+			const quads = this.model.merges
+			const breaks = new Set<number>()
+
+			for (let k = 0; k + 3 < quads.length; k += 4) breaks.add(quads[k] ?? 0).add((quads[k + 2] ?? 0) + 1)
+
+			this.mergeBreaksSet = breaks
+		}
+
+		return this.mergeBreaksSet
+	}
+
+	// Whether a note or a link is on the row.
+	private noteOrLink(row: number): boolean {
+		return (this.noteLinkCols().get(row)?.length ?? 0) > 0
+	}
+
+	// Columns of each row's notes and links, built once.
+	private noteLinkCols(): Map<number, number[]> {
 		if (this.featureCols === null) {
 			const index = new Map<number, number[]>()
 
-			for (const map of [this.features.notes, this.features.links]) {
+			for (const map of [this.features.notes, this.features.links, this.fresh.frames]) {
 				for (const cell of map?.keys() ?? []) {
 					const [at = 0, col = 0] = cell.split(",").map(Number)
 					let list = index.get(at)
@@ -926,7 +1064,11 @@ export class TableWriter {
 			this.featureCols = index
 		}
 
-		const cols = this.featureCols.get(row) ?? []
+		return this.featureCols
+	}
+
+	private featureColsOf(row: number): readonly number[] {
+		const cols = this.noteLinkCols().get(row) ?? []
 		const validations = this.features.validations?.bounds(row) ?? []
 
 		return validations.length === 0 ? cols : [...cols, ...validations.map(col => col - 1).filter(col => col >= 0), ...validations]
@@ -983,38 +1125,24 @@ export class TableWriter {
 
 			if (to <= from) continue
 
-			const cell = this.view.cell(row, from)
+			// The row's bounds hold each note's and link's column and the next, and where its validations change: a
+			// span between two is alike, a note or a link only ever a span of its own.
+			const features =
+				this.features.notes !== null ||
+				this.features.links !== null ||
+				this.features.validations !== null ||
+				this.fresh.frames !== undefined
 
-			// One cell at a time where a note or a link is (each is the cell's own).
-			if (this.features.notes !== null || this.features.links !== null || this.features.validations !== null) {
-				let col = from
-
-				while (col < to) {
-					const extras = this.extras(row, col, null, undefined, null, -1)
-
-					if (extras.note === undefined && extras.link === undefined) {
-						let end = col + 1
-
-						while (
-							end < to &&
-							this.features.notes?.has(`${row},${end}`) !== true &&
-							this.features.links?.has(`${row},${end}`) !== true &&
-							this.features.validations?.name(row, end) === extras.validation
-						)
-							end++
-
-						out.push(this.cell(row, col, this.view.cell(row, col), end - col, undefined, extras))
-						col = end
-					} else {
-						out.push(this.cell(row, col, this.view.cell(row, col), 1, undefined, extras))
-						col++
-					}
-				}
-
-				continue
-			}
-
-			out.push(this.cell(row, from, cell, to - from, undefined, NO_EXTRAS))
+			out.push(
+				this.cell(
+					row,
+					from,
+					this.view.cell(row, from),
+					to - from,
+					undefined,
+					features ? this.extras(row, from, null, undefined, null, -1) : NO_EXTRAS
+				)
+			)
 		}
 
 		return out.join("")
@@ -1051,7 +1179,8 @@ export class TableWriter {
 					: element === null || source === undefined
 						? undefined
 						: tagAttribute(element.subarray(source.start, source.openEnd), "table:content-validation-name"),
-			kept: element === null || source === undefined ? "" : keptChildren(element, source),
+			kept:
+				element === null || source === undefined ? (this.fresh.frames?.get(`${row},${col}`) ?? "") : keptChildren(element, source),
 			formula: keptFormula(this.view.cell(row, col), element, source, decoded, sourceCol)
 		}
 	}

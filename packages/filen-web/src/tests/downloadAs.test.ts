@@ -14,7 +14,19 @@ const mocks = vi.hoisted(() => ({
 	docxProtection: { open: vi.fn() },
 	docxLegacy: { open: vi.fn() },
 	docxRtf: { open: vi.fn() },
+	docxConvert: {
+		convert:
+			vi.fn<
+				(
+					bytes: Uint8Array,
+					from: string,
+					to: string,
+					options: { signal: AbortSignal; owned?: boolean; password?: string }
+				) => Promise<unknown>
+			>()
+	},
 	openSheet: vi.fn(),
+	textToXlsx: vi.fn(),
 	makeSheetPdf: vi.fn(),
 	downloadBlob: vi.fn<(name: string, blob: Blob) => void>(),
 	recordContentVerdict: vi.fn(),
@@ -37,6 +49,7 @@ vi.mock("@/features/preview/lib/docxEngine", () => ({
 	docxProtection: mocks.docxProtection,
 	docxLegacy: mocks.docxLegacy,
 	docxRtf: mocks.docxRtf,
+	docxConvert: mocks.docxConvert,
 	DOCX_FONT_URLS: {}
 }))
 vi.mock("@/features/preview/lib/docxPdf", () => ({
@@ -44,7 +57,11 @@ vi.mock("@/features/preview/lib/docxPdf", () => ({
 	reportDocxPdf: (result: { report: { missing: string[] } }) => (result.report.missing.length > 0 ? "previewDocxPdfMissingGlyphs" : null),
 	docxPdfFailure: (_error: unknown, aborted: boolean) => (aborted ? null : "previewDocxPdfFailed")
 }))
-vi.mock("@/features/spreadsheet/lib/sheetHosts", () => ({ openSheet: mocks.openSheet, isTextSheetKind: () => false }))
+vi.mock("@/features/spreadsheet/lib/sheetHosts", () => ({
+	openSheet: mocks.openSheet,
+	textToXlsx: mocks.textToXlsx,
+	isTextSheetKind: (kind: string) => kind === "csv" || kind === "tsv" || kind === "tab"
+}))
 vi.mock("@/features/spreadsheet/save/sheetPdf", () => ({
 	makeSheetPdf: mocks.makeSheetPdf,
 	sheetPdfMessages: (result: { ok: boolean }) => ({
@@ -287,7 +304,7 @@ describe("Download as ▸ PDF of documents", () => {
 
 		expect((await downloadedZip()).entries.map(([name]) => name)).toEqual(["b.pdf"])
 		expect(mocks.toast.error).toHaveBeenCalledOnce()
-		expect(mocks.toast.error).toHaveBeenCalledWith("2 of 3 files could not be made into a PDF", {
+		expect(mocks.toast.error).toHaveBeenCalledWith("2 of 3 files could not be converted", {
 			description: "a.docx: The PDF could not be made\nc.docx: The PDF could not be made",
 			classNames: { description: "whitespace-pre-line" }
 		})
@@ -321,7 +338,7 @@ describe("Download as ▸ PDF of documents", () => {
 
 		const description = (mocks.toast.error.mock.calls[0]?.[1] as { description: string }).description
 
-		expect(mocks.toast.error.mock.calls[0]?.[0]).toBe("7 of 7 files could not be made into a PDF")
+		expect(mocks.toast.error.mock.calls[0]?.[0]).toBe("7 of 7 files could not be converted")
 		expect(description.split("\n")).toHaveLength(6)
 		expect(description.split("\n").at(-1)).toBe("And 2 more")
 	})
@@ -592,7 +609,7 @@ describe("Download as ▸ PDF of several files, saved as the drive's Download sa
 
 		expect(file1.writable.write).not.toHaveBeenCalled()
 		expect(mocks.save.discardPickedFile).toHaveBeenCalledWith(file1.save)
-		expect(mocks.toast.error).toHaveBeenCalledWith("2 of 2 files could not be made into a PDF", expect.anything())
+		expect(mocks.toast.error).toHaveBeenCalledWith("2 of 2 files could not be converted", expect.anything())
 	})
 
 	function swSave(): void {
@@ -783,5 +800,384 @@ describe("Download as ▸ PDF of spreadsheets", () => {
 
 		expect(mocks.makeSheetPdf).not.toHaveBeenCalled()
 		expect(mocks.toast.error).toHaveBeenCalledWith(expect.any(String), { description: "book.xlsx" })
+	})
+})
+
+describe("Download as ▸ another editable format", () => {
+	const DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+	function converted(text = "converted", lossy: { kind: string; count: number }[] = []) {
+		return { kind: "converted", bytes: new TextEncoder().encode(text), lossy }
+	}
+
+	async function downloaded(): Promise<[string, string, string]> {
+		const [name, blob] = mocks.downloadBlob.mock.calls[0] ?? ["", new Blob()]
+
+		return [name, blob.type, await blob.text()]
+	}
+
+	function workbook(answer: unknown) {
+		return { query: vi.fn(() => Promise.resolve(answer)), close: vi.fn() }
+	}
+
+	it("converts a document in the document worker and downloads it under the new extension and type", async () => {
+		mocks.docxConvert.convert.mockResolvedValue(converted("docx bytes"))
+		await startDownloadAs([file("notes.odt")], "docx", CONTEXT)
+
+		const [bytes, from, to, options] = mocks.docxConvert.convert.mock.calls[0] ?? []
+
+		expect([from, to]).toEqual(["odt", "docx"])
+		// Its own read goes to the worker as it is.
+		expect(bytes).toBeInstanceOf(Uint8Array)
+		expect(options).toMatchObject({ owned: true })
+		expect(await downloaded()).toEqual(["notes.docx", DOCX, "docx bytes"])
+		expect(mocks.makeDocxPdf).not.toHaveBeenCalled()
+		expect(mocks.toast.warning).not.toHaveBeenCalled()
+	})
+
+	it("hands a buffer the preview holds over as a copy", async () => {
+		const held = ZIP.slice()
+
+		mocks.joinPreviewBytes.mockResolvedValue(held)
+		mocks.docxConvert.convert.mockResolvedValue(converted())
+		await startDownloadAs([file("report.docx")], "odt", CONTEXT)
+
+		expect(mocks.docxConvert.convert.mock.calls[0]?.[3]).toMatchObject({ owned: false })
+		expect(mocks.sdk.downloadFileBytes).not.toHaveBeenCalled()
+		expect((await downloaded())[0]).toBe("report.odt")
+	})
+
+	it("says what the converted copy lacks", async () => {
+		mocks.docxConvert.convert.mockResolvedValue(converted("x", [{ kind: "chart", count: 2 }]))
+		await startDownloadAs([file("report.docx")], "odt", CONTEXT)
+
+		expect(mocks.toast.warning).toHaveBeenCalledWith("Some of this file's content or formatting is not in the converted copy", {
+			description: "report.docx"
+		})
+	})
+
+	it("refuses a password-protected document: its copy could not keep the protection", async () => {
+		mocks.docxConvert.convert.mockResolvedValue({ kind: "refused", reason: "encrypted", message: "x" })
+		await startDownloadAs([file("secret.docx")], "odt", CONTEXT)
+
+		expect(mocks.downloadBlob).not.toHaveBeenCalled()
+		expect(mocks.toast.error).toHaveBeenCalledWith(
+			"Password-protected files can't be converted to OpenDocument, because the copy would not be protected",
+			{
+				description: "secret.docx"
+			}
+		)
+	})
+
+	it("a password-protected Word 97–2003 document asks its password; its .docx is protected with it", async () => {
+		mocks.joinPreviewBytes.mockResolvedValue(COMPOUND.slice())
+		mocks.docxProtection.open.mockResolvedValue({ kind: "plain" })
+		mocks.docxConvert.convert.mockImplementation((_bytes, _from, _to, options) =>
+			Promise.resolve(
+				options.password === undefined
+					? { kind: "refused", reason: "encrypted", message: "x", encryption: "rc4" }
+					: options.password === "right"
+						? converted("sealed docx")
+						: { kind: "refused", reason: "wrongPassword", message: "x" }
+			)
+		)
+
+		const done = startDownloadAs([file("old.doc")], "docx", CONTEXT)
+
+		await until(() => currentPasswordAsk() !== null)
+		expect(currentPasswordAsk()?.purpose).toBe("copy")
+		expect(await currentPasswordAsk()?.verify("wrong", new AbortController().signal)).toBe("wrong")
+		expect(await currentPasswordAsk()?.verify("right", new AbortController().signal)).toBe("accepted")
+		await done
+
+		// The buffer the preview holds is never handed over: the file may be read again with its password.
+		expect(mocks.docxConvert.convert.mock.calls.map(call => [call[3].owned === true, call[3].password])).toEqual([
+			[false, undefined],
+			[false, "wrong"],
+			[false, "right"]
+		])
+		expect(await downloaded()).toEqual(["old.docx", DOCX, "sealed docx"])
+	})
+
+	it("refuses a Word 97–2003 document encrypted with a cipher no password opens here, asking nothing", async () => {
+		mocks.joinPreviewBytes.mockResolvedValue(COMPOUND.slice())
+		mocks.docxConvert.convert.mockResolvedValue({ kind: "refused", reason: "encrypted", message: "x", encryption: "unknown" })
+		await startDownloadAs([file("old.doc")], "docx", CONTEXT)
+
+		expect(currentPasswordAsk()).toBeNull()
+		expect(mocks.docxProtection.open).not.toHaveBeenCalled()
+		expect(mocks.toast.error).toHaveBeenCalledWith("This document uses an encryption method Filen can't open.", {
+			description: "old.doc"
+		})
+	})
+
+	it("refuses a password-protected OpenDocument text document to .docx as unsupported encryption, not as an OpenDocument copy", async () => {
+		mocks.docxConvert.convert.mockResolvedValue({ kind: "refused", reason: "encrypted", message: "x" })
+		await startDownloadAs([file("secret.odt")], "docx", CONTEXT)
+
+		expect(currentPasswordAsk()).toBeNull()
+		expect(mocks.toast.error).toHaveBeenCalledWith("This document uses an encryption method Filen can't open.", {
+			description: "secret.odt"
+		})
+	})
+
+	it("refuses an .odt of a password-protected document without asking its password", async () => {
+		mocks.joinPreviewBytes.mockResolvedValue(COMPOUND.slice())
+		mocks.docxConvert.convert.mockResolvedValue({ kind: "refused", reason: "encrypted", message: "x" })
+		await startDownloadAs([file("old.doc")], "odt", CONTEXT)
+
+		expect(currentPasswordAsk()).toBeNull()
+		expect(mocks.docxProtection.open).not.toHaveBeenCalled()
+		expect(mocks.toast.error).toHaveBeenCalledWith(
+			"Password-protected files can't be converted to OpenDocument, because the copy would not be protected",
+			{ description: "old.doc" }
+		)
+	})
+
+	it("downloads a .doc that is really a password-protected Word package as it is, still protected", async () => {
+		const locked = { dispose: vi.fn() }
+
+		mocks.joinPreviewBytes.mockResolvedValue(COMPOUND.slice())
+		mocks.docxConvert.convert.mockResolvedValue({ kind: "refused", reason: "encrypted", message: "x" })
+		mocks.docxProtection.open.mockResolvedValue({ kind: "needsPassword", locked })
+		await startDownloadAs([file("old.doc")], "docx", CONTEXT)
+
+		const [name, type] = await downloaded()
+
+		expect([name, type]).toEqual(["old.docx", DOCX])
+		expect(new Uint8Array(await (mocks.downloadBlob.mock.calls[0]?.[1] ?? new Blob()).arrayBuffer())).toEqual(COMPOUND)
+		expect(locked.dispose).toHaveBeenCalledOnce()
+		expect(currentPasswordAsk()).toBeNull()
+	})
+
+	it("Cancel aborts the conversion in the worker and downloads nothing", async () => {
+		const answer = deferred<unknown>()
+
+		mocks.docxConvert.convert.mockReturnValue(answer.promise)
+
+		const done = startDownloadAs([file("letter.rtf")], "odt", CONTEXT)
+
+		await until(() => mocks.docxConvert.convert.mock.calls.length > 0)
+
+		const signal = (mocks.docxConvert.convert.mock.calls[0]?.[3] as { signal: AbortSignal }).signal
+
+		cancelAction()()
+		expect(signal.aborted).toBe(true)
+		answer.resolve({ kind: "aborted" })
+		await done
+
+		expect(mocks.downloadBlob).not.toHaveBeenCalled()
+		expect(mocks.toast.error).not.toHaveBeenCalled()
+	})
+
+	it("converts several documents into one zip of the converted files", async () => {
+		mocks.docxConvert.convert.mockImplementation(() => Promise.resolve(converted("c")))
+		await startDownloadAs([file("a.odt", "33333333-3333-3333-3333-333333333331"), file("b.odt")], "docx", CONTEXT)
+
+		expect((await downloadedZip()).entries.map(([name]) => name)).toEqual(["a.docx", "b.docx"])
+	})
+
+	it("converts a workbook on a session of its own and closes it", async () => {
+		const opened = workbook({ ok: true, bytes: new TextEncoder().encode("xlsx"), lossy: [{ kind: "formula", count: 3 }] })
+
+		mocks.openSheet.mockResolvedValue({ kind: "opened", session: opened, info: {} })
+		await startDownloadAs([file("book.ods")], "xlsx", CONTEXT)
+
+		expect(mocks.openSheet.mock.calls[0]?.[1]).toMatchObject({ kind: "ods" })
+		expect(opened.query).toHaveBeenCalledWith("saveAs.format", { format: "xlsx" }, { signal: expect.any(AbortSignal) as AbortSignal })
+		expect(opened.close).toHaveBeenCalledOnce()
+		expect((await downloaded())[0]).toBe("book.xlsx")
+		expect(mocks.toast.warning).toHaveBeenCalledWith("3 formulas are kept only as their values", { description: "book.ods" })
+	})
+
+	it("downloads an .xls that is really a password-protected workbook package as its .xlsx, still protected", async () => {
+		const locked = { unlock: vi.fn(), dispose: vi.fn() }
+
+		mocks.joinPreviewBytes.mockResolvedValue(COMPOUND.slice())
+		mocks.openSheet.mockResolvedValue({ kind: "needsPassword", locked })
+		await startDownloadAs([file("book.xls")], "xlsx", CONTEXT)
+
+		expect(locked.dispose).toHaveBeenCalledOnce()
+		expect(locked.unlock).not.toHaveBeenCalled()
+		expect((await downloaded())[0]).toBe("book.xlsx")
+		expect(new Uint8Array(await (mocks.downloadBlob.mock.calls[0]?.[1] ?? new Blob()).arrayBuffer())).toEqual(COMPOUND)
+	})
+
+	it("refuses a password-protected workbook without asking its password", async () => {
+		const locked = { unlock: vi.fn(), dispose: vi.fn() }
+
+		mocks.openSheet.mockResolvedValue({ kind: "needsPassword", locked })
+		await startDownloadAs([file("book.xlsx")], "ods", CONTEXT)
+
+		expect(locked.dispose).toHaveBeenCalledOnce()
+		expect(locked.unlock).not.toHaveBeenCalled()
+		expect(currentPasswordAsk()).toBeNull()
+		expect(mocks.downloadBlob).not.toHaveBeenCalled()
+	})
+
+	it("makes a text file's cells a workbook first, then converts that", async () => {
+		const text = workbook({ bytes: new TextEncoder().encode("cells") })
+		const made = workbook({ ok: true, bytes: new TextEncoder().encode("ods"), lossy: [] })
+
+		mocks.openSheet.mockResolvedValueOnce({ kind: "opened", session: text, info: {} })
+		mocks.openSheet.mockResolvedValueOnce({ kind: "opened", session: made, info: {} })
+		mocks.textToXlsx.mockResolvedValue({ ok: true, bytes: new TextEncoder().encode("xlsx") })
+		await startDownloadAs([file("data.csv")], "ods", CONTEXT)
+
+		expect(mocks.openSheet.mock.calls.map(call => (call[1] as { kind: string }).kind)).toEqual(["csv", "xlsx"])
+		expect(text.query).toHaveBeenCalledWith("saveAs.cells", {}, { signal: expect.any(AbortSignal) as AbortSignal })
+		expect(mocks.textToXlsx).toHaveBeenCalledWith(new TextEncoder().encode("cells"), "data")
+		expect(made.query).toHaveBeenCalledWith("saveAs.format", { format: "ods" }, { signal: expect.any(AbortSignal) as AbortSignal })
+		expect(text.close).toHaveBeenCalledOnce()
+		expect(made.close).toHaveBeenCalledOnce()
+		expect((await downloaded())[0]).toBe("data.ods")
+	})
+
+	it("converts an editor's open workbook from its session, reading nothing", async () => {
+		const live = vi.fn((_format: "xlsx" | "ods", _signal: AbortSignal) =>
+			Promise.resolve({ ok: true as const, bytes: new TextEncoder().encode("ods"), lossy: [] })
+		)
+
+		await startDownloadAs([file("book.xlsx")], "ods", { ...CONTEXT, live })
+
+		expect(live).toHaveBeenCalledWith("ods", expect.any(AbortSignal))
+		expect(mocks.sdk.downloadFileBytes).not.toHaveBeenCalled()
+		expect(mocks.openSheet).not.toHaveBeenCalled()
+		expect((await downloaded())[0]).toBe("book.ods")
+	})
+
+	it("converts an editor's open document as the editor holds it, unsaved edits included, reading nothing", async () => {
+		const edited = Uint8Array.of(9, 9, 9)
+		const liveFile = vi.fn((_target: "docx" | "odt", _signal: AbortSignal) => Promise.resolve({ kind: "file" as const, bytes: edited }))
+
+		mocks.docxConvert.convert.mockResolvedValue(converted("odt"))
+		await startDownloadAs([file("report.docx")], "odt", { ...CONTEXT, liveFile })
+
+		expect(liveFile).toHaveBeenCalledWith("odt", expect.any(AbortSignal))
+		expect(mocks.joinPreviewBytes).not.toHaveBeenCalled()
+		expect(mocks.sdk.downloadFileBytes).not.toHaveBeenCalled()
+		expect(mocks.docxConvert.convert.mock.calls[0]?.slice(0, 3)).toEqual([edited, "docx", "odt"])
+		expect(mocks.docxConvert.convert.mock.calls[0]?.[3].owned).toBe(true)
+		expect((await downloaded())[0]).toBe("report.odt")
+	})
+
+	it("downloads an editor's OpenDocument text document converted where it is held, nothing converted again", async () => {
+		const liveFile = vi.fn((_target: "docx" | "odt", _signal: AbortSignal) =>
+			Promise.resolve({ kind: "converted" as const, conversion: { kind: "converted" as const, bytes: Uint8Array.of(5), lossy: [] } })
+		)
+
+		await startDownloadAs([file("notes.odt")], "docx", { ...CONTEXT, liveFile })
+
+		expect(mocks.docxConvert.convert).not.toHaveBeenCalled()
+		expect((await downloaded())[0]).toBe("notes.docx")
+	})
+
+	it("converts an editor's RTF document's .docx on to .odt", async () => {
+		const liveFile = vi.fn((_target: "docx" | "odt", _signal: AbortSignal) =>
+			Promise.resolve({ kind: "file" as const, bytes: Uint8Array.of(4), format: "docx" as const })
+		)
+
+		mocks.docxConvert.convert.mockResolvedValue(converted("odt"))
+		await startDownloadAs([file("letter.rtf")], "odt", { ...CONTEXT, liveFile })
+
+		expect(mocks.docxConvert.convert.mock.calls[0]?.slice(0, 3)).toEqual([Uint8Array.of(4), "docx", "odt"])
+		expect((await downloaded())[0]).toBe("letter.odt")
+	})
+
+	it("converts the saved file when the editor holds nothing to write", async () => {
+		const liveFile = vi.fn((_target: "docx" | "odt", _signal: AbortSignal) => Promise.resolve({ kind: "saved" as const }))
+
+		mocks.docxConvert.convert.mockResolvedValue(converted("odt"))
+		await startDownloadAs([file("report.docx")], "odt", { ...CONTEXT, liveFile })
+
+		expect(mocks.sdk.downloadFileBytes).toHaveBeenCalledOnce()
+		expect(mocks.docxConvert.convert.mock.calls[0]?.slice(1, 3)).toEqual(["docx", "odt"])
+		expect((await downloaded())[0]).toBe("report.odt")
+	})
+
+	it("Cancel during the editor's write ends the run quietly and downloads nothing", async () => {
+		const liveFile = vi.fn(
+			(_target: "docx" | "odt", signal: AbortSignal) =>
+				new Promise<never>((_resolve, reject) => {
+					signal.addEventListener("abort", () => {
+						const error = new Error("The write was aborted")
+
+						error.name = "AbortError"
+						reject(error)
+					})
+				})
+		)
+		const done = startDownloadAs([file("report.docx")], "odt", { ...CONTEXT, liveFile })
+
+		await until(() => liveFile.mock.calls.length > 0)
+		cancelAction()()
+		await done
+
+		expect(liveFile.mock.calls[0]?.[1].aborted).toBe(true)
+		expect(mocks.docxConvert.convert).not.toHaveBeenCalled()
+		expect(mocks.downloadBlob).not.toHaveBeenCalled()
+		expect(mocks.toast.error).not.toHaveBeenCalled()
+	})
+
+	it("reports an editor's document its writer cannot write, never converting the saved file instead", async () => {
+		const liveFile = vi.fn((_target: "docx" | "odt", _signal: AbortSignal) => Promise.reject(new Error("refused")))
+
+		await startDownloadAs([file("letter.rtf")], "docx", { ...CONTEXT, liveFile })
+
+		expect(mocks.docxConvert.convert).not.toHaveBeenCalled()
+		expect(mocks.sdk.downloadFileBytes).not.toHaveBeenCalled()
+		expect(mocks.toast.error).toHaveBeenCalledWith("This file could not be converted", { description: "letter.rtf" })
+	})
+
+	it("Cancel while an editor's workbook converts ends the run quietly and downloads nothing", async () => {
+		const answer = deferred<{ ok: true; bytes: Uint8Array; lossy: [] }>()
+		const live = vi.fn((_format: "xlsx" | "ods", _signal: AbortSignal) => answer.promise)
+		const done = startDownloadAs([file("data.csv")], "xlsx", { ...CONTEXT, live })
+
+		await until(() => live.mock.calls.length > 0)
+		cancelAction()()
+		answer.resolve({ ok: true, bytes: Uint8Array.of(1), lossy: [] })
+		await done
+
+		expect(mocks.downloadBlob).not.toHaveBeenCalled()
+		expect(mocks.toast.error).not.toHaveBeenCalled()
+	})
+
+	it("ends quietly where the editor's open entry cannot be committed (the sheet says why)", async () => {
+		const live = vi.fn((_format: "xlsx" | "ods", _signal: AbortSignal) =>
+			Promise.resolve({ ok: false as const, reason: "uncommitted", message: "x" })
+		)
+
+		await startDownloadAs([file("data.csv")], "ods", { ...CONTEXT, live })
+
+		expect(mocks.downloadBlob).not.toHaveBeenCalled()
+		expect(mocks.toast.error).not.toHaveBeenCalled()
+		expect(mocks.toast.warning).not.toHaveBeenCalled()
+	})
+
+	it("carries what an editor's document's .docx lacks into its .odt's report", async () => {
+		const liveFile = vi.fn((_target: "docx" | "odt", _signal: AbortSignal) =>
+			Promise.resolve({
+				kind: "file" as const,
+				bytes: Uint8Array.of(4),
+				format: "docx" as const,
+				lossy: [{ kind: "rtfShape" as const, count: 3 }]
+			})
+		)
+
+		mocks.docxConvert.convert.mockResolvedValue(converted("odt"))
+		await startDownloadAs([file("letter.rtf")], "odt", { ...CONTEXT, liveFile })
+
+		expect(mocks.toast.warning).toHaveBeenCalledWith("Some of this file's content or formatting is not in the converted copy", {
+			description: "letter.rtf"
+		})
+	})
+
+	it("never converts a file to its own format", async () => {
+		await startDownloadAs([file("report.docx")], "docx", CONTEXT)
+
+		expect(mocks.docxConvert.convert).not.toHaveBeenCalled()
+		expect(mocks.downloadBlob).not.toHaveBeenCalled()
+		expect(mocks.toast.error).toHaveBeenCalledWith("This file could not be converted", { description: "report.docx" })
 	})
 })

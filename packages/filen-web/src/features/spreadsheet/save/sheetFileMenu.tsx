@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { saveOfficeAutosave, useOfficeSettings } from "@/features/office/lib/officeSettings"
+import { EditorDownloadAsItems, type LiveConversion } from "@/features/drive/components/editorDownloadAs"
 import { useIsOnline } from "@/lib/useIsOnline"
 
 export interface SheetFileMenuProps {
@@ -31,11 +32,13 @@ export interface SheetFileMenuProps {
 	autosave: boolean
 	// Offers Print… (opens the print dialog).
 	onPrint?: (() => void) | undefined
+	// Download as ▸ .xlsx / .ods from the open session (unsaved edits included); undefined: from the saved file.
+	liveConversion?: LiveConversion | undefined
 }
 
-// The spreadsheet's file actions beside the cell contents: Save as .xlsx, Download as ▸ PDF or CSV, Print, and the
-// autosave setting (the same synced setting as Settings → Advanced → Documents). Nothing to offer: not shown.
-export function SheetFileMenu({ text, onDownloadCsv, onDownloadPdf, onSaveAsXlsx, autosave, onPrint }: SheetFileMenuProps) {
+// The spreadsheet's file actions beside the cell contents: Save as .xlsx, Download as ▸ PDF, CSV or the formats the
+// workbook converts to, Print, and the autosave setting (the same synced setting as Settings → Advanced → Documents). Nothing to offer: not shown.
+export function SheetFileMenu({ text, onDownloadCsv, onDownloadPdf, onSaveAsXlsx, autosave, onPrint, liveConversion }: SheetFileMenuProps) {
 	const { t } = useTranslation(["preview", "settings"])
 	const settings = useOfficeSettings()
 	const online = useIsOnline()
@@ -86,6 +89,7 @@ export function SheetFileMenu({ text, onDownloadCsv, onDownloadPdf, onSaveAsXlsx
 									{t(text ? "previewSheetDownloadCsvFormat" : "previewSheetDownloadSheetCsvFormat")}
 								</DropdownMenuItem>
 							)}
+							<EditorDownloadAsItems live={liveConversion} />
 						</DropdownMenuSubContent>
 					</DropdownMenuSub>
 				) : null}

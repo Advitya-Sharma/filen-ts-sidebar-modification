@@ -144,6 +144,77 @@ function textProperties(look: TextLook, whole: boolean, face: (family: string) =
 	])}/>`
 }
 
+// A cell style's properties for format `xf`: its cell, paragraph and whole text properties; a font face goes by the
+// name `face` gives it.
+export function cellStyleProperties(styles: SheetStyles, xf: number, face: (family: string) => string): string {
+	// A font without a name or size of its own has the workbook's base font's (an ODF style always has both).
+	const base = styles.renderStyle(0)
+	const own = styles.renderStyle(xf)
+	const render: SheetRenderStyle = {
+		...own,
+		...(own.font === undefined && base.font !== undefined && { font: base.font }),
+		...(own.size === undefined && base.size !== undefined && { size: base.size }),
+		...(own.color === undefined && base.color !== undefined && { color: base.color })
+	}
+	const protection = styles.protection(xf)
+	const locked = protection?.locked !== false
+	const hidden = protection?.hidden === true
+	const protect =
+		protection?.hideAll === true
+			? "hidden-and-protected"
+			: locked && hidden
+				? "protected formula-hidden"
+				: locked
+					? "protected"
+					: hidden
+						? "formula-hidden"
+						: "none"
+
+	if (render.pattern !== undefined) throw new StyleRefused("a pattern fill")
+	if (render.align === "centerContinuous" || render.align === "distributed") throw new StyleRefused(`${render.align} alignment`)
+	if (render.valign === "justify" || render.valign === "distributed") throw new StyleRefused(`${render.valign} alignment`)
+
+	const rotation = render.rotation
+	const angle = rotation === undefined || rotation === 255 ? "0" : String(rotation < 0 ? 360 + rotation : rotation)
+	const diagonal = render.diagonalUp ?? render.diagonalDown
+	const cell = `<style:table-cell-properties${attributes([
+		["fo:background-color", render.fill === undefined ? "transparent" : hex(render.fill)],
+		["fo:border-top", border(render.top)],
+		["fo:border-bottom", border(render.bottom)],
+		["fo:border-left", border(render.left)],
+		["fo:border-right", border(render.right)],
+		["style:diagonal-bl-tr", render.diagonalUp === undefined ? undefined : border(diagonal)],
+		["style:diagonal-tl-br", render.diagonalDown === undefined ? undefined : border(diagonal)],
+		["style:text-align-source", render.align === undefined ? "value-type" : "fix"],
+		["style:repeat-content", render.align === "fill" ? "true" : "false"],
+		["style:vertical-align", render.valign === "top" ? "top" : render.valign === "center" ? "middle" : "bottom"],
+		["fo:wrap-option", render.wrap === true ? "wrap" : "no-wrap"],
+		["style:shrink-to-fit", render.shrink === true ? "true" : "false"],
+		["style:rotation-angle", angle],
+		["style:direction", rotation === 255 ? "ttb" : "ltr"],
+		["style:writing-mode", render.rightToLeft === true ? "rl-tb" : undefined],
+		["style:cell-protect", protect]
+	])}/>`
+	const align = render.align
+	const paragraph = `<style:paragraph-properties${attributes([
+		[
+			"fo:text-align",
+			align === "left"
+				? "start"
+				: align === "right"
+					? "end"
+					: align === "center"
+						? "center"
+						: align === "justify"
+							? "justify"
+							: undefined
+		],
+		["fo:margin-left", render.indent === undefined ? undefined : points(render.indent * 15.75)]
+	])}/>`
+
+	return `${cell}${paragraph}${textProperties(renderLook(render), true, face)}`
+}
+
 export class OdsStyleWriter {
 	private readonly sheet: OdfStyleSheet
 	private readonly styles: SheetStyles
@@ -247,77 +318,13 @@ export class OdsStyleWriter {
 	}
 
 	private cellMarkup(xf: number): string {
-		// A font without a name or size of its own has the workbook's base font's (an ODF style always has both).
-		const base = this.styles.renderStyle(0)
-		const own = this.styles.renderStyle(xf)
-		const render: SheetRenderStyle = {
-			...own,
-			...(own.font === undefined && base.font !== undefined && { font: base.font }),
-			...(own.size === undefined && base.size !== undefined && { size: base.size }),
-			...(own.color === undefined && base.color !== undefined && { color: base.color })
-		}
 		const code = this.styles.numFmtCode(xf)
 		const data = code === "General" ? undefined : this.data(code, xf)
-		const protection = this.styles.protection(xf)
-		const locked = protection?.locked !== false
-		const hidden = protection?.hidden === true
-		const protect =
-			protection?.hideAll === true
-				? "hidden-and-protected"
-				: locked && hidden
-					? "protected formula-hidden"
-					: locked
-						? "protected"
-						: hidden
-							? "formula-hidden"
-							: "none"
-
-		if (render.pattern !== undefined) throw new StyleRefused("a pattern fill")
-		if (render.align === "centerContinuous" || render.align === "distributed") throw new StyleRefused(`${render.align} alignment`)
-		if (render.valign === "justify" || render.valign === "distributed") throw new StyleRefused(`${render.valign} alignment`)
-
-		const rotation = render.rotation
-		const angle = rotation === undefined || rotation === 255 ? "0" : String(rotation < 0 ? 360 + rotation : rotation)
-		const diagonal = render.diagonalUp ?? render.diagonalDown
-		const cell = `<style:table-cell-properties${attributes([
-			["fo:background-color", render.fill === undefined ? "transparent" : hex(render.fill)],
-			["fo:border-top", border(render.top)],
-			["fo:border-bottom", border(render.bottom)],
-			["fo:border-left", border(render.left)],
-			["fo:border-right", border(render.right)],
-			["style:diagonal-bl-tr", render.diagonalUp === undefined ? undefined : border(diagonal)],
-			["style:diagonal-tl-br", render.diagonalDown === undefined ? undefined : border(diagonal)],
-			["style:text-align-source", render.align === undefined ? "value-type" : "fix"],
-			["style:repeat-content", render.align === "fill" ? "true" : "false"],
-			["style:vertical-align", render.valign === "top" ? "top" : render.valign === "center" ? "middle" : "bottom"],
-			["fo:wrap-option", render.wrap === true ? "wrap" : "no-wrap"],
-			["style:shrink-to-fit", render.shrink === true ? "true" : "false"],
-			["style:rotation-angle", angle],
-			["style:direction", rotation === 255 ? "ttb" : "ltr"],
-			["style:writing-mode", render.rightToLeft === true ? "rl-tb" : undefined],
-			["style:cell-protect", protect]
-		])}/>`
-		const align = render.align
-		const paragraph = `<style:paragraph-properties${attributes([
-			[
-				"fo:text-align",
-				align === "left"
-					? "start"
-					: align === "right"
-						? "end"
-						: align === "center"
-							? "center"
-							: align === "justify"
-								? "justify"
-								: undefined
-			],
-			["fo:margin-left", render.indent === undefined ? undefined : points(render.indent * 15.75)]
-		])}/>`
 
 		return `<style:style style:name="\u0000" style:family="table-cell"${attributes([
 			["style:parent-style-name", this.cellStyles.defaultStyle],
 			["style:data-style-name", data]
-		])}>${cell}${paragraph}${textProperties(renderLook(render), true, name => this.face(name))}</style:style>`
+		])}>${cellStyleProperties(this.styles, xf, name => this.face(name))}</style:style>`
 	}
 
 	// The data style of a number format: the source's for a code read from it, else new ones.
@@ -387,9 +394,10 @@ export class OdsStyleWriter {
 		return name
 	}
 
-	// A sheet's style: the source's (`base`) with whether it shows, its direction and its tab colour (-1: none).
-	table(base: string | undefined, display: boolean, rightToLeft: boolean, tabColor: number): string {
-		const key = `${base ?? ""}|${String(display)}|${String(rightToLeft)}|${String(tabColor)}`
+	// A sheet's style: the source's (`base`) with whether it shows, its direction and its tab colour (-1: none), and a
+	// new one's master page.
+	table(base: string | undefined, display: boolean, rightToLeft: boolean, tabColor: number, masterPage?: string): string {
+		const key = `${base ?? ""}|${String(display)}|${String(rightToLeft)}|${String(tabColor)}|${masterPage ?? ""}`
 		let name = this.tableNames.get(key)
 
 		if (name === undefined) {
@@ -411,7 +419,8 @@ export class OdsStyleWriter {
 			element.delete("style:family")
 
 			if (style?.parent !== undefined) element.set("style:parent-style-name", style.parent)
-			if (!element.has("style:master-page-name")) element.set("style:master-page-name", "Default")
+			if (masterPage !== undefined) element.set("style:master-page-name", masterPage)
+			else if (!element.has("style:master-page-name")) element.set("style:master-page-name", "Default")
 
 			this.elements.push(
 				`<style:style style:name="${escapeAttribute(name)}" style:family="table"${attributes([...element])}><style:table-properties${attributes([...own])}/></style:style>`

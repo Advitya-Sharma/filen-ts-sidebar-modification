@@ -623,7 +623,7 @@ function sheetPrefix(sheet: string, lastSheet: string | null = null): string {
 
 // The formula with each reference `visit` returns something for replaced: a changed reference, or null
 // for #REF!. undefined keeps the reference as written.
-function render(parts: readonly Part[], visit: (ref: FormulaRef) => FormulaRef | null | undefined): string {
+function render(parts: readonly Part[], visit: (ref: FormulaRef, prefix: string) => FormulaRef | null | undefined): string {
 	let text = ""
 
 	for (const part of parts) {
@@ -633,7 +633,7 @@ function render(parts: readonly Part[], visit: (ref: FormulaRef) => FormulaRef |
 			continue
 		}
 
-		const next = visit(part.ref)
+		const next = visit(part.ref, part.prefix)
 
 		if (next === undefined) {
 			text += part.prefix + part.areaText
@@ -654,7 +654,7 @@ function render(parts: readonly Part[], visit: (ref: FormulaRef) => FormulaRef |
 	return text
 }
 
-export function rewriteFormula(formula: string, visit: (ref: FormulaRef) => FormulaRef | null | undefined): string {
+export function rewriteFormula(formula: string, visit: (ref: FormulaRef, prefix: string) => FormulaRef | null | undefined): string {
 	return render(formulaParts(formula), visit)
 }
 
@@ -901,7 +901,23 @@ export function renameSheetInFormula(formula: string, from: string, to: string):
 		return formula
 	}
 
-	return rewriteFormula(formula, ref => {
+	// A name holding ":" (an OpenDocument sheet's: SpreadsheetML has none) reads as a span of two sheets: the whole
+	// quoted name is that sheet's.
+	const spanned = from.includes(":")
+
+	return rewriteFormula(formula, (ref, prefix) => {
+		// Quoted: one sheet's name; unquoted (a:b!A1), a span of two sheets.
+		if (
+			spanned &&
+			prefix.startsWith("'") &&
+			!ref.external &&
+			ref.sheet !== null &&
+			ref.lastSheet !== null &&
+			sameSheet(`${ref.sheet}:${ref.lastSheet}`, from)
+		) {
+			return { ...ref, sheet: to, lastSheet: null }
+		}
+
 		const first = ref.sheet !== null && sameSheet(ref.sheet, from)
 		const last = ref.lastSheet !== null && sameSheet(ref.lastSheet, from)
 

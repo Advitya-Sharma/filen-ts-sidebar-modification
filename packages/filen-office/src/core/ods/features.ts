@@ -53,6 +53,9 @@ const DV_DEFAULTS: Readonly<Record<string, string>> = {
 
 // A dataValidation element's rule, its sqref aside, however its attributes are spelled and ordered: what tells two
 // validations apart.
+const FORMULA1 = /<formula1>([\s\S]*?)<\/formula1>/
+const FORMULA2 = /<formula2>([\s\S]*?)<\/formula2>/
+
 export function validationRuleKey(markup: string): string {
 	const open = markup.slice(0, markup.indexOf(">") + 1)
 	const attributes: string[] = []
@@ -67,9 +70,7 @@ export function validationRuleKey(markup: string): string {
 		attributes.push(`${name}=${value}`)
 	}
 
-	const formula = (tag: string): string => new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(markup)?.[1] ?? ""
-
-	return JSON.stringify([attributes.sort(), formula("formula1"), formula("formula2")])
+	return JSON.stringify([attributes.sort(), FORMULA1.exec(markup)?.[1] ?? "", FORMULA2.exec(markup)?.[1] ?? ""])
 }
 
 export interface OdsFeatureParts {
@@ -279,8 +280,11 @@ function validationRule(condition: string): ValidationRule | string {
 	if (list !== null) {
 		const items = splitArguments(list[1] ?? "")
 
-		if (items.length === 1 && (items[0] ?? "").startsWith("[")) {
-			const range = expression(items[0] ?? "")
+		// One item that is no string or number constant: an expression giving the list (a range, a name, §19.618).
+		const only = (items[0] ?? "").trim()
+
+		if (items.length === 1 && (only.startsWith("[") || (!only.startsWith('"') && only !== "" && Number.isNaN(Number(only))))) {
+			const range = expression(only)
 
 			return range === null ? "list range" : { type: "list", operator: "between", formula1: range, formula2: null }
 		}
@@ -353,13 +357,16 @@ function between(type: string, negated: boolean, args: string): ValidationRule |
 	return { type, operator: negated ? "notBetween" : "between", formula1, formula2 }
 }
 
-function messageOf(element: OdfElement | undefined): { title: string; text: string; display: boolean; kind: string } {
+// `ordered`: the message's text in document order, where it was captured so.
+function messageOf(element: OdfElement | undefined, ordered?: string): { title: string; text: string; display: boolean; kind: string } {
 	if (element === undefined) return { title: "", text: "", display: false, kind: "stop" }
 
-	const text = element.children
-		.filter(child => child.name === "text:p")
-		.map(child => paragraphText(child))
-		.join("\n")
+	const text =
+		ordered ??
+		element.children
+			.filter(child => child.name === "text:p")
+			.map(child => paragraphText(child))
+			.join("\n")
 
 	return {
 		title: element.attributes.get("table:title") ?? "",
@@ -382,13 +389,17 @@ function paragraphText(paragraph: OdfElement): string {
 	return text
 }
 
-function validationsSection(
+// Validations worked through between yields.
+const VALIDATIONS_PER_STEP = 256
+
+function* validationsSection(
 	table: OdsTable,
 	validations: OdfElement | undefined,
+	messages: ReadonlyMap<string, { readonly help: string; readonly error: string }>,
 	issues: OdsIssues,
 	names: Map<string, string>,
 	unheld: UnheldCollector | undefined
-): string | null {
+): Generator<void, string | null> {
 	const used = table.built.validations
 
 	if (used.size === 0 || validations === undefined) return null
@@ -403,7 +414,11 @@ function validationsSection(
 
 	const out: string[] = []
 
+	let step = 0
+
 	for (const [name, rects] of used) {
+		if (++step % VALIDATIONS_PER_STEP === 0) yield
+
 		const validation = byName.get(name)
 
 		if (validation === undefined) continue
@@ -420,8 +435,15 @@ function validationsSection(
 			continue
 		}
 
-		const help = messageOf(validation.children.find(child => child.name === "table:help-message"))
-		const error = messageOf(validation.children.find(child => child.name === "table:error-message"))
+		const ordered = messages.get(name)
+		const help = messageOf(
+			validation.children.find(child => child.name === "table:help-message"),
+			ordered?.help
+		)
+		const error = messageOf(
+			validation.children.find(child => child.name === "table:error-message"),
+			ordered?.error
+		)
 
 		if (validation.children.some(child => child.name === "table:error-macro")) issues.add("validation", table.name, "error macro")
 
@@ -610,7 +632,7 @@ const DATES: Readonly<Record<string, string>> = {
 function argb(color: string | undefined): string | null {
 	const rgb = parseColor(color)
 
-	return rgb === undefined ? null : (0xff000000 | rgb).toString(16).toUpperCase().padStart(8, "F")
+	return rgb === undefined ? null : ((0xff000000 | rgb) >>> 0).toString(16).toUpperCase().padStart(8, "F")
 }
 
 // A conditional format's entry type and value (calcext:type, calcext:value) as a cfvo.
@@ -900,14 +922,16 @@ function databaseRangeAddresses(range: OdfElement, unheld: UnheldCollector): voi
 	walk(range, "")
 }
 
-export function featureParts(
+// featureParts as steps: it yields between sheets and every VALIDATIONS_PER_STEP validations, so a sliced open gives
+// the host its turns.
+export function* featurePartsSteps(
 	content: OdsContent,
 	styles: OdsCellStyles,
 	issues: OdsIssues,
 	prefixes: ReadonlyMap<string, string>,
 	charts: OdsChartParts = NO_CHARTS,
 	unheld?: UnheldCollector
-): OdsFeatureParts {
+): Generator<void, OdsFeatureParts> {
 	const parts = new Map<string, Uint8Array>(charts.parts)
 	const overrides: string[] = [...charts.overrides]
 	const definedNames: XlsxDefinedName[] = []
@@ -998,7 +1022,11 @@ export function featureParts(
 
 	for (const container of content.names) names(container, null, undefined)
 
-	const sheets = content.tables.map((table, index): OdsSheetFeatures => {
+	const sheets: OdsSheetFeatures[] = []
+
+	for (const [index, table] of content.tables.entries()) {
+		yield
+
 		for (const container of table.names) names(container, index, table.name)
 
 		const sections: XlsxSection[] = []
@@ -1029,7 +1057,14 @@ export function featureParts(
 		for (const markup of conditionalSections(table, styles, issues)) sections.push(section("conditionalFormatting", markup))
 
 		const validationNames = new Map<string, string>()
-		const validations = validationsSection(table, content.validations, issues, validationNames, unheld)
+		const validations = yield* validationsSection(
+			table,
+			content.validations,
+			content.validationMessages,
+			issues,
+			validationNames,
+			unheld
+		)
 
 		if (validations !== null) sections.push(section("dataValidations", validations))
 
@@ -1054,8 +1089,8 @@ export function featureParts(
 
 		parts.set(relationshipsName, bytes)
 
-		return { sections, relationships: [...parseRelationships(bytes, `xl/worksheets/sheet${index + 1}.xml`).all], validationNames }
-	})
+		sheets.push({ sections, relationships: [...parseRelationships(bytes, `xl/worksheets/sheet${index + 1}.xml`).all], validationNames })
+	}
 
 	parts.set("[Content_Types].xml", encoder.encode(`${CONTENT_TYPES_START}${overrides.join("")}</Types>`))
 

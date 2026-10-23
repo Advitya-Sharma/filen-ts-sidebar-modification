@@ -266,7 +266,8 @@ export async function convertDocFile(
 		eventCps,
 		formFields: readFormFields(model, file),
 		ids: { docPr: 1, revision: 1, order: art.stacking.size + 1 },
-		objectPreviews
+		objectPreviews,
+		shownBoxes: new Set()
 	}
 	const storyRange = (kind: DocStory["kind"]): DocStory | undefined =>
 		model.stories.find(story => story.kind === kind && story.end > story.start)
@@ -283,7 +284,6 @@ export async function convertDocFile(
 	const finalSectPr =
 		lastSection === undefined ? "" : sectionProperties(lastSection.props, sectionReferences[model.sections.length - 1] ?? {}, props)
 
-	parts.set("word/document.xml", encode(`<w:document ${STORY_NAMESPACES}><w:body>${body}${finalSectPr}</w:body></w:document>`))
 	types.set("/word/document.xml", CT_MAIN)
 
 	for (const entry of headerParts.values()) {
@@ -366,8 +366,22 @@ export async function convertDocFile(
 	const shown = new Set<number>()
 
 	for (const placeholder of model.placeholders) if (placeholder.kind === "shape") shown.add(placeholder.spid)
+	for (const spid of conversion.shownBoxes) shown.add(spid)
 
-	for (const box of model.textBoxes) if (!shown.has(box.spid)) report.note("shape")
+	// Their text after the body's (where no anchor says), so none is left out.
+	let unanchored = ""
+
+	for (const box of model.textBoxes) {
+		if (shown.has(box.spid)) continue
+
+		report.note("shape")
+		unanchored += write(documentRels, box.story)
+	}
+
+	parts.set(
+		"word/document.xml",
+		encode(`<w:document ${STORY_NAMESPACES}><w:body>${body}${unanchored}${finalSectPr}</w:body></w:document>`)
+	)
 
 	if (file.macros) report.note("macros")
 

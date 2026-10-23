@@ -116,6 +116,21 @@ describe("Download as in the item menu", () => {
 		expect(start).toHaveBeenCalledWith([item], "pdf", { accessMode: "authed", cacheScope: "authed" })
 	})
 
+	it("offers the formats the file converts to after the PDF, never its own, and starts that conversion", async () => {
+		const item = file("notes.odt")
+
+		renderItemMenu(item)
+		await openDownloadAs()
+
+		expect(screen.queryByRole("menuitem", { name: "OpenDocument text (.odt)" })).toBeNull()
+
+		act(() => {
+			fireEvent.click(screen.getByRole("menuitem", { name: "Word document (.docx)" }))
+		})
+
+		expect(start).toHaveBeenCalledWith([item], "docx", { accessMode: "authed", cacheScope: "authed" })
+	})
+
 	it("is offered for a spreadsheet and not for a file it cannot export", () => {
 		renderItemMenu(file("book.ods"))
 		expect(screen.getByRole("menuitem", { name: "Download as" })).toBeTruthy()

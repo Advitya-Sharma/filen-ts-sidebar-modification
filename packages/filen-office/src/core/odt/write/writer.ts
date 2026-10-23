@@ -56,7 +56,7 @@ import {
 	type ListTarget,
 	type ParagraphSource
 } from "./emit"
-import { paragraphAttributes, paragraphSources, runAttributes, runSources } from "./inverse"
+import { paragraphAttributes, paragraphSources, paragraphTextSources, runAttributes, runSources, type ParagraphAttributes } from "./inverse"
 import { Meaning, PARAGRAPH_SKIPPED, StyleChains, canonicalElement, descendant, readProps, type PropertyValue, type Props } from "./meaning"
 import { runMeaning, translateRun, type SpanFrame } from "./span"
 import { odfText, sourceTextOf, wmlText, type SourceText } from "./sourceText"
@@ -1538,6 +1538,7 @@ class OdtWrite {
 					const written = paragraphAttributesOrRefuse(property, value, this.plan.tabsRelativeToIndent)
 
 					for (const [attribute, item] of written.attributes) paragraph.set(attribute, item)
+					for (const [attribute, item] of written.text ?? []) text.set(attribute, item)
 
 					if (written.tabs !== undefined) tabs = written.tabs
 				}
@@ -1979,6 +1980,7 @@ class OdtWrite {
 				if (local === "outlineLvl" || local === "numPr") throw new OdtWriteRefusal("styles", `the style ${id}'s ${local}`)
 
 				for (const attribute of paragraphSources(local)) paragraph.set(attribute, undefined)
+				for (const attribute of paragraphTextSources(local)) text.set(attribute, undefined)
 
 				if (local === "tabs") tabs = ""
 				if (now === undefined) continue
@@ -1986,6 +1988,7 @@ class OdtWrite {
 				const written = paragraphAttributesOrRefuse(local, now, this.plan.tabsRelativeToIndent)
 
 				for (const [attribute, value] of written.attributes) paragraph.set(attribute, value)
+				for (const [attribute, value] of written.text ?? []) text.set(attribute, value)
 
 				if (written.tabs !== undefined) tabs = written.tabs
 			}
@@ -6210,17 +6213,13 @@ function samePropertyValue(a: PropertyValue, b: PropertyValue): boolean {
 	return a.children === b.children && JSON.stringify([...a.attributes].sort()) === JSON.stringify([...b.attributes].sort())
 }
 
-function paragraphAttributesOrRefuse(
-	local: string,
-	value: PropertyValue,
-	tabsRelativeToIndent: boolean
-): { attributes: [string, string][]; tabs?: string } {
+function paragraphAttributesOrRefuse(local: string, value: PropertyValue, tabsRelativeToIndent: boolean): ParagraphAttributes {
 	const marginLeft = Number(value.attributes.get("left") ?? "0") / 20
 	const written = paragraphAttributes(local, value, { tabsRelativeToIndent, marginLeft })
 
 	if (written === undefined) throw new OdtWriteRefusal("styles", `the paragraph property ${local} of a new style`)
 
-	return { attributes: written.attributes, ...(written.tabs === undefined ? {} : { tabs: written.tabs }) }
+	return written
 }
 
 function runAttributesOrRefuse(local: string, value: PropertyValue, fonts: { face(family: string): string }): [string, string][] {
@@ -6301,7 +6300,7 @@ function newListStyle(
 
 // A w:lvl as an ODF list level style (Part 3 §16.33 to §16.35, §16.37), "" for a level past the nine ODF has; undefined for
 // what has no form. `element`: text:list-level-style (a list style's -bullet/-number) or text:outline-level-style.
-function levelStyle(
+export function levelStyle(
 	numbering: XmlDocument,
 	level: number,
 	fonts: { face(family: string): string },

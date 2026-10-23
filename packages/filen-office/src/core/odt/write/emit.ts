@@ -3,10 +3,20 @@ import type { OdfElement, OdfStyle, OdfStyleSheet, StyleScope } from "../../odf/
 import { runProperties, type Attributes } from "../props"
 import { StyleMapper } from "../styles"
 import { esc, escText } from "../wml"
-import { borderAttributes, neutralRun, paragraphAttributes, paragraphSources, runAttributes, runSources, type FontFaces } from "./inverse"
+import {
+	borderAttributes,
+	neutralRun,
+	paragraphAttributes,
+	paragraphSources,
+	paragraphTextSources,
+	runAttributes,
+	runSources,
+	type FontFaces
+} from "./inverse"
 import { PARAGRAPH_SKIPPED, StyleChains, canonicalElement, descendant, readProps, type Props, type PropertyValue } from "./meaning"
 import { mapText, wmlText, type SourceText, type TextMapping } from "./sourceText"
-import { effectiveTable } from "./tables"
+import { ByteKeyMap } from "./byteKeys"
+import { effectiveTable, gridSpan, type EffectiveTable } from "./tables"
 import { levelGeometry } from "../lists"
 
 // WordprocessingML blocks written as ODF text (Part 3 §5, §9, §6): paragraphs and headings with their runs as
@@ -27,6 +37,9 @@ export class OdtWriteRefusal extends Error {
 }
 
 const W_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+// Entries a cache of the emitter keeps before it starts again.
+const CACHE_LIMIT = 4096
+const NO_BYTES = new Uint8Array(0)
 
 // New automatic styles of one stream, deduplicated by what they say, named past every name either stream uses. A
 // style the stream already has with the same markup is that style (so saves do not pile up copies of it).
@@ -289,6 +302,172 @@ export interface ListTarget {
 	readonly outline: boolean
 }
 
+// The notes written so far, by kind and id: each note's body is written once, a later reference to it is a
+// text:note-ref showing its citation (ODF 1.2 Part 1 §7.7.7, text:ref-name naming the note's text:id, §19.809). A
+// refused block's notes are rolled back with it.
+export class WrittenNotes {
+	// Citation text by kind and id: a custom mark, else the note's number among its kind's numbered ones.
+	private readonly citations = new Map<string, string>()
+	private readonly log: { readonly key: string; readonly kind: "footnote" | "endnote"; readonly numbered: boolean }[] = []
+	private readonly numbered = { footnote: 0, endnote: 0 }
+
+	// Notes (and comments) being written: a note referenced in one is its text there. The notes among them, by kind
+	// and id (a flattened note leaves them out).
+	depth = 0
+	readonly open = new Set<string>()
+
+	get size(): number {
+		return this.log.length
+	}
+
+	citation(kind: "footnote" | "endnote", id: string): string | undefined {
+		return this.citations.get(`${kind}:${id}`)
+	}
+
+	add(kind: "footnote" | "endnote", id: string, label: string | undefined): void {
+		const key = `${kind}:${id}`
+		const numbered = label === undefined || label === ""
+
+		if (numbered) this.numbered[kind]++
+
+		this.citations.set(key, numbered ? String(this.numbered[kind]) : label)
+		this.log.push({ key, kind, numbered })
+	}
+
+	rollback(size: number): void {
+		while (this.log.length > size) {
+			const entry = this.log.pop()
+
+			if (entry === undefined) break
+
+			this.citations.delete(entry.key)
+
+			if (entry.numbered) this.numbered[entry.kind]--
+		}
+	}
+}
+
+// The text and tabs of a run's children after `after` (all of `run`'s when `after` is -1); undefined when anything else
+// is among them.
+function markText(document: XmlDocument, after: number, run = -1): string | undefined {
+	let out = ""
+
+	for (
+		let at = after >= 0 ? document.nextSiblingElement(after) : document.firstChildElement(run);
+		at >= 0;
+		at = document.nextSiblingElement(at)
+	) {
+		const local = document.localName(at)
+
+		if (local === "t" || local === "delText") out += document.textContent(at)
+		else if (local === "tab") out += "\t"
+		else if (local !== "rPr") return undefined
+	}
+
+	return out
+}
+
+type NoteResolver = (kind: "footnote" | "endnote", id: string) => { readonly document: XmlDocument; readonly node: number } | undefined
+
+// How many notes deep a flattened note's own notes are written; deeper ones are left out (counted).
+const FLATTENED_DEPTH = 16
+
+// A note referenced where ODF holds no note (in a note, a comment, a header or footer), as text: " (mark text)", its
+// mark a custom one's, its paragraphs one after another, the notes it references flattened in turn (each once).
+export function flattenedNote(
+	resolve: NoteResolver,
+	kind: "footnote" | "endnote",
+	id: string,
+	mark: string,
+	lose: () => void,
+	visited = new Set<string>(),
+	depth = 0
+): string {
+	const note = resolve(kind, id)
+	const key = `${kind}:${id}`
+
+	if (note === undefined || visited.has(key)) return mark === "" ? "" : ` (${mark})`
+	if (depth >= FLATTENED_DEPTH) {
+		lose()
+
+		return ""
+	}
+
+	visited.add(key)
+
+	const { document } = note
+	const parts: string[] = []
+	const walk = (node: number): string => {
+		let out = ""
+
+		for (let at = document.firstChildElement(node); at >= 0; at = document.nextSiblingElement(at)) {
+			const local = document.localName(at)
+
+			if (local === "t" || local === "delText") out += document.textContent(at)
+			else if (local === "tab") out += "\t"
+			else if (local === "footnoteReference" || local === "endnoteReference") {
+				const reference = at
+				// A custom mark: the text after it in its run.
+				let inner = ""
+
+				if (document.attribute(reference, "w:customMarkFollows") === "1")
+					for (
+						let next = document.nextSiblingElement(at);
+						next >= 0 && document.localName(next) === "t";
+						next = document.nextSiblingElement(at)
+					) {
+						inner += document.textContent(next)
+						at = next
+					}
+
+				out += flattenedNote(
+					resolve,
+					local === "footnoteReference" ? "footnote" : "endnote",
+					document.attribute(reference, "w:id") ?? "",
+					inner,
+					lose,
+					visited,
+					depth + 1
+				)
+			} else out += walk(at)
+		}
+
+		return out
+	}
+
+	for (let at = document.firstChildElement(note.node); at >= 0; at = document.nextSiblingElement(at)) parts.push(walk(at))
+
+	return ` (${mark === "" ? "" : `${mark} `}${parts.join(" ")})`
+}
+
+// A written note's text:id.
+export function noteId(kind: "footnote" | "endnote", id: string): string {
+	return `filen-${kind}-${id}`
+}
+
+// A reference to a note already written: its citation (`shown`, as the note's citation shows it; its readers update it).
+export function noteReference(kind: "footnote" | "endnote", id: string, shown: string): string {
+	return `<text:note-ref text:note-class="${kind}" text:reference-format="text" text:ref-name="${esc(noteId(kind, id))}">${escText(shown)}</text:note-ref>`
+}
+
+// A table written in pieces: how many rows it has, its columns, whether header rows are open (and body rows begun),
+// the cells spanning down still open by column (their slot's id and rows so far), the closed spans by id.
+export interface TableStream {
+	readonly total: number
+	readonly columns: number
+	header: boolean
+	body: boolean
+	readonly merges: Map<number, { readonly id: number; readonly rows: number }>
+	readonly spans: Map<number, number>
+	next: number
+}
+
+// A row of a table written in pieces, and where its cells spanning down take their spans (offsets in it).
+export interface StreamedRow {
+	readonly markup: string
+	readonly slots: readonly { readonly at: number; readonly id: number }[]
+}
+
 export interface EmitContext {
 	readonly scope: StyleScope
 	readonly sheet: OdfStyleSheet
@@ -337,6 +516,13 @@ export interface EmitContext {
 	// The key of a text box's drawing without its text: the source frame a changed text box is written into.
 	shellKey(document: XmlDocument, drawing: number): string
 	noteKey(kind: "footnote" | "endnote", id: string): string
+	// The notes a conversion has written (each written once); undefined where every reference writes its note.
+	readonly notes?: WrittenNotes
+	// A conversion's byte budget, charged as text is written and with the rest of each top-level block (a table: each
+	// row); `held`: the markup the block being written holds so far.
+	spend?(bytes: number, held: number): void
+	// What a conversion leaves out, counted.
+	lose?(kind: "nestedNote"): void
 	commentKey(id: string): string
 	fieldKey(document: XmlDocument, field: number): string
 	// Names of the source's reference marks and bookmarks.
@@ -360,6 +546,10 @@ interface InlineState {
 	// Characters of the paragraph walked (wmlText's count), and their source span styles where known.
 	offset: number
 	readonly mapping: TextMapping | undefined
+	// A run written already as a note's custom mark (-1: none).
+	skip?: number
+	// Notes met where ODF holds none (a ruby's base), written after it.
+	deferred?: string[]
 }
 
 // What span styles give text over one paragraph text base (its properties, size and scope), learned as asked and
@@ -599,6 +789,31 @@ export class OdfEmitter {
 	// A run of body (or note, cell, header) blocks, lists formed from their numbering. `texts`: the source text a
 	// paragraph takes after (its characters' span styles).
 	blocks(document: XmlDocument, nodes: readonly number[], texts?: (node: number) => SourceText | undefined): string {
+		this.nesting++
+
+		try {
+			return this.blockList(document, nodes, texts)
+		} finally {
+			this.nesting--
+		}
+	}
+
+	// How deep in blocks() the emitter is: a top-level block is charged at 1, a top-level table's rows inside it.
+	private nesting = 0
+
+	// Text charged as it was written (`text`), so a block is charged only for the rest of its markup.
+	private textCharged = 0
+
+	private charge(build: () => string): string {
+		const before = this.textCharged
+		const markup = build()
+
+		if (this.nesting === 1) this.context.spend?.(Math.max(0, markup.length - (this.textCharged - before)), markup.length)
+
+		return markup
+	}
+
+	private blockList(document: XmlDocument, nodes: readonly number[], texts?: (node: number) => SourceText | undefined): string {
 		let out = ""
 		let list: { numId: string; target: ListTarget; depth: number } | undefined
 
@@ -629,12 +844,14 @@ export class OdfEmitter {
 
 			if (numbering === undefined || numbering.target.outline) {
 				close()
-				out += this.paragraph(
-					document,
-					node,
-					undefined,
-					numbering?.target.outline === true ? numbering.ilvl : undefined,
-					texts?.(node)
+				out += this.charge(() =>
+					this.paragraph(
+						document,
+						node,
+						undefined,
+						numbering?.target.outline === true ? numbering.ilvl : undefined,
+						texts?.(node)
+					)
 				)
 
 				continue
@@ -670,7 +887,7 @@ export class OdfEmitter {
 			this.lastList.set(numbering.target.style, numbering.numId)
 			this.last = numbering.numId
 			this.used.add(numbering.numId)
-			out += this.paragraph(document, node, undefined, undefined, texts?.(node))
+			out += this.charge(() => this.paragraph(document, node, undefined, undefined, texts?.(node)))
 		}
 
 		close()
@@ -769,16 +986,14 @@ export class OdfEmitter {
 		const context = this.context
 		const pPr = child(document, node, "pPr")
 		const markNode = pPr < 0 ? -1 : child(document, pPr, "rPr")
-		const direct = propsOf(document, pPr, PARAGRAPH_SKIPPED)
-		const mark = propsOf(document, markNode)
+		const { props: mark, key: markKey } = this.runProps(document, markNode)
 
 		if (pPr >= 0 && child(document, pPr, "pPrChange") >= 0) this.refuseProperty("paragraph", "pPrChange")
 
-		this.listIndents(direct)
-
+		const own = this.paragraphProps(document, pPr)
+		const direct = this.listIndents(own.props)
 		// Numbering is where the paragraph sits (its list), not how it looks: a source paragraph matches without it.
-		const pPrKey = propsKey(withoutNumbering(direct))
-		const markKey = propsKey(mark)
+		const pPrKey = direct === own.props ? own.key : propsKey(withoutNumbering(direct))
 		const outline = direct.get("outlineLvl")
 		const level = heading ?? (outline === undefined ? undefined : Number(outline.attributes.get("val") ?? "9"))
 		// A source paragraph in a list owes its indents to the list: its start tag reads the same in one only.
@@ -813,7 +1028,19 @@ export class OdfEmitter {
 			styleName = known.styleName
 			styling = this.stylingOf(styleName)
 		} else {
-			const made = this.paragraphStyle(direct, mark, source, master)
+			// A new paragraph's style follows from its properties alone: made once for each set of them.
+			const cacheKey = source === undefined && master === undefined ? `${pPrKey}\u0000${markKey}` : undefined
+			let made = cacheKey === undefined ? undefined : this.paragraphStyles.get(cacheKey)
+
+			if (made === undefined) {
+				made = this.paragraphStyle(direct, mark, source, master)
+
+				if (cacheKey !== undefined) {
+					if (this.paragraphStyles.size >= CACHE_LIMIT) this.paragraphStyles.clear()
+
+					this.paragraphStyles.set(cacheKey, made)
+				}
+			}
 
 			styleName = made.name
 			styling = made.styling
@@ -837,9 +1064,11 @@ export class OdfEmitter {
 		return `<${element}${context.declarations}${attributeList(attributes)}${inner === "" ? "/>" : `>${inner}</${element}>`}`
 	}
 
+	private readonly paragraphStyles = new Map<string, { name: string; styling: ParagraphStyling }>()
+
 	// Bookmarks started between blocks before a paragraph (the paragraph holding the start was deleted, Part 3
 	// §6.2.1.3: a bookmark marks text): started at its start, the first paragraph after them.
-	private readonly pendingStarts = new Map<XmlDocument, Map<number, string[]>>()
+	private readonly pendingStarts = new WeakMap<XmlDocument, Map<number, string[]>>()
 
 	private startsBefore(document: XmlDocument, paragraph: number): string {
 		let byParagraph = this.pendingStarts.get(document)
@@ -881,27 +1110,27 @@ export class OdfEmitter {
 	// A list paragraph without indents of its own, in a level that places its label from the paragraph's margin
 	// (label-width-and-position, Part 3 §20.431): LibreOffice adds the style's margin to the level's, where
 	// WordprocessingML takes the level's over the style's. Its indents as they show are written as its own.
-	private listIndents(direct: Props): void {
+	private listIndents(direct: Props): Props {
 		const numPr = direct.get("numPr")
 
-		if (numPr === undefined || direct.has("ind")) return
+		if (numPr === undefined || direct.has("ind")) return direct
 
 		const numId = /<numId val="([^"]*)">/u.exec(numPr.children)?.[1]
 		const ilvl = Number(/<ilvl val="([^"]*)">/u.exec(numPr.children)?.[1] ?? "0")
 		const target = numId === undefined ? undefined : this.context.list(numId)
 
-		if (numId === undefined || target === undefined || target.outline) return
+		if (numId === undefined || target === undefined || target.outline) return direct
 
 		const level = this.context.sheet.listStyle(target.style, this.context.scope)?.levels.get(ilvl + 1)
 
-		if (level === undefined || levelGeometry(level).mode !== "label-width-and-position") return
+		if (level === undefined || levelGeometry(level).mode !== "label-width-and-position") return direct
 
 		const styleId = direct.get("pStyle")?.attributes.get("val")
 		const fromStyle = this.context.chains.paragraph(styleId).pPr.get("ind")
 		const fromLevel = this.context.levelIndent(numId, ilvl)
 		const attributes = new Map([...(fromStyle?.attributes ?? []), ...(fromLevel?.attributes ?? [])])
 
-		if (attributes.size > 0) direct.set("ind", { attributes, children: "" })
+		return attributes.size > 0 ? new Map([...direct, ["ind", { attributes, children: "" }]]) : direct
 	}
 
 	private stylingOf(name: string | undefined): ParagraphStyling {
@@ -937,6 +1166,8 @@ export class OdfEmitter {
 		const sourceDirect = source === undefined ? new Map<string, PropertyValue>() : this.sourceProps(source.pPr)
 		const marginLeft = Number(direct.get("ind")?.attributes.get("left") ?? "0") / 20
 		const changed = new Set<string>()
+		// Paragraph properties that are the style's text properties in ODF (hyphenation): undefined to remove.
+		const paragraphText = new Map<string, string | undefined>()
 
 		for (const local of new Set([...direct.keys(), ...sourceDirect.keys()])) {
 			if (local === "pStyle" || local === "numPr" || local === "outlineLvl") continue
@@ -952,6 +1183,7 @@ export class OdfEmitter {
 			changed.add(local)
 
 			for (const name of paragraphSources(local)) paragraph.delete(name)
+			for (const name of paragraphTextSources(local)) paragraphText.set(name, undefined)
 
 			if (local === "tabs") tabs = ""
 			if (now === undefined) continue
@@ -964,6 +1196,7 @@ export class OdfEmitter {
 			if (written === undefined) this.refuseProperty("paragraph", local)
 
 			for (const [name, value] of written.attributes) paragraph.set(name, value)
+			for (const [name, value] of written.text ?? []) paragraphText.set(name, value)
 
 			if (written.tabs !== undefined) tabs = written.tabs
 		}
@@ -981,6 +1214,7 @@ export class OdfEmitter {
 				if (written === undefined) this.refuseProperty("paragraph", local)
 
 				for (const [name, value] of written.attributes) paragraph.set(name, value)
+				for (const [name, value] of written.text ?? []) paragraphText.set(name, value)
 
 				if (written.tabs !== undefined) tabs = written.tabs
 			}
@@ -1057,6 +1291,11 @@ export class OdfEmitter {
 
 		if (master === "") attributes.delete("style:master-page-name")
 		else if (master !== undefined) attributes.set("style:master-page-name", master)
+
+		for (const [name, value] of paragraphText) {
+			if (value === undefined) text.delete(name)
+			else text.set(name, value)
+		}
 
 		const properties = paragraphMarkup(paragraph, tabs ?? "", others, text)
 
@@ -1141,7 +1380,10 @@ export class OdfEmitter {
 				case "lastRenderedPageBreak":
 					break
 				case "r":
-					this.run(document, at, styling, state)
+					if (at === state.skip) {
+						state.offset += document.textContent(at).length
+						state.skip = -1
+					} else this.run(document, at, styling, state)
 					break
 				case "hyperlink": {
 					this.closeSpan(state)
@@ -1312,15 +1554,49 @@ export class OdfEmitter {
 	// The span a run's content at character `at` (-1: none counted) is written in, opened unless it is open.
 	private openSpan(document: XmlDocument, run: number, styling: ParagraphStyling, state: InlineState, at: number): void {
 		const rPr = run < 0 ? -1 : child(document, run, "rPr")
-		const props = propsOf(document, rPr)
+		const { props, key } = this.runProps(document, rPr)
 		const origin = this.originOf(document, run)
 
 		this.toSpan(
-			origin === undefined
-				? this.spanOf(props, propsKey(props), styling, state.mapping, at)
-				: this.spanOf(props, propsKey(props), styling, origin, 0),
+			origin === undefined ? this.spanOf(props, key, styling, state.mapping, at) : this.spanOf(props, key, styling, origin, 0),
 			state
 		)
+	}
+
+	// A paragraph's own properties and the key of them without numbering, by the pPr's bytes. Read only.
+	private readonly paragraphPropsCache = new ByteKeyMap<{ readonly props: Props; readonly key: string }>(CACHE_LIMIT)
+
+	private paragraphProps(document: XmlDocument, pPr: number): { readonly props: Props; readonly key: string } {
+		const raw = pPr < 0 ? NO_BYTES : document.raw(pPr)
+		let known = this.paragraphPropsCache.get(raw)
+
+		if (known === undefined) {
+			const props = propsOf(document, pPr, PARAGRAPH_SKIPPED)
+
+			known = { props, key: propsKey(withoutNumbering(props)) }
+
+			this.paragraphPropsCache.set(raw, known)
+		}
+
+		return known
+	}
+
+	// A run's properties and their key, by the rPr's bytes (documents repeat a few run property sets). Read only.
+	private readonly runPropsCache = new ByteKeyMap<{ readonly props: Props; readonly key: string }>(CACHE_LIMIT)
+
+	private runProps(document: XmlDocument, rPr: number): { readonly props: Props; readonly key: string } {
+		const raw = rPr < 0 ? NO_BYTES : document.raw(rPr)
+		let known = this.runPropsCache.get(raw)
+
+		if (known === undefined) {
+			const props = propsOf(document, rPr)
+
+			known = { props, key: propsKey(props) }
+
+			this.runPropsCache.set(raw, known)
+		}
+
+		return known
 	}
 
 	// The source span a run came from, where the translation named it on the run (w:rsidR, see Translator): its
@@ -1364,7 +1640,7 @@ export class OdfEmitter {
 
 		if (key === styling.baseKey) return ""
 
-		return styling.span(key, this.spanNames) ?? this.spanStyle(props, styling)
+		return styling.span(key, this.spanNames) ?? this.spanStyle(props, styling, key)
 	}
 
 	private readonly patched = new Map<string, string | undefined>()
@@ -1437,7 +1713,24 @@ export class OdfEmitter {
 	}
 
 	// A new automatic text style giving `props` over the paragraph's own text properties.
-	private spanStyle(props: Props, styling: ParagraphStyling): string {
+	private readonly spanStyles = new Map<string, string>()
+
+	private spanStyle(props: Props, styling: ParagraphStyling, key: string): string {
+		const cacheKey = `${styling.baseKey}\u0000${String(styling.fontSize)}\u0000${key}`
+		let name = this.spanStyles.get(cacheKey)
+
+		if (name === undefined) {
+			name = this.newSpanStyle(props, styling)
+
+			if (this.spanStyles.size >= CACHE_LIMIT) this.spanStyles.clear()
+
+			this.spanStyles.set(cacheKey, name)
+		}
+
+		return name
+	}
+
+	private newSpanStyle(props: Props, styling: ParagraphStyling): string {
 		const context = this.context
 		const attributes = new Map<string, string>()
 		const styleId = props.get("rStyle")?.attributes.get("val")
@@ -1536,27 +1829,64 @@ export class OdfEmitter {
 					state.trimLeading = false
 					break
 				}
+				case "ruby": {
+					// Text with its guide text above (Part 3 §6.4): the base's runs as spans, the guide its text; a note in
+					// the base after the ruby.
+					const base = child(document, at, "rubyBase")
+					const guide = child(document, at, "rt")
+					const inner: InlineState = { trimLeading: false, out: "", open: "", offset: 0, mapping: undefined, deferred: [] }
+
+					this.closeSpan(state)
+
+					if (base >= 0) this.content(document, base, styling, inner)
+
+					this.closeSpan(inner)
+					state.out += `<text:ruby><text:ruby-base>${inner.out}</text:ruby-base><text:ruby-text>${escText(guide < 0 ? "" : document.textContent(guide))}</text:ruby-text></text:ruby>${(inner.deferred ?? []).join("")}`
+					state.trimLeading = false
+					break
+				}
 				case "footnoteReference":
 				case "endnoteReference": {
 					const kind = local === "footnoteReference" ? "footnote" : "endnote"
 					const id = document.attribute(at, "w:id") ?? ""
 					const atom = this.context.atoms.take(this.context.noteKey(kind, id))
+					// A custom mark (w:customMarkFollows) is the text after the reference in its run, else the next run's:
+					// the note citation's text:label (Part 3 §6.3.4), consumed.
+					const mark =
+						document.attribute(at, "w:customMarkFollows") === "1"
+							? this.customMark(document, run, at, state)
+							: { text: "", own: false }
+					const label = mark.text === "" ? undefined : mark.text
 
 					this.closeSpan(state)
 					state.offset++
 
-					if (atom !== undefined) state.out += atom.bytes
-					else
-						state.out += this.newNote(
-							kind,
-							id,
-							document.attribute(at, "w:customMarkFollows") === "1" ? this.customMark(document, run) : undefined
-						)
+					const notes = this.context.notes
+					const shown = notes?.citation(kind, id)
+					const markup =
+						atom !== undefined
+							? atom.bytes
+							: notes !== undefined && (notes.depth > 0 || this.context.scope === "styles")
+								? escText(
+										flattenedNote(
+											(noteKind, noteId) => this.context.note(noteKind, noteId),
+											kind,
+											id,
+											label ?? "",
+											() => this.context.lose?.("nestedNote"),
+											new Set(notes.open)
+										)
+									)
+								: shown !== undefined
+									? noteReference(kind, id, shown)
+									: this.newNote(kind, id, label)
+
+					if (state.deferred !== undefined) state.deferred.push(markup)
+					else state.out += markup
 
 					state.trimLeading = false
 
-					// A custom mark is the text that follows: written with the note.
-					if (document.attribute(at, "w:customMarkFollows") === "1") return
+					if (mark.own) return
 
 					break
 				}
@@ -1586,8 +1916,7 @@ export class OdfEmitter {
 		}
 
 		const rPr = run < 0 ? -1 : child(document, run, "rPr")
-		const props = propsOf(document, rPr)
-		const key = propsKey(props)
+		const { props, key } = this.runProps(document, rPr)
 		const from = state.offset
 		let start = 0
 		let name = ""
@@ -1616,10 +1945,26 @@ export class OdfEmitter {
 		}
 	}
 
-	private customMark(document: XmlDocument, run: number): string {
-		const next = document.nextSiblingElement(run)
+	// A custom mark's text: after the reference in its run, else the next run's when that holds text only (its text and
+	// tabs, as LibreOffice reads them); "" for none, which is numbered as LibreOffice numbers it.
+	// `own`: the mark is the rest of the reference's run (consumed with it).
+	private customMark(document: XmlDocument, run: number, reference: number, state: InlineState): { text: string; own: boolean } {
+		const own = markText(document, reference)
 
-		return next >= 0 && document.localName(next) === "r" ? document.textContent(next) : ""
+		if (own !== undefined && own !== "") {
+			state.offset += own.length
+
+			return { text: own, own: true }
+		}
+
+		const next = document.nextSiblingElement(run)
+		const text = next >= 0 && document.localName(next) === "r" ? markText(document, -1, next) : undefined
+
+		if (text === undefined || text === "") return { text: "", own: false }
+
+		state.skip = next
+
+		return { text, own: false }
 	}
 
 	// Text with ODF's whitespace rule (Part 3 §6.1.2): runs of spaces as text:s past the first, a leading one too.
@@ -1653,6 +1998,14 @@ export class OdfEmitter {
 
 			flush()
 
+			// Charged as it grows: a block of text never outgrows the budget before it is refused.
+			if (out.length > 65_536) {
+				state.out += out
+				this.textCharged += out.length
+				this.context.spend?.(out.length, state.out.length)
+				out = ""
+			}
+
 			if (character === "\t") {
 				out += "<text:tab/>"
 				state.trimLeading = false
@@ -1667,6 +2020,8 @@ export class OdfEmitter {
 
 		flush()
 		state.out += out
+		this.textCharged += out.length
+		this.context.spend?.(out.length, state.out.length)
 	}
 
 	// --- Notes and comments ---
@@ -1680,9 +2035,33 @@ export class OdfEmitter {
 
 		for (let at = note.document.firstChildElement(note.node); at >= 0; at = note.document.nextSiblingElement(at)) blocks.push(at)
 
-		const body = this.storyBlocks(note.document, blocks, true)
+		const notes = this.context.notes
+		const written = notes?.size ?? 0
 
-		return `<text:note text:note-class="${kind}"><text:note-citation${label === undefined ? "" : ` text:label="${esc(label)}"`}>${escText(label ?? "")}</text:note-citation><text:note-body>${body}</text:note-body></text:note>`
+		// Counted written before its body: a reference to it inside its own body is a text:note-ref.
+		notes?.add(kind, id, label)
+
+		let body: string
+
+		if (notes !== undefined) {
+			notes.depth++
+			notes.open.add(`${kind}:${id}`)
+		}
+
+		try {
+			body = this.storyBlocks(note.document, blocks, true)
+		} catch (error) {
+			notes?.rollback(written)
+
+			throw error
+		} finally {
+			if (notes !== undefined) {
+				notes.depth--
+				notes.open.delete(`${kind}:${id}`)
+			}
+		}
+
+		return `<text:note text:note-class="${kind}"${notes === undefined ? "" : ` text:id="${esc(noteId(kind, id))}"`}><text:note-citation${label === undefined ? "" : ` text:label="${esc(label)}"`}>${escText(label ?? "")}</text:note-citation><text:note-body>${body}</text:note-body></text:note>`
 	}
 
 	// A changed text box: the source frame its shell matches, its draw:text-box holding the edit's blocks (Part 3
@@ -1732,9 +2111,19 @@ export class OdfEmitter {
 		for (let at = document.firstChildElement(node); at >= 0; at = document.nextSiblingElement(at)) blocks.push(at)
 
 		const name = this.context.registry.name("__Annotation__", true)
+		const notes = this.context.notes
+		let body: string
+
+		if (notes !== undefined) notes.depth++
+
+		try {
+			body = this.storyBlocks(document, blocks, false)
+		} finally {
+			if (notes !== undefined) notes.depth--
+		}
 
 		return {
-			markup: `<office:annotation office:name="${esc(name)}"><dc:creator>${escText(author)}</dc:creator>${date === undefined ? "" : `<dc:date>${escText(date.replace(/Z$/u, ""))}</dc:date>`}${initials === undefined ? "" : `<meta:creator-initials>${escText(initials)}</meta:creator-initials>`}${this.storyBlocks(document, blocks, false)}</office:annotation>`,
+			markup: `<office:annotation office:name="${esc(name)}"><dc:creator>${escText(author)}</dc:creator>${date === undefined ? "" : `<dc:date>${escText(date.replace(/Z$/u, ""))}</dc:date>`}${initials === undefined ? "" : `<meta:creator-initials>${escText(initials)}</meta:creator-initials>`}${body}</office:annotation>`,
 			name
 		}
 	}
@@ -1769,8 +2158,28 @@ export class OdfEmitter {
 	// A new table (Part 3 §9.1): its width and columns from its grid (ODF columns have fixed widths), its alignment,
 	// each cell's borders, padding, shading and alignment as they show (tables.ts), header rows first.
 	private table(document: XmlDocument, table: number): string {
+		const effective = effectiveTable(document, table, this.context.chains)
+		let out = this.tableOpening(document, table, effective)
+		const header = effective.rows.findIndex(
+			row => row.trPr.get("tblHeader") === undefined || row.trPr.get("tblHeader")?.attributes.get("val") === "off"
+		)
+		const headers = header < 0 ? effective.rows.length : header
+
+		effective.rows.forEach((_row, index) => {
+			if (index === 0 && headers > 0) out += "<table:table-header-rows>"
+
+			out += this.charge(() => this.newRow(document, effective, index))
+
+			if (index === headers - 1) out += "</table:table-header-rows>"
+		})
+
+		return `${out}</table:table>`
+	}
+
+	// A new table's start (Part 3 §9.1): its width and columns from its grid (ODF columns have fixed widths), its
+	// alignment.
+	private tableOpening(document: XmlDocument, table: number, effective: EffectiveTable): string {
 		const context = this.context
-		const effective = effectiveTable(document, table, context.chains)
 
 		// ODF's form for a table style, table:table-template, has first and last rows and columns, odd and even rows and
 		// columns, body and background only: no corner cells (w:tblStylePr nwCell...) and no band sizes.
@@ -1811,20 +2220,153 @@ export class OdfEmitter {
 			out += `<table:table-column table:style-name="${esc(columnStyle)}"/>`
 		}
 
-		const header = effective.rows.findIndex(
-			row => row.trPr.get("tblHeader") === undefined || row.trPr.get("tblHeader")?.attributes.get("val") === "off"
-		)
-		const headers = header < 0 ? effective.rows.length : header
+		return out
+	}
 
-		effective.rows.forEach((_row, index) => {
-			if (index === 0 && headers > 0) out += "<table:table-header-rows>"
+	// --- A table written in pieces (a long one: its rows lowered and written a few at a time) ---
 
-			out += this.newRow(document, effective, index)
+	// The table's start: its style and columns (refused as `table` is), and the state its rows are written with.
+	tableStart(document: XmlDocument, table: number, total: number): { readonly markup: string; readonly state: TableStream } {
+		const effective = effectiveTable(document, table, this.context.chains, { offset: 0, total })
+		const markup = this.tableOpening(document, table, effective)
 
-			if (index === headers - 1) out += "</table:table-header-rows>"
-		})
+		return {
+			markup,
+			state: { total, columns: effective.grid.length, header: false, body: false, merges: new Map(), spans: new Map(), next: 0 }
+		}
+	}
 
-		return `${out}</table:table>`
+	// The rows `table` holds (rows `offset`... of the whole), each written by `row` (a refused one written otherwise).
+	tableRows(
+		document: XmlDocument,
+		table: number,
+		offset: number,
+		state: TableStream,
+		row: (write: () => StreamedRow, node: number) => void
+	): void {
+		const effective = effectiveTable(document, table, this.context.chains, { offset, total: state.total })
+
+		// Each row charged as a top-level block's is.
+		this.nesting++
+
+		try {
+			effective.rows.forEach((item, index) =>
+				row(() => {
+					let written: StreamedRow = { markup: "", slots: [] }
+
+					this.charge(() => {
+						written = this.streamedRow(document, effective, index, state)
+
+						return written.markup
+					})
+
+					return written
+				}, item.node)
+			)
+		} finally {
+			this.nesting--
+		}
+	}
+
+	private streamedRow(document: XmlDocument, table: EffectiveTable, index: number, state: TableStream): StreamedRow {
+		const row = table.rows[index]
+
+		if (row === undefined) return { markup: "", slots: [] }
+
+		const slots: { at: number; id: number }[] = []
+
+		// The spans down as this row leaves them, and those it closes: the state takes them once it is written.
+		const merges = new Map(state.merges)
+		const closed: [number, number][] = []
+		let next = state.next
+		let out = `<table:table-row${this.rowStyleAttribute(row.trPr)}>`
+
+		for (const cell of row.cells) {
+			const merge = cell.props.get("vMerge")
+			const open = merges.get(cell.column)
+
+			if (merge !== undefined && merge.attributes.get("val") !== "restart") {
+				out += "<table:covered-table-cell/>".repeat(cell.span)
+
+				if (open !== undefined) merges.set(cell.column, { id: open.id, rows: open.rows + 1 })
+
+				continue
+			}
+
+			if (open !== undefined) {
+				closed.push([open.id, open.rows])
+				merges.delete(cell.column)
+			}
+
+			// A cell spanning down: its start tag's slot for the span, filled in once the span is known.
+			const slot = merge === undefined ? undefined : next
+
+			if (slot !== undefined) {
+				merges.set(cell.column, { id: slot, rows: 1 })
+				next++
+			}
+
+			out += this.cellMarkup(document, cell.node, this.cellStyle(cell.props), cell.span, 1, at => {
+				if (slot !== undefined) slots.push({ at: out.length + at, id: slot })
+			})
+		}
+
+		out += "</table:table-row>"
+
+		const header = row.trPr.get("tblHeader") !== undefined && row.trPr.get("tblHeader")?.attributes.get("val") !== "off" && !state.body
+		const prefix = header && !state.header ? "<table:table-header-rows>" : !header && state.header ? "</table:table-header-rows>" : ""
+
+		state.header = header
+		state.body ||= !header
+		state.next = next
+		state.merges.clear()
+
+		for (const [column, item] of merges) state.merges.set(column, item)
+		for (const [id, rows] of closed) state.spans.set(id, rows)
+
+		return { markup: prefix + out, slots: slots.map(slot => ({ at: slot.at + prefix.length, id: slot.id })) }
+	}
+
+	// Before a row written otherwise: the header rows end, and the cells spanning down stop spanning.
+	tableInterrupt(state: TableStream): string {
+		const out = state.header ? "</table:table-header-rows>" : ""
+
+		state.header = false
+		state.body = true
+
+		for (const open of state.merges.values()) state.spans.set(open.id, open.rows)
+
+		state.merges.clear()
+
+		return out
+	}
+
+	// Whether the rows written so far hold no span still open: their markup is final (`tableResolve`).
+	tableSettled(state: TableStream): boolean {
+		return state.merges.size === 0
+	}
+
+	// Written rows with each cell's span down written into its slot (by offset in `markup`, in order; none for one row).
+	tableResolve(markup: string, slots: readonly { readonly at: number; readonly id: number }[], state: TableStream): string {
+		let out = ""
+		let from = 0
+
+		for (const { at, id } of slots) {
+			const rows = state.spans.get(id) ?? 1
+
+			state.spans.delete(id)
+			out += markup.slice(from, at)
+
+			if (rows > 1) out += ` table:number-rows-spanned="${String(rows)}"`
+
+			from = at
+		}
+
+		return out + markup.slice(from)
+	}
+
+	tableEnd(state: TableStream): string {
+		return `${this.tableInterrupt(state)}</table:table>`
 	}
 
 	// A row of a new table, each cell's style from the properties it shows.
@@ -1887,7 +2429,21 @@ export class OdfEmitter {
 	}
 
 	// A cell style giving what a cell shows: its borders, padding, shading, vertical alignment and writing direction.
+	// Cell styles by the effective cell properties (effectiveTable shares one Props among the cells that show alike).
+	private readonly cellStyles = new WeakMap<Props, string>()
+
 	cellStyle(props: Props): string {
+		let name = this.cellStyles.get(props)
+
+		if (name === undefined) {
+			name = this.newCellStyle(props)
+			this.cellStyles.set(props, name)
+		}
+
+		return name
+	}
+
+	private newCellStyle(props: Props): string {
 		const attributes = new Map<string, string>()
 
 		for (const [local, value] of props) {
@@ -1952,14 +2508,26 @@ export class OdfEmitter {
 		)
 	}
 
-	private cellMarkup(document: XmlDocument, cell: number, style: string, span: number, rows: number): string {
+	// `slot`: given where in the markup a span down not yet known goes (a table written in pieces).
+	private cellMarkup(
+		document: XmlDocument,
+		cell: number,
+		style: string,
+		span: number,
+		rows: number,
+		slot?: (at: number) => void
+	): string {
 		const blocks: number[] = []
 
 		for (let at = document.firstChildElement(cell); at >= 0; at = document.nextSiblingElement(at)) {
 			if (document.localName(at) !== "tcPr") blocks.push(at)
 		}
 
-		return `<table:table-cell${style === "" ? "" : ` table:style-name="${esc(style)}"`}${span > 1 ? ` table:number-columns-spanned="${span}"` : ""}${rows > 1 ? ` table:number-rows-spanned="${rows}"` : ""} office:value-type="string">${this.blocks(document, blocks)}</table:table-cell>${"<table:covered-table-cell/>".repeat(span - 1)}`
+		const start = `<table:table-cell${style === "" ? "" : ` table:style-name="${esc(style)}"`}${span > 1 ? ` table:number-columns-spanned="${span}"` : ""}${rows > 1 ? ` table:number-rows-spanned="${rows}"` : ""}`
+
+		slot?.(start.length)
+
+		return `${start} office:value-type="string">${this.blocks(document, blocks)}</table:table-cell>${"<table:covered-table-cell/>".repeat(span - 1)}`
 	}
 
 	// A table row written anew: cells by their properties (`cellStyle`), spans as covered cells.
@@ -1990,7 +2558,7 @@ export class OdfEmitter {
 
 			const tcPr = child(document, cell, "tcPr")
 			const props = propsOf(document, tcPr)
-			const span = Number(props.get("gridSpan")?.attributes.get("val") ?? "1") || 1
+			const span = gridSpan(props)
 			const merge = props.get("vMerge")
 
 			props.delete("gridSpan")

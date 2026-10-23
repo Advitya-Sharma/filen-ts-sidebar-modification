@@ -9,8 +9,14 @@ import { recordContentVerdict } from "@/features/drive/lib/contentVerdicts"
 import { driveItemMime, type DriveItem } from "@/features/drive/lib/item"
 import { narrowToAnyFile } from "@/features/drive/lib/download"
 import { extensionOf, itemTypeExtension } from "@/features/drive/lib/preview.logic"
-import { DOWNLOAD_AS_TARGETS, downloadAsSource, type DownloadAsTarget } from "@/features/drive/lib/downloadAs.logic"
-import { askPassword } from "@/features/drive/lib/downloadAsPassword"
+import {
+	DOWNLOAD_AS_TARGETS,
+	downloadAsFormat,
+	downloadAsSource,
+	type DownloadAsFormat,
+	type DownloadAsTarget
+} from "@/features/drive/lib/downloadAs.logic"
+import { askPassword, type DownloadAsPasswordPurpose } from "@/features/drive/lib/downloadAsPassword"
 import { writeZipOf, zipDelivery, zipEntryNamer, type ZipDelivery, type ZipFile } from "@/features/drive/lib/downloadAsZip"
 import { isPickerCancelled } from "@/features/drive/lib/saveDownload"
 import { pdfPasswordAllowed } from "@/features/office/lib/pdfPassword"
@@ -21,15 +27,16 @@ import {
 	legacyNeedsPassword,
 	legacyRefusalKey
 } from "@/features/preview/components/docxViewer.logic"
-import { docxLegacy, docxProtection, docxRtf } from "@/features/preview/lib/docxEngine"
+import { docxConvert, docxLegacy, docxProtection, docxRtf } from "@/features/preview/lib/docxEngine"
 import { docxPdfFailure, makeDocxPdf, reportDocxPdf, type DocxPdfSource } from "@/features/preview/lib/docxPdf"
 import { pdfProgressText } from "@/features/preview/lib/docxPdf.logic"
+import type { EditedFile } from "@/features/preview/lib/docxLiveFile"
 import type { PreviewAccessMode } from "@/features/preview/lib/accessMode"
 import { joinPreviewBytes } from "@/features/preview/lib/previewCache"
-import { openSheet } from "@/features/spreadsheet/lib/sheetHosts"
+import { isTextSheetKind, openSheet, textToXlsx } from "@/features/spreadsheet/lib/sheetHosts"
 import { SheetEventRelay } from "@/features/spreadsheet/lib/sheetEvents"
 import { withWorkbookDigit } from "@/features/spreadsheet/lib/sheetDigitWidth"
-import { sheetKindOf } from "@/features/spreadsheet/lib/sheetKind"
+import { isLegacySheetKind, sheetKindOf } from "@/features/spreadsheet/lib/sheetKind"
 import { browserLanguage, sheetLocaleOf } from "@/features/spreadsheet/formulaBar/sheetLocale"
 import { formOf, pdfRequest, printRequests } from "@/features/spreadsheet/print/print.logic"
 import { sheetSettings } from "@/features/spreadsheet/print/printSettings"
@@ -52,10 +59,28 @@ import { sdkApi } from "@/lib/sdk/client"
 // and prints it (released once idle). A protected file asks its password first, which then protects the PDF. What
 // comes out equals the editors' File menu export of the same saved file.
 
-// Where the menu was opened: a public link's files are read as the viewer reads them there.
+// A workbook converted from the session its viewer holds open (in the workbook worker, unsaved edits included).
+export type LiveConversion = (format: "xlsx" | "ods", signal: AbortSignal) => Promise<LiveAnswer>
+
+type LiveAnswer =
+	| { readonly ok: true; readonly bytes: Uint8Array; readonly lossy: readonly LossyFeature[] }
+	| { readonly ok: false; readonly reason: string; readonly message: string }
+
+interface LossyFeature {
+	readonly kind: string
+	readonly count: number
+}
+
+// The document editor's document as it holds it now (docxLiveFile.ts): in the file's own format, or already converted.
+export type LiveFile = (target: "docx" | "odt", signal: AbortSignal) => Promise<EditedFile>
+
+// Where the menu was opened: a public link's files are read as the viewer reads them there; an editor's open
+// workbook converts from its session (`live`), an editor's open document from what it holds (`liveFile`).
 export interface DownloadAsContext {
 	readonly accessMode: PreviewAccessMode
 	readonly cacheScope: string | null
+	readonly live?: LiveConversion
+	readonly liveFile?: LiveFile
 }
 
 type Message =
@@ -64,13 +89,14 @@ type Message =
 	| { readonly text: string }
 
 type Exported =
-	| { readonly kind: "pdf"; readonly blob: Blob; readonly warnings: readonly Message[] }
+	| { readonly kind: "file"; readonly blob: Blob; readonly warnings: readonly Message[] }
 	| { readonly kind: "failed"; readonly error: Message }
 	// The user let the password prompt go: nothing to report.
 	| { readonly kind: "skipped" }
 
 type Phase =
 	| { readonly kind: "downloading" }
+	| { readonly kind: "converting" }
 	| { readonly kind: "document"; readonly progress: DocxPdfProgress | null }
 	| { readonly kind: "sheet"; readonly done: number | null; readonly total: number }
 
@@ -159,7 +185,7 @@ async function documentPdf(source: DocxPdfSource, name: string, run: Run, passwo
 		})
 		const warning = reportDocxPdf(result)
 
-		return { kind: "pdf", blob: result.blob as Blob, warnings: warning === null ? [] : [{ key: `preview:${warning}`, values: {} }] }
+		return { kind: "file", blob: result.blob as Blob, warnings: warning === null ? [] : [{ key: `preview:${warning}`, values: {} }] }
 	} catch (error) {
 		const key = docxPdfFailure(error, run.signal.aborted)
 
@@ -202,13 +228,16 @@ async function promptFor<T, R>(
 	check: (password: string, signal: AbortSignal) => Promise<Checked<T, R>>,
 	release: (value: T) => void,
 	// What is held for the locked file, let go unless it opened (then it goes with what opened).
-	dispose: () => void
+	dispose: () => void,
+	// "copy": the password protects a converted copy, which takes any password the file opens with.
+	options: { readonly purpose?: DownloadAsPasswordPurpose } = {}
 ): Promise<Prompted<T, R>> {
+	const purpose = options.purpose ?? "pdf"
 	const state: { found: { value: T; password: string } | null; refusal: R | "password" | null } = { found: null, refusal: null }
 	const accepted = await askPassword(
 		name,
 		async (typed, signal) => {
-			if (!pdfPasswordAllowed(typed)) {
+			if (purpose === "pdf" && !pdfPasswordAllowed(typed)) {
 				state.refusal = "password"
 
 				return "refused"
@@ -237,7 +266,8 @@ async function promptFor<T, R>(
 					return "accepted"
 			}
 		},
-		run.signal
+		run.signal,
+		purpose
 	)
 
 	if (accepted && state.found !== null) {
@@ -505,7 +535,7 @@ async function printWorkbook(
 
 		if (result.ok) {
 			return {
-				kind: "pdf",
+				kind: "file",
 				blob: result.blob,
 				warnings: warnings.map(warning => ({ key: `preview:${warning.key}` as const, values: warning.values }))
 			}
@@ -529,6 +559,8 @@ function phaseText(phase: Phase): string {
 	switch (phase.kind) {
 		case "downloading":
 			return i18n.t("drive:driveDownloadAsDownloading")
+		case "converting":
+			return i18n.t("drive:driveDownloadAsConverting")
 		case "document": {
 			const text = pdfProgressText(phase.progress)
 
@@ -543,20 +575,351 @@ function phaseText(phase: Phase): string {
 	}
 }
 
-async function exportOne(item: DriveItem, context: DownloadAsContext, run: Run): Promise<Exported> {
+async function exportOne(item: DriveItem, target: DownloadAsTarget, context: DownloadAsContext, run: Run): Promise<Exported> {
 	const source = downloadAsSource(item)
+	const format = downloadAsFormat(item)
 
-	if (source === null) {
-		return failed("previewDocxPdfFailed")
+	if (source === null || (target !== "pdf" && (format === null || !DOWNLOAD_AS_TARGETS[target].from.has(format)))) {
+		return target === "pdf" ? failed("previewDocxPdfFailed") : convertFailed("driveDownloadAsConvertFailed")
 	}
 
 	const name = driveItemName(item)
+
+	if (source === "spreadsheet" && (target === "xlsx" || target === "ods") && context.live !== undefined) {
+		run.show({ kind: "converting" })
+
+		const answer = await abortable(context.live(target, run.signal), run.signal)
+
+		if (run.signal.aborted) {
+			throw new Aborted()
+		}
+
+		// The cell being typed could not be committed: the sheet said why (sheetConvert.ts commitForExport).
+		if (!answer.ok && answer.reason === "uncommitted") {
+			return { kind: "skipped" }
+		}
+
+		return sheetConverted(answer, target)
+	}
+
+	if (source === "document" && (target === "docx" || target === "odt") && format !== null && context.liveFile !== undefined) {
+		run.show({ kind: "converting" })
+
+		let edited: EditedFile
+
+		try {
+			edited = await abortable(context.liveFile(target, run.signal), run.signal)
+		} catch (error) {
+			if (run.signal.aborted) {
+				throw new Aborted()
+			}
+
+			log.error("drive", "download as could not write the edited document", error)
+
+			return convertFailed("driveDownloadAsConvertFailed")
+		}
+
+		// Nothing written (no unsaved edit, or a view-only document): the saved file converts below.
+		if (edited.kind === "converted") {
+			return documentConverted(edited.conversion, target)
+		}
+
+		if (edited.kind === "file") {
+			return convertDocument(item, edited.bytes, true, edited.format ?? format, target, context, run, edited.lossy)
+		}
+	}
 
 	run.show({ kind: "downloading" })
 
 	const { bytes, owned } = await fileBytes(item, context, run.signal)
 
-	return source === "document" ? exportDocument(item, bytes, owned, context, run) : exportSpreadsheet(item, bytes, owned, name, run)
+	if (target === "pdf" || format === null) {
+		return source === "document" ? exportDocument(item, bytes, owned, context, run) : exportSpreadsheet(item, bytes, owned, name, run)
+	}
+
+	return target === "docx" || target === "odt"
+		? convertDocument(item, bytes, owned, format, target, context, run)
+		: convertSpreadsheet(item, bytes, owned, name, target, run)
+}
+
+const CONVERTED_TYPES: Readonly<Record<Exclude<DownloadAsTarget, "pdf">, string>> = {
+	docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	odt: "application/vnd.oasis.opendocument.text",
+	xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	ods: "application/vnd.oasis.opendocument.spreadsheet"
+}
+
+function convertFailed(key: DriveKey): Exported {
+	return { kind: "failed", error: { key: `drive:${key}`, values: {} } }
+}
+
+// What a converted copy lacks, told once per kind of loss: formulas by count, the rest together.
+function lossyWarnings(lossy: readonly LossyFeature[]): Message[] {
+	const formulas = lossy.reduce((sum, feature) => sum + (feature.kind === "formula" ? feature.count : 0), 0)
+	const warnings: Message[] = []
+
+	if (formulas > 0) {
+		warnings.push({ text: i18n.t("drive:driveDownloadAsConvertFormulas", { count: formulas }) })
+	}
+
+	if (lossy.some(feature => feature.kind !== "formula" && feature.count > 0)) {
+		warnings.push({ key: "drive:driveDownloadAsConvertLossy", values: {} })
+	}
+
+	return warnings
+}
+
+function convertedFile(bytes: Uint8Array, target: Exclude<DownloadAsTarget, "pdf">, lossy: readonly LossyFeature[]): Exported {
+	return {
+		kind: "file",
+		blob: new Blob([bytes as Uint8Array<ArrayBuffer>], { type: CONVERTED_TYPES[target] }),
+		warnings: lossyWarnings(lossy)
+	}
+}
+
+// A text document converted in the document engine's worker (an RTF or Word 97–2003 file read there too). A
+// password-protected file is refused: its copy could not keep the protection.
+async function convertDocument(
+	item: DriveItem,
+	bytes: Uint8Array,
+	owned: boolean,
+	format: DownloadAsFormat,
+	target: "docx" | "odt",
+	context: DownloadAsContext,
+	run: Run,
+	// What an earlier step lacked (an edited document converted to .docx where it is held), joined to this report.
+	earlier: readonly LossyFeature[] = []
+): Promise<Exported> {
+	const name = driveItemName(item)
+
+	if (isTextTemplate(item, bytes)) {
+		recordContentVerdict({ uuid: item.data.uuid, name, mime: driveItemMime(item), size: item.data.size }, "notWordBinary", {
+			memoryOnly: context.accessMode === "anon"
+		})
+
+		return { kind: "failed", error: { key: "drive:driveDownloadAsNotDocument", values: {} } }
+	}
+
+	if (format !== "docx" && format !== "odt" && format !== "rtf" && format !== "doc") {
+		return convertFailed("driveDownloadAsConvertFailed")
+	}
+
+	run.show({ kind: "converting" })
+
+	// A Word 97–2003 file may be read again with its password: the caller's buffer is never handed over for it.
+	const converted = await docxConvert.convert(bytes, format, target, { signal: run.signal, owned: owned && format !== "doc" })
+
+	if (converted.kind === "refused" && converted.reason === "encrypted" && format === "doc" && target === "docx") {
+		return protectedDocx(bytes, name, run, converted.encryption)
+	}
+
+	return documentConverted(converted, target, earlier)
+}
+
+type DocxConverted = Awaited<ReturnType<typeof docxConvert.convert>>
+type DocxEncryptionScheme = Extract<DocxConverted, { kind: "refused" }>["encryption"]
+
+function documentConverted(converted: DocxConverted, target: "docx" | "odt", earlier: readonly LossyFeature[] = []): Exported {
+	switch (converted.kind) {
+		case "aborted":
+			throw new Aborted()
+		case "converted":
+			return convertedFile(converted.bytes, target, [...earlier, ...converted.lossy])
+		case "refused":
+			switch (converted.reason) {
+				case "encrypted":
+				case "wrongPassword":
+					// An OpenDocument copy is never protected; a protected source to .docx is only refused when it is
+					// one Filen cannot decrypt (an ODF file's, a cipher of no known kind).
+					return target === "odt" ? convertFailed("driveDownloadAsConvertProtected") : failed("previewDocxUnsupportedEncryption")
+				case "tooLarge":
+					return convertFailed("driveDownloadAsConvertTooLarge")
+				case "legacyVersion":
+					return convertFailed("driveDownloadAsConvertLegacyVersion")
+				case "aborted":
+					throw new Aborted()
+				default:
+					log.error("drive", "download as conversion refused", converted.reason, converted.message)
+
+					return convertFailed("driveDownloadAsConvertFailed")
+			}
+	}
+}
+
+// A password-protected .doc as a .docx protected with the same password. One that is really an encrypted Word package
+// already is one: it goes as it is. A Word 97–2003 document asks its password, which the docx worker converts it with
+// and seals the .docx under (the password goes with each try, nothing keeps it).
+async function protectedDocx(bytes: Uint8Array, name: string, run: Run, encryption: DocxEncryptionScheme | undefined): Promise<Exported> {
+	// A cipher no password opens here is refused as the viewer refuses it, before any password is asked.
+	if (encryption === "unknown") {
+		return failed("previewDocxUnsupportedEncryption")
+	}
+
+	// No cipher named: an encrypted Word package under a .doc name, which goes as it is.
+	if (encryption === undefined) {
+		const probed = await docxProtection.open(bytesSource(bytes), { signal: run.signal })
+
+		switch (probed.kind) {
+			case "aborted":
+				throw new Aborted()
+			case "refused":
+				return failed(docxRefusalKey(probed.reason))
+			case "needsPassword":
+				probed.locked.dispose()
+
+				return convertedFile(bytes.slice(), "docx", [])
+			case "plain":
+				return failed("previewDocxUnsupportedEncryption")
+		}
+	}
+
+	const prompted = await promptFor<DocxConverted, Extract<DocxConverted, { kind: "refused" }>>(
+		name,
+		run,
+		async (password, signal) => {
+			const answer = await docxConvert.convert(bytes, "doc", "docx", { signal, password })
+
+			switch (answer.kind) {
+				case "converted":
+					return { kind: "opened", value: answer }
+				case "aborted":
+					return { kind: "aborted" }
+				case "refused":
+					return answer.reason === "wrongPassword" ? { kind: "wrong" } : { kind: "refused", refusal: answer }
+			}
+		},
+		() => undefined,
+		() => undefined,
+		{ purpose: "copy" }
+	)
+
+	switch (prompted.kind) {
+		case "accepted":
+			return documentConverted(prompted.value, "docx")
+		case "refused":
+			return prompted.refusal === "password"
+				? convertFailed("driveDownloadAsConvertFailed")
+				: documentConverted(prompted.refusal, "docx")
+		case "skipped":
+			return prompted
+	}
+}
+
+// A spreadsheet converted in the workbook worker on a session of its own, closed once done: a workbook (Excel,
+// OpenDocument, Excel 97–2003) by its session's conversion, a text file's cells made a workbook first (as Save as
+// .xlsx makes it), then converted. A password-protected file is refused: its copy could not keep the protection.
+async function convertSpreadsheet(
+	item: DriveItem,
+	bytes: Uint8Array,
+	owned: boolean,
+	name: string,
+	target: "xlsx" | "ods",
+	run: Run
+): Promise<Exported> {
+	const { kind } = sheetKindOf(extensionOf(name), bytes, itemTypeExtension(item) === "tsv")
+
+	run.show({ kind: "converting" })
+
+	// An .xls that is really a password-protected workbook package already is the protected .xlsx: kept to go as it is.
+	const keep = isLegacySheetKind(kind) && target === "xlsx"
+	let workbook = owned && !keep ? bytes : bytes.slice()
+	let workbookKind = kind
+
+	if (isTextSheetKind(kind)) {
+		const cells = await withSession(workbook, kind, run, session => session.query("saveAs.cells", {}, { signal: run.signal }))
+
+		if (cells.kind !== "done") {
+			return cells.exported
+		}
+
+		const xlsx = await abortable(textToXlsx(cells.value.bytes, fileStem(name)), run.signal)
+
+		if (!xlsx.ok) {
+			return convertFailed("driveDownloadAsConvertFailed")
+		}
+
+		if (target === "xlsx") {
+			return convertedFile(xlsx.bytes, target, [])
+		}
+
+		workbook = xlsx.bytes
+		workbookKind = "xlsx"
+	}
+
+	const converted = await withSession(
+		workbook,
+		workbookKind,
+		run,
+		session => session.query("saveAs.format", { format: target }, { signal: run.signal }),
+		keep ? () => convertedFile(bytes, target, []) : undefined
+	)
+
+	if (converted.kind !== "done") {
+		return converted.exported
+	}
+
+	return sheetConverted(converted.value, target)
+}
+
+function sheetConverted(answer: LiveAnswer, target: "xlsx" | "ods"): Exported {
+	if (answer.ok) {
+		return convertedFile(answer.bytes, target, answer.lossy)
+	}
+
+	switch (answer.reason) {
+		case "aborted":
+			throw new Aborted()
+		case "encrypted":
+			return convertFailed("driveDownloadAsConvertProtected")
+		case "tooLarge":
+			return convertFailed("driveDownloadAsConvertTooLarge")
+		default:
+			log.error("drive", "download as conversion refused", answer.reason, answer.message)
+
+			return convertFailed("driveDownloadAsConvertFailed")
+	}
+}
+
+type InSession<T> = { readonly kind: "done"; readonly value: T } | { readonly kind: "ended"; readonly exported: Exported }
+
+// `task` on the file opened in its sheet worker (bytes transferred), the session closed after. A protected file is
+// refused before any password is asked.
+async function withSession<T>(
+	bytes: Uint8Array,
+	kind: SheetFileKind,
+	run: Run,
+	task: (session: SheetOpened["session"]) => Promise<T>,
+	// What a password-protected file gives instead (else it is refused: an OpenDocument copy could not be protected).
+	onLocked?: () => Exported
+): Promise<InSession<T>> {
+	const opened = await openSheet(bytes, { kind, signal: run.signal }, () => undefined)
+
+	switch (opened.kind) {
+		case "aborted":
+			throw new Aborted()
+		case "failed":
+			return { kind: "ended", exported: failed("previewSpreadsheetUnreadable") }
+		case "refused":
+			return { kind: "ended", exported: failed(docxRefusalKey(opened.reason)) }
+		case "needsPassword":
+			opened.locked.dispose()
+
+			return { kind: "ended", exported: onLocked?.() ?? convertFailed("driveDownloadAsConvertProtected") }
+		case "opened":
+			break
+	}
+
+	try {
+		const value = await task(opened.session)
+
+		if (run.signal.aborted) {
+			throw new Aborted()
+		}
+
+		return { kind: "done", value }
+	} finally {
+		opened.session.close()
+	}
 }
 
 let runs = 0
@@ -617,8 +980,9 @@ function cancelled(signal: AbortSignal): boolean {
 
 // Exports `items` one after another under the run's toast, each file's PDF handed out as it is made (the next file
 // is started once the caller asks for it); what became of each goes to `outcomes`. Ends early once cancelled.
-async function* exportPdfs(
+async function* exportFiles(
 	items: readonly DriveItem[],
+	target: DownloadAsTarget,
 	context: DownloadAsContext,
 	run: Exports
 ): AsyncGenerator<{ name: string; blob: Blob }> {
@@ -633,7 +997,7 @@ async function* exportPdfs(
 		let exported: Exported
 
 		try {
-			exported = await exportOne(item, context, {
+			exported = await exportOne(item, target, context, {
 				signal: run.signal,
 				show: phase => {
 					toast.loading(phaseText(phase), { id: run.id, action: run.action, description, duration: Number.POSITIVE_INFINITY })
@@ -647,12 +1011,17 @@ async function* exportPdfs(
 			log.error("drive", "download as failed", error)
 			exported = {
 				kind: "failed",
-				error: error instanceof Error ? { key: "preview:previewDocxPdfFailed", values: {} } : { text: errorLabel(error) }
+				error:
+					error instanceof Error
+						? target === "pdf"
+							? { key: "preview:previewDocxPdfFailed", values: {} }
+							: { key: "drive:driveDownloadAsConvertFailed", values: {} }
+						: { text: errorLabel(error) }
 			}
 		}
 
 		switch (exported.kind) {
-			case "pdf":
+			case "file":
 				run.outcomes.push({ name, failed: null, warnings: exported.warnings })
 				yield { name, blob: exported.blob }
 				break
@@ -692,8 +1061,8 @@ export async function startDownloadAs(items: readonly DriveItem[], target: Downl
 		items.length > 1 ? zipDelivery(i18n.t("transfers:transfersZipDownloadDefaultName"), controller.signal, onEnded, downloadBlob) : null
 
 	if (delivery === null) {
-		for await (const pdf of exportPdfs(items, context, run)) {
-			downloadBlob(`${fileStem(pdf.name)}.${extension}`, pdf.blob)
+		for await (const file of exportFiles(items, target, context, run)) {
+			downloadBlob(`${fileStem(file.name)}.${extension}`, file.blob)
 		}
 
 		toast.dismiss(run.id)
@@ -726,7 +1095,7 @@ export async function startDownloadAs(items: readonly DriveItem[], target: Downl
 		return
 	}
 
-	const pdfs = exportPdfs(items, context, run)
+	const pdfs = exportFiles(items, target, context, run)
 	const name = zipEntryNamer(extension)
 
 	try {

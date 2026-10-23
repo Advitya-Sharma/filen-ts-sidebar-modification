@@ -306,12 +306,20 @@ export function borderAttributes(children: string, withPadding: boolean): [strin
 	return out
 }
 
-// The ODF attributes of one paragraph property (pPr child); tab stops come back as `tabs` markup.
+// What one paragraph property is in ODF: style:paragraph-properties attributes, tab stops as `tabs` markup, and the
+// paragraph style's style:text-properties attributes it is (`text`).
+export interface ParagraphAttributes {
+	readonly attributes: [string, string][]
+	readonly tabs?: string
+	readonly text?: [string, string][]
+}
+
+// The ODF attributes of one paragraph property (pPr child).
 export function paragraphAttributes(
 	local: string,
 	value: PropertyValue,
 	context: { readonly tabsRelativeToIndent: boolean; readonly marginLeft: number }
-): { readonly attributes: [string, string][]; readonly tabs?: string } | undefined {
+): ParagraphAttributes | undefined {
 	const attributes = value.attributes
 	const val = attributes.get("val")
 
@@ -383,7 +391,8 @@ export function paragraphAttributes(
 			return { attributes: [], tabs }
 		}
 		case "suppressAutoHyphens":
-			return { attributes: [["fo:hyphenate", on(value) ? "false" : "true"]] }
+			// A text property in ODF (fo:hyphenate on style:text-properties): the paragraph style's.
+			return { attributes: [], text: [["fo:hyphenate", on(value) ? "false" : "true"]] }
 		case "bidi":
 			return { attributes: [["style:writing-mode", on(value) ? "rl-tb" : "lr-tb"]] }
 		case "spacing": {
@@ -486,6 +495,11 @@ export function paragraphAttributes(
 	}
 }
 
+// The paragraph style's text properties a paragraph property element is read from.
+export function paragraphTextSources(local: string): readonly string[] {
+	return local === "suppressAutoHyphens" ? ["fo:hyphenate"] : []
+}
+
 // The ODF attributes a paragraph property element is read from (removing it removes them).
 export function paragraphSources(local: string): readonly string[] {
 	switch (local) {
@@ -502,6 +516,7 @@ export function paragraphSources(local: string): readonly string[] {
 		case "shd":
 			return ["fo:background-color"]
 		case "suppressAutoHyphens":
+			// Where earlier saves put it (no ODF attribute there); its own place is paragraphTextSources'.
 			return ["fo:hyphenate"]
 		case "bidi":
 			return ["style:writing-mode"]

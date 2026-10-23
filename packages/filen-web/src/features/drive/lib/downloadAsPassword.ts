@@ -5,8 +5,12 @@ import type { PasswordVerdict } from "@/features/preview/components/docxPassword
 // prompt (downloadAsPasswordDialog.tsx, mounted at the root beside the toasts) checks passwords with `verify`. The
 // typed password goes to `verify` only; nothing here keeps it.
 
+// What the password goes on to protect: the PDF made from the file, or its copy converted to another format.
+export type DownloadAsPasswordPurpose = "pdf" | "copy"
+
 export interface DownloadAsPasswordAsk {
 	readonly name: string
+	readonly purpose: DownloadAsPasswordPurpose
 	readonly verify: (password: string, signal: AbortSignal) => Promise<PasswordVerdict>
 	// The prompt went: accepted (a password verified) or not (cancelled, or the export was).
 	readonly settle: (accepted: boolean) => void
@@ -51,9 +55,10 @@ let queue: Promise<unknown> = Promise.resolve()
 export function askPassword(
 	name: string,
 	verify: (password: string, signal: AbortSignal) => Promise<DownloadAsPasswordVerdict>,
-	signal: AbortSignal
+	signal: AbortSignal,
+	purpose: DownloadAsPasswordPurpose = "pdf"
 ): Promise<boolean> {
-	const asked = queue.then(() => showAsk(name, verify, signal))
+	const asked = queue.then(() => showAsk(name, verify, signal, purpose))
 
 	queue = asked
 
@@ -63,7 +68,8 @@ export function askPassword(
 function showAsk(
 	name: string,
 	verify: (password: string, signal: AbortSignal) => Promise<DownloadAsPasswordVerdict>,
-	signal: AbortSignal
+	signal: AbortSignal,
+	purpose: DownloadAsPasswordPurpose
 ): Promise<boolean> {
 	if (signal.aborted) {
 		return Promise.resolve(false)
@@ -73,6 +79,7 @@ function showAsk(
 		let settled = false
 		const ask: DownloadAsPasswordAsk = {
 			name,
+			purpose,
 			verify: async (password, check) => {
 				const verdict = await verify(password, check)
 

@@ -7,6 +7,7 @@ import { verifyProtectionPassword } from "../dom/protection"
 import type { DocxEvent } from "@filen/office/dom/docx"
 import type { DocxConvertedDocument, DocxLegacyOpen } from "../dom/docx/legacy"
 import { buildDoc, prl } from "./docFixtures"
+import { encryptedDoc } from "./docDecryptFixtures"
 import { workerHarness } from "./docxEncryptedFixtures"
 
 // Word binary documents through the docx worker, as the web opens them: the worker reads the file once and holds the
@@ -126,7 +127,7 @@ describe("Word binary documents in the docx worker", () => {
 
 		try {
 			const legacy = await buildDoc({ pieces: [{ text: "old\r" }], nFib: 0x65, wIdent: 0xa5dc })
-			const encrypted = await buildDoc({ pieces: [{ text: "x\r" }], flags: 0x0200 | 0x0100, tablePrefix: Uint8Array.of(2, 0, 2, 0) })
+			const encrypted = (await encryptedDoc({ pieces: [{ text: "x\r" }] }, { scheme: "cryptoApiRc4", password: "pw" })).bytes
 
 			expect(await harness.pool.legacy.open(bytesSource(legacy))).toEqual({
 				kind: "refused",

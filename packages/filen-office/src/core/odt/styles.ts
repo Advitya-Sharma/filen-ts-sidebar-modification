@@ -205,7 +205,13 @@ export class StyleMapper {
 			defaultParagraph?.attributes ?? NO_ATTRIBUTES,
 			defaultParagraph?.children ?? [],
 			defaultParagraph?.attributes ?? NO_ATTRIBUTES,
-			{ tabsRelativeToIndent: this.options.tabsRelativeToIndent, marginLeft: 0, indents: false, fontSize: DEFAULT_SIZE },
+			{
+				tabsRelativeToIndent: this.options.tabsRelativeToIndent,
+				marginLeft: 0,
+				indents: false,
+				fontSize: DEFAULT_SIZE,
+				hyphenate: defaults?.properties.get("text")?.attributes.get("fo:hyphenate")
+			},
 			sink
 		)
 		let xml = `<w:docDefaults><w:rPrDefault><w:rPr>${runProperties(this.sheet, defaultText, sink)}</w:rPr></w:rPrDefault><w:pPrDefault><w:pPr>${pPr.head}${pPr.tail}</w:pPr></w:pPrDefault></w:docDefaults>`
@@ -288,7 +294,8 @@ export class StyleMapper {
 				tabsRelativeToIndent: this.options.tabsRelativeToIndent,
 				marginLeft: parseLength(resolvedParagraph.get("fo:margin-left")) ?? 0,
 				indents: ownIndent,
-				fontSize: parseLength(resolvedText.get("fo:font-size")) ?? DEFAULT_SIZE
+				fontSize: parseLength(resolvedText.get("fo:font-size")) ?? DEFAULT_SIZE,
+				hyphenate: style.properties.get("text")?.attributes.get("fo:hyphenate")
 			},
 			sink
 		)

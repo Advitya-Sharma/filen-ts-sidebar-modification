@@ -10,6 +10,7 @@ import { DocxPasswordGate } from "@/features/preview/components/docxPasswordProm
 import { docxRefusalKey } from "@/features/preview/components/docxViewer.logic"
 import { uploadXlsxCopy } from "@/features/spreadsheet/lib/saveAsXlsx"
 import { SheetBody } from "@/features/spreadsheet/components/sheetBody"
+import { DownloadAsItemProvider } from "@/features/drive/components/editorDownloadAs"
 import { useSheetSession } from "@/features/spreadsheet/hooks/useSheetSession"
 import { saveAsRefusalKey, type SpreadsheetSaveSource } from "@/features/spreadsheet/save/sheetSave.logic"
 import { savesAsXlsx, sheetXlsxCopy } from "@/features/spreadsheet/save/sheetSaveAs"
@@ -41,7 +42,16 @@ export interface SheetViewerProps {
 // A CSV, TSV or Excel file on the office engine: the file is read and edited in a sheet worker (dom/sheet), which
 // keeps it, and the grid (react/sheet) shows the tiles in view. Editable in the drive once the session proves
 // that saving keeps everything in the file; `saveRef` hands the overlay its bytes as edited.
-export function SheetViewer({
+// The workbook's File menu offers Download as for this file (editorDownloadAs.tsx).
+export function SheetViewer(props: SheetViewerProps) {
+	return (
+		<DownloadAsItemProvider item={props.item}>
+			<SheetViewerBody {...props} />
+		</DownloadAsItemProvider>
+	)
+}
+
+function SheetViewerBody({
 	item,
 	documentKey,
 	alt,

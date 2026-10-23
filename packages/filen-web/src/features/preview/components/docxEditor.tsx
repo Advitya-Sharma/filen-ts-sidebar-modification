@@ -85,6 +85,8 @@ import { DocxContextCommands } from "@/features/preview/components/docxContextMe
 import { DocxEditToolbar } from "@/features/preview/components/docxEditToolbar"
 import { DocxFileMenu } from "@/features/preview/components/docxFileMenu"
 import { useDocxPdfExport } from "@/features/preview/hooks/useDocxPdfExport"
+import { editedFile } from "@/features/preview/lib/docxLiveFile"
+import type { LiveFile } from "@/features/drive/lib/downloadAs"
 import type { PasswordIntegrity } from "@/features/preview/components/docxToolbar"
 import { DocxEquationPopover } from "@/features/preview/components/docxEquationPopover"
 import { DocxFieldChip } from "@/features/preview/components/docxFieldChip"
@@ -525,6 +527,10 @@ export function DocxEditView({
 		source: () => ({ kind: "editor", live: signal => opened.editing.pdfSource(signal), markup: reviewing && shownMode !== "none" }),
 		encryptedFile
 	})
+	// Download as ▸ another format: the document as the editor holds it, unsaved edits included. A password-protected
+	// one converts from its saved file, which the conversion refuses with why (an OpenDocument copy is never protected).
+	const liveFile: LiveFile | undefined =
+		encryptedFile === undefined ? (target, signal) => editedFile(opened.editing, target, signal, backend?.convertEdited) : undefined
 	const bodyActive = editor !== undefined && editor.activeStory === editor.body.session.story.story.index
 	const spellingMarks = useSyncExternalStore(
 		spelling === undefined ? subscribeNothing : listener => spelling.subscribe(listener),
@@ -1188,7 +1194,14 @@ export function DocxEditView({
 			className="flex size-full flex-col"
 		>
 			<DocxEditToolbar
-				fileMenu={pdf.onDownloadPdf === undefined ? undefined : <DocxFileMenu onDownloadPdf={pdf.onDownloadPdf} />}
+				fileMenu={
+					pdf.onDownloadPdf === undefined ? undefined : (
+						<DocxFileMenu
+							onDownloadPdf={pdf.onDownloadPdf}
+							liveFile={liveFile}
+						/>
+					)
+				}
 				snapshot={toolbarSnapshot}
 				readOnly={readOnly}
 				apple={APPLE}

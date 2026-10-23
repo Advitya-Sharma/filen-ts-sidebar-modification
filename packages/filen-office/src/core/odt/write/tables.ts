@@ -1,4 +1,5 @@
 import type { XmlDocument } from "../../xml/index"
+import { ByteKeyMap } from "./byteKeys"
 import { readProps, type Props, type PropertyValue, type StyleChains } from "./meaning"
 
 // A table as its cells show it (ECMA-376 Part 1 §17.4): each cell's borders and margins with the table's (its own
@@ -27,6 +28,7 @@ export interface EffectiveTable {
 }
 
 const SIDES = ["top", "left", "bottom", "right"] as const
+const NO_BYTES = new Uint8Array(0)
 
 function childNamed(document: XmlDocument, node: number, local: string): number {
 	for (let child = document.firstChildElement(node); child >= 0; child = document.nextSiblingElement(child)) {
@@ -84,7 +86,14 @@ function border(attributes: Map<string, string> | undefined): Map<string, string
 	return out
 }
 
-export function effectiveTable(document: XmlDocument, table: number, chains: StyleChains): EffectiveTable {
+// `place`: where the rows `table` holds are among the table's own (a table written in pieces): the first's index
+// among them, and how many it has.
+export function effectiveTable(
+	document: XmlDocument,
+	table: number,
+	chains: StyleChains,
+	place?: { readonly offset: number; readonly total: number }
+): EffectiveTable {
 	const tblPr: Props = new Map()
 	const tblPrNode = childNamed(document, table, "tblPr")
 
@@ -106,6 +115,7 @@ export function effectiveTable(document: XmlDocument, table: number, chains: Sty
 		if (document.localName(child) === "tr") rowNodes.push(child)
 	}
 
+	const shared = new ByteKeyMap<{ readonly props: Props; readonly span: number }>(1 << 16)
 	const rows: EffectiveRow[] = rowNodes.map((row, rowIndex) => {
 		const trPr: Props = new Map()
 		const trPrNode = childNamed(document, row, "trPr")
@@ -118,17 +128,31 @@ export function effectiveTable(document: XmlDocument, table: number, chains: Sty
 		for (let cell = document.firstChildElement(row); cell >= 0; cell = document.nextSiblingElement(cell)) {
 			if (document.localName(cell) !== "tc") continue
 
-			const props: Props = new Map()
 			const tcPr = childNamed(document, cell, "tcPr")
+			// Cells with the same tcPr on the same edges of the table show alike: one Props for them (read only).
+			const first = (place?.offset ?? 0) + rowIndex === 0
+			const last = (place?.offset ?? 0) + rowIndex === (place?.total ?? rowNodes.length) - 1
+			const raw = tcPr < 0 ? NO_BYTES : document.raw(tcPr)
+			const salt = (first ? 1 : 0) | (last ? 2 : 0) | (column << 2)
+			const known = shared.get(raw, salt)
+
+			if (known !== undefined) {
+				cells.push({ node: cell, column, span: known.span, props: known.props })
+				column += known.span
+
+				continue
+			}
+
+			const props: Props = new Map()
 
 			if (tcPr >= 0) readProps(document, tcPr, props)
 
-			const span = Number(props.get("gridSpan")?.attributes.get("val") ?? "1") || 1
+			const span = gridSpan(props)
 			const own = sides(props.get("tcBorders"))
 			const borders = new Map<string, Map<string, string>>()
 			const edge = {
-				top: rowIndex === 0 ? "top" : "insideH",
-				bottom: rowIndex === rowNodes.length - 1 ? "bottom" : "insideH",
+				top: first ? "top" : "insideH",
+				bottom: last ? "bottom" : "insideH",
 				left: column === 0 ? "left" : "insideV",
 				right: column + span >= grid.length ? "right" : "insideV"
 			}
@@ -156,6 +180,7 @@ export function effectiveTable(document: XmlDocument, table: number, chains: Sty
 			if (borders.size > 0) props.set("tcBorders", { attributes: new Map(), children: sideMarkup(borders) })
 
 			props.set("tcMar", { attributes: new Map(), children: sideMarkup(margins) })
+			shared.set(raw, { props, span }, salt)
 			cells.push({ node: cell, column, span, props })
 			column += span
 		}
@@ -164,6 +189,12 @@ export function effectiveTable(document: XmlDocument, table: number, chains: Sty
 	})
 
 	return { tblPr, grid, rows }
+}
+
+// A cell's w:gridSpan, clamped to Word's 63 columns a table holds ([MS-DOC] TDefTableOperand.NumberOfColumns), which
+// bounds the covered cells written after it.
+export function gridSpan(props: Props): number {
+	return Math.min(63, Math.max(1, Number(props.get("gridSpan")?.attributes.get("val") ?? "1") || 1))
 }
 
 // The table's own properties as they show: alignment, indent, shading; the width its grid gives. Borders and cell

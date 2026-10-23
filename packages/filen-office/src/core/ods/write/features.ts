@@ -6,7 +6,8 @@ import { decodeUtf8, encodeUtf8, escapeText, NodeKind, parseXml, type XmlDocumen
 import type { OdsSource, OdsTableSource } from "../source"
 import { SourceAxis } from "./axis"
 import { paragraphText } from "./cells"
-import { sheetValidations, validationRects, type Rect, type SheetValidations } from "./validations"
+import { sheetValidationsSteps, validationRects, type Rect, type SheetValidations } from "./validations"
+import { runSliced, type SliceClock } from "../../slicing"
 
 // The cell features an edit changed, as the writer needs them: each sheet's notes and links as they are now, by
 // cell, and the rows where they differ from what the source held there (written again). A feature an edit left alone
@@ -248,7 +249,8 @@ export async function sheetFeatures(
 	model: XlsxSheetModel,
 	sheetName: string,
 	table: OdsTableSource | null,
-	taken: Set<string>
+	taken: Set<string>,
+	clock?: SliceClock
 ): Promise<SheetFeatures> {
 	const axes = model as { rowAxis?: SourceAxis; colAxis?: SourceAxis }
 	const rowAxis = axes.rowAxis ?? SourceAxis.identity(0)
@@ -343,7 +345,10 @@ export async function sheetFeatures(
 		for (const [key, span] of before) if (!now.has(key)) mark(span)
 	}
 
-	const validations = sheetValidations(workbook, model, sheetName, table, currentSection(workbook, model, "dataValidations"), taken)
+	const validations = await runSliced(
+		sheetValidationsSteps(workbook, model, sheetName, table, currentSection(workbook, model, "dataValidations"), taken),
+		clock
+	)
 
 	for (const row of validations?.rows ?? []) rows.add(row)
 

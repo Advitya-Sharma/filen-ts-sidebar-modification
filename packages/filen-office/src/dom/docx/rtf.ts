@@ -2,6 +2,7 @@ import type { ByteSource } from "../../core/opc/index"
 import type { RtfLockedBlock } from "../../core/rtf/write/proof"
 import type { DocxHost } from "./host"
 import type { DocxAbortSignal } from "./protection"
+import type { DocxConversion } from "./convert"
 
 export { rtfBlockProof } from "../../core/rtf/write/proof"
 
@@ -40,6 +41,9 @@ export interface DocxRtfDocument {
 	prove(): Promise<readonly RtfLockedBlock[]>
 	// The RTF of the document as edited; rejects with a DocxRtfRefusal for an edit it cannot write.
 	write(edits: DocxRtfEdits): Promise<Uint8Array>
+	// The document as edited converted to .docx where it is held (its package with the docx writer's parts, never
+	// through its own writer, so an edit that writer refuses still converts). The signal ends the job.
+	convertEdited(edits: DocxRtfEdits, options?: { readonly signal?: DocxAbortSignal }): Promise<DocxConversion>
 	// Drops what is held; call once every session on it closed.
 	release(): void
 }
