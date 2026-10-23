@@ -36,15 +36,19 @@ export function spanCount(spans: readonly AxisSpan[]): number {
 	return spans.reduce((count, span) => count + span.end - span.start + 1, 0)
 }
 
-// Hidden indices of an axis, ascending (a row or column of no size reads as hidden too).
-export function hiddenIndices(layout: SheetAxisLayout): number[] {
-	const hidden: number[] = []
+// Whether an axis hides any index in the spans (a row or column of no size reads as hidden too). An entry may stand
+// for a run of indices (SheetAxisLayout.counts).
+export function hidesWithin(layout: SheetAxisLayout, spans: readonly AxisSpan[]): boolean {
+	for (let k = 0; k < layout.indices.length; k++) {
+		if (((layout.flags[k] ?? 0) & AxisFlag.HIDDEN) === 0 && layout.sizes[k] !== 0) continue
 
-	layout.indices.forEach((index, k) => {
-		if (((layout.flags[k] ?? 0) & AxisFlag.HIDDEN) !== 0 || layout.sizes[k] === 0) hidden.push(index)
-	})
+		const first = layout.indices[k] ?? 0
+		const last = first + (layout.counts?.[k] ?? 1) - 1
 
-	return hidden
+		if (spans.some(span => first <= span.end && last >= span.start)) return true
+	}
+
+	return false
 }
 
 // What "Unhide" shows again, as Excel does: the hidden rows (columns) inside the selection's spans, and those next to
@@ -52,11 +56,10 @@ export function hiddenIndices(layout: SheetAxisLayout): number[] {
 export function unhideSpans(spans: readonly AxisSpan[], layout: SheetLayout | null, axis: SheetAxis): AxisSpan[] | null {
 	if (layout === null) return null
 
-	const hidden = hiddenIndices(axis === "rows" ? layout.rows : layout.cols)
 	const last = (axis === "rows" ? SHEET_MAX_ROWS : SHEET_MAX_COLS) - 1
 	const widened = spans.map(span => ({ start: Math.max(0, span.start - 1), end: Math.min(last, span.end + 1) }))
 
-	if (!hidden.some(index => widened.some(span => index >= span.start && index <= span.end))) return null
+	if (!hidesWithin(axis === "rows" ? layout.rows : layout.cols, widened)) return null
 
 	return widened
 }

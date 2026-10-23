@@ -2,8 +2,29 @@
 // no TextDecoder. Invalid sequences decode to U+FFFD, one per offending byte.
 
 const CHUNK = 8192
+// Up to this many bytes, ASCII is copied into a reused array for String.fromCharCode: no view is made per decode, and
+// Function.apply over a typed array takes SpiderMonkey's slow path (twice V8's time for short slices).
+const SHORT = 64
+const shortUnits: number[] = []
 
 export function decodeUtf8(bytes: Uint8Array, start: number = 0, end: number = bytes.length): string {
+	if (end - start <= SHORT && start >= 0) {
+		const units = shortUnits
+		const last = Math.min(end, bytes.length)
+
+		units.length = Math.max(0, last - start)
+
+		for (let i = start; i < last; i++) {
+			const b = bytes[i] ?? 0
+
+			if (b >= 0x80) return decodeMultibyte(bytes, start, end)
+
+			units[i - start] = b
+		}
+
+		return String.fromCharCode.apply(null, units)
+	}
+
 	let ascii = true
 
 	for (let i = start; i < end; i++) {

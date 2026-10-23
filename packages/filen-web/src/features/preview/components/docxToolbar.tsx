@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react"
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import {
 	CaseSensitiveIcon,
@@ -7,6 +7,7 @@ import {
 	ChevronRightIcon,
 	ChevronUpIcon,
 	EyeIcon,
+	FileClockIcon,
 	LockIcon,
 	TriangleAlertIcon,
 	MessageSquareTextIcon,
@@ -20,6 +21,7 @@ import {
 import {
 	DOCX_MARKUP_MODES,
 	isDocxCommandEnabled,
+	type DocNotConverted,
 	type DocxMarkupMode,
 	type DocxViewerCommand,
 	type DocxViewerState
@@ -27,6 +29,7 @@ import {
 import { cn } from "@filen/shared"
 import {
 	MARKUP_LABELS,
+	notConvertedKey,
 	viewOnlyReasonKey,
 	viewerFindControls,
 	type DocxFindControls,
@@ -68,10 +71,15 @@ export interface DocxToolbarProps {
 	viewOnly: readonly DocxViewOnlyReason[]
 	// Opened with its password, and whether its integrity was verified.
 	encrypted?: PasswordIntegrity | undefined
+	// A Word 97–2003 document shown from its conversion: what did not convert as it was, and Save as .docx (when a
+	// copy may be saved beside the file).
+	legacy?: DocxLegacyInfo | undefined
 	// Bumped to focus the find field (and select its text) again while it is open.
 	findFocus: number
 	// Where focus goes when the find field closes.
 	onFindClosed: () => void
+	// The File menu (Download as), first on the left; absent when it offers nothing.
+	fileMenu?: ReactNode
 }
 
 export function ViewOnlyBadge({ reasons }: { reasons: readonly DocxViewOnlyReason[] }) {
@@ -97,6 +105,73 @@ export function ViewOnlyBadge({ reasons }: { reasons: readonly DocxViewOnlyReaso
 						<li key={reason}>{t(viewOnlyReasonKey(reason))}</li>
 					))}
 				</ul>
+			</PopoverContent>
+		</Popover>
+	)
+}
+
+export interface DocxLegacyInfo {
+	readonly notConverted: readonly DocNotConverted[]
+	readonly onSaveAs: (() => void) | undefined
+}
+
+// A Word 97–2003 document: read-only, converted to be shown; the popover lists what is shown differently, and offers
+// Save as .docx, also where the toolbar has no room for its button.
+export function LegacyBadge({ notConverted, onSaveAs }: DocxLegacyInfo) {
+	const { t } = useTranslation("preview")
+	const [open, setOpen] = useState(false)
+	const titleId = useId()
+
+	return (
+		<Popover
+			open={open}
+			onOpenChange={setOpen}
+		>
+			<Badge
+				variant="outline"
+				className="cursor-pointer text-muted-foreground hover:bg-muted"
+				render={<PopoverTrigger aria-label={t("previewDocxLegacyTitle")} />}
+			>
+				<FileClockIcon data-icon="inline-start" />
+				<span className="max-sm:hidden">{t("previewDocxLegacyBadge")}</span>
+			</Badge>
+			<PopoverContent
+				align="start"
+				className="gap-2"
+				aria-labelledby={titleId}
+			>
+				<p
+					id={titleId}
+					className="font-medium"
+				>
+					{t("previewDocxLegacyTitle")}
+				</p>
+				<p className="text-muted-foreground">
+					{t(onSaveAs === undefined ? "previewDocxLegacyBodyReadOnly" : "previewDocxLegacyBody")}
+				</p>
+				{notConverted.length === 0 ? null : (
+					<>
+						<p className="text-muted-foreground">{t("previewDocxLegacyNotConverted")}</p>
+						<ul className="flex list-disc flex-col gap-1 pl-4 text-muted-foreground">
+							{notConverted.map(item => (
+								<li key={item.kind}>{t(notConvertedKey(item.kind), { count: item.count })}</li>
+							))}
+						</ul>
+					</>
+				)}
+				{onSaveAs === undefined ? null : (
+					<Button
+						variant="outline"
+						size="sm"
+						className="self-start"
+						onClick={() => {
+							setOpen(false)
+							onSaveAs()
+						}}
+					>
+						{t("previewDocxSaveAsDocx")}
+					</Button>
+				)}
 			</PopoverContent>
 		</Popover>
 	)
@@ -436,15 +511,33 @@ export function DocxFindField({
 	)
 }
 
-function Navigation({ state, dispatch }: { state: DocxViewerState; dispatch: (command: DocxViewerCommand) => void }) {
+// Narrow rows (the toolbar is the docx-toolbar size container; widths are of its content, 16 px less than the row)
+// give up what is also reachable another way: the fit-width button below a 360 px row, and beside the markup menu,
+// which needs the room, below 400 px; there the page buttons too below 360 px (the pages scroll, and the page
+// indicator stays).
+const PAGE_BUTTON_FIT = { markup: "@max-[21.5rem]/docx-toolbar:hidden", plain: "" } as const
+const FIT_WIDTH_FIT = { markup: "@max-[24rem]/docx-toolbar:hidden", plain: "@max-[21.5rem]/docx-toolbar:hidden" } as const
+
+function Navigation({
+	state,
+	dispatch,
+	markup
+}: {
+	state: DocxViewerState
+	dispatch: (command: DocxViewerCommand) => void
+	// The markup menu is shown beside it.
+	markup: boolean
+}) {
 	const { t } = useTranslation("preview")
 	const percent = Math.round(state.zoom * 100)
+	const fit = markup ? "markup" : "plain"
 
 	return (
 		<div className="flex min-w-0 items-center gap-2 max-sm:gap-1">
 			<Button
 				variant="ghost"
 				size="icon-sm"
+				className={PAGE_BUTTON_FIT[fit]}
 				disabled={!isDocxCommandEnabled(state, "page.previous")}
 				aria-label={t("previewDocxPreviousPageAction")}
 				onClick={() => {
@@ -459,6 +552,7 @@ function Navigation({ state, dispatch }: { state: DocxViewerState; dispatch: (co
 			<Button
 				variant="ghost"
 				size="icon-sm"
+				className={PAGE_BUTTON_FIT[fit]}
 				disabled={!isDocxCommandEnabled(state, "page.next")}
 				aria-label={t("previewDocxNextPageAction")}
 				onClick={() => {
@@ -489,7 +583,7 @@ function Navigation({ state, dispatch }: { state: DocxViewerState; dispatch: (co
 							variant="ghost"
 							size="xs"
 							aria-label={t("previewDocxFitWidthAction", { percent })}
-							className="w-12 px-0 text-muted-foreground tabular-nums"
+							className={cn("w-12 px-0 text-muted-foreground tabular-nums", FIT_WIDTH_FIT[fit])}
 							onClick={() => {
 								dispatch({ type: "zoom.fitWidth" })
 							}}
@@ -515,18 +609,51 @@ function Navigation({ state, dispatch }: { state: DocxViewerState; dispatch: (co
 	)
 }
 
-export function DocxToolbar({ state, dispatch, markup, onMarkupChange, viewOnly, encrypted, findFocus, onFindClosed }: DocxToolbarProps) {
+export function DocxToolbar({
+	state,
+	dispatch,
+	markup,
+	onMarkupChange,
+	viewOnly,
+	encrypted,
+	legacy,
+	findFocus,
+	onFindClosed,
+	fileMenu
+}: DocxToolbarProps) {
 	const { t } = useTranslation("preview")
 
 	return (
-		<div className="grid h-10 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-2 px-2">
-			<div className="flex min-w-0 items-center gap-1">
+		// The right cell keeps the width of its buttons (no min-w-0): where the row is short of room the page
+		// navigation moves left of centre instead of under them.
+		<div className="@container/docx-toolbar grid h-10 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-2 px-2">
+			<div className="@container flex min-w-0 items-center gap-1">
+				{fileMenu}
 				{viewOnly.length > 0 ? <ViewOnlyBadge reasons={viewOnly} /> : null}
 				{encrypted === undefined ? null : (
 					<PasswordBadge
 						integrity={encrypted}
 						saving={false}
 					/>
+				)}
+				{legacy === undefined ? null : (
+					<LegacyBadge
+						notConverted={legacy.notConverted}
+						onSaveAs={legacy.onSaveAs}
+					/>
+				)}
+				{/* A Word 97–2003 document is only ever edited as its .docx: the way there is in plain sight. Where this
+				    cell is too narrow for it beside the badge it would cover the page navigation, and the badge's popover
+				    offers it instead. */}
+				{legacy?.onSaveAs === undefined ? null : (
+					<Button
+						variant="outline"
+						size="xs"
+						className="shrink-0 @max-[15rem]:hidden"
+						onClick={legacy.onSaveAs}
+					>
+						{t("previewDocxSaveAsDocx")}
+					</Button>
 				)}
 			</div>
 			{state.find.open ? (
@@ -539,9 +666,10 @@ export function DocxToolbar({ state, dispatch, markup, onMarkupChange, viewOnly,
 				<Navigation
 					state={state}
 					dispatch={dispatch}
+					markup={markup !== null}
 				/>
 			)}
-			<div className="flex min-w-0 items-center justify-end gap-1">
+			<div className="flex items-center justify-end gap-1">
 				{markup === null ? null : (
 					<MarkupMenu
 						mode={markup}

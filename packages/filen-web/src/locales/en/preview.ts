@@ -10,6 +10,9 @@ import { previewDocxTable } from "@/locales/en/previewDocx/table"
 import { previewDocxFormat } from "@/locales/en/previewDocx/format"
 import { previewDocxForms } from "@/locales/en/previewDocx/forms"
 import { previewDocxFields } from "@/locales/en/previewDocx/fields"
+import { previewDocxLegacy } from "@/locales/en/previewDocx/legacy"
+import { previewDocxLegacyPassword } from "@/locales/en/previewDocx/legacyPassword"
+import { previewDocxPdf } from "@/locales/en/previewDocx/pdf"
 import { previewDocxSections } from "@/locales/en/previewDocx/sections"
 import { previewDocxMath } from "@/locales/en/previewDocx/math"
 import { previewDocxReflow } from "@/locales/en/previewDocx/reflow"
@@ -193,6 +196,8 @@ export const preview = {
 	previewSpreadsheetResetRowHeight_other: "Reset {{count}} row heights",
 	/** Spreadsheet viewer note — a legacy .xls opens read-only */
 	previewSpreadsheetReadOnlyXls: "Old .xls format — view only.",
+	/** Spreadsheet viewer note — an OpenDocument spreadsheet (.ods, .ots) opens read-only */
+	previewSheetReadOnlyOds: "OpenDocument spreadsheet — view only.",
 	/** Spreadsheet viewer — converts a read-only .xls into an editable .xlsx copy beside it */
 	previewSpreadsheetSaveAsXlsx: "Save as .xlsx",
 	/** Spreadsheet viewer — confirm dialog title before converting an .xls */
@@ -713,6 +718,9 @@ export const preview = {
 	...previewDocxFormat,
 	...previewDocxForms,
 	...previewDocxFields,
+	...previewDocxLegacy,
+	...previewDocxLegacyPassword,
+	...previewDocxPdf,
 	...previewDocxSections,
 	...previewDocxMath,
 	...previewDocxReflow,

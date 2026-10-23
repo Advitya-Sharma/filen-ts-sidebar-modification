@@ -10,6 +10,12 @@ export interface NumFmtOptions {
 	readonly locale?: NumFmtLocale
 	// The language data a [$-xxxx] tag names (its low 16 bits), when the app has it; else `locale`'s.
 	readonly localeFor?: (lcid: number) => NumFmtLocale | undefined
+	// Numbers too take the separators of their section's [$-xxxx] language (OpenDocument data styles carry their
+	// language's separators; Excel's show the system's whatever the tag).
+	readonly lcidSeparators?: boolean
+	// General as LibreOffice's "Standard" format shows it (OpenDocument sources), instead of Excel's 11 characters: at
+	// most this many decimals, trailing zeros dropped; negative: up to 15 significant digits.
+	readonly standardPrecision?: number
 	// The workbook's indexed palette (0xRRGGBB) for [ColorN].
 	readonly palette?: readonly number[]
 }
@@ -456,12 +462,56 @@ function denominatorPadded(text: string, pattern: string): string {
 	return out
 }
 
-function writeGeneral(section: NumFmtSection, value: number, locale: NumFmtLocale): void {
-	shownZero = value === 0
+function writeGeneral(section: NumFmtSection, value: number, locale: NumFmtLocale, options: NumFmtOptions): void {
+	const text = general(value, locale.decimal, options)
+
+	shownZero = text === "0"
 
 	for (const t of section.tokens)
-		if (t.kind === Tok.GENERAL) builder.text += formatGeneral(value, locale.decimal)
+		if (t.kind === Tok.GENERAL) builder.text += text
 		else literalOrRepeat(t)
+}
+
+function general(value: number, decimal: string, options: NumFmtOptions): string {
+	return options.standardPrecision === undefined
+		? formatGeneral(value, decimal)
+		: formatStandard(value, options.standardPrecision, decimal)
+}
+
+// LibreOffice's "Standard" format (svl SvNumberformat::ImpGetOutputStandard over rtl::math::doubleToUString): with a
+// precision, that many decimals with trailing zeros dropped, exponential past 1e15; without one (negative), fifteen
+// significant digits, exponential for exponents of 15 and more or -15 and less.
+export function formatStandard(value: number, precision: number, decimal = "."): string {
+	if (value === 0 || !Number.isFinite(value)) return "0"
+
+	const exponent = Math.floor(Math.log10(Math.abs(value)))
+	let text: string
+
+	if (precision >= 0) {
+		text = Math.abs(value) > 1e15 ? scientific(value, Math.min(precision, 14)) : stripZeros(value.toFixed(Math.min(precision, 100)))
+	} else if (exponent <= -15 || exponent >= 15) {
+		text = scientific(value, 14)
+	} else {
+		const rounded = Number(value.toPrecision(15))
+
+		text = stripZeros(rounded.toFixed(Math.max(0, Math.min(100, 14 - exponent))))
+	}
+
+	if (/^-0(\.0*)?$/.test(text)) text = "0"
+
+	return decimal === "." ? text : text.replace(".", decimal)
+}
+
+function stripZeros(text: string): string {
+	return text.includes(".") ? text.replace(/\.?0+$/, "") : text
+}
+
+function scientific(value: number, decimals: number): string {
+	const [mantissa = "0", power = "0"] = value.toExponential(decimals).split("e")
+	const exponent = Number(power)
+	const digits = Math.abs(exponent) < 10 ? `0${String(Math.abs(exponent))}` : String(Math.abs(exponent))
+
+	return `${stripZeros(mantissa)}E${exponent < 0 ? "-" : "+"}${digits}`
 }
 
 // --- Dates and times ---
@@ -649,7 +699,7 @@ export function formatNumberInto(format: NumFmt, value: number, out: NumFmtOutpu
 	const locale = options.locale ?? NUMFMT_EN_US
 
 	if (section === null) {
-		builder.text = formatGeneral(absolute, locale.decimal)
+		builder.text = general(absolute, locale.decimal, options)
 
 		return finish(out)
 	}
@@ -663,6 +713,7 @@ export function formatNumberInto(format: NumFmt, value: number, out: NumFmtOutpu
 	}
 
 	const minus = pickedMinus
+	const separators = options.lcidSeparators === true ? localeOf(section, options, locale) : locale
 
 	shownZero = true
 
@@ -671,16 +722,16 @@ export function formatNumberInto(format: NumFmt, value: number, out: NumFmtOutpu
 			if (value < 0 || !writeDate(section, value, options, locale)) return overflow(out)
 			break
 		case SectionKind.NUMBER:
-			writeNumber(section, absolute, locale)
+			writeNumber(section, absolute, separators)
 			break
 		case SectionKind.SCIENTIFIC:
-			writeScientific(section, absolute, locale)
+			writeScientific(section, absolute, separators)
 			break
 		case SectionKind.FRACTION:
-			writeFraction(section, absolute, locale)
+			writeFraction(section, absolute, separators)
 			break
 		case SectionKind.GENERAL:
-			writeGeneral(section, absolute, locale)
+			writeGeneral(section, absolute, separators, options)
 			break
 		default:
 			for (const t of section.tokens) if (t.kind !== Tok.TEXT) literalOrRepeat(t)

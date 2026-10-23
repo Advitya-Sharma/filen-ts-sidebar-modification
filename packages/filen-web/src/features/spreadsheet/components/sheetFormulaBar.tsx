@@ -1,10 +1,12 @@
 import { useState, type KeyboardEvent, type ReactNode, type RefObject } from "react"
 import { flushSync } from "react-dom"
 import { useTranslation } from "react-i18next"
+import { HistoryIcon } from "lucide-react"
 import { toast } from "sonner"
-import { rangeName } from "@filen/office/core/sheet"
+import { CellFlag, rangeName } from "@filen/office/core/sheet"
 import { cellsEditable, celllessSheet, type SheetGridHandle, type SheetGridState } from "@filen/office/react/sheet"
 import { Button } from "@/components/ui/button"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@filen/shared"
 import { isImeKeydown } from "@/lib/ime"
 import { parseNameBox } from "@/features/spreadsheet/lib/nameBox.logic"
@@ -117,6 +119,9 @@ export function SheetFormulaBar({
 	const [scroll, setScroll] = useState(0)
 	const coloredText = editing === null ? null : (formula?.coloredText ?? null)
 	const colored = coloredText !== null
+	// A formula whose result this app does not calculate (a function it lacks, a name over a huge area, a legacy
+	// array): the cell shows what the file saved, which an edit elsewhere does not update.
+	const cached = editing === null && active.known && (active.flags & CellFlag.CACHED) !== 0
 
 	function commit(down: number, right: number): void {
 		const { row, col } = grid.selection.active
@@ -226,6 +231,23 @@ export function SheetFormulaBar({
 					{active.input}
 				</span>
 			)}
+			{cached ? (
+				<Tooltip>
+					<TooltipTrigger
+						render={
+							<span
+								role="img"
+								tabIndex={0}
+								aria-label={t("previewSheetCachedResult")}
+								className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+							>
+								<HistoryIcon className="size-3.5" />
+							</span>
+						}
+					/>
+					<TooltipContent>{t("previewSheetCachedResult")}</TooltipContent>
+				</Tooltip>
+			) : null}
 			{children}
 		</div>
 	)

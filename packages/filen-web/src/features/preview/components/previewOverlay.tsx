@@ -18,7 +18,13 @@ import { XIcon, ChevronLeftIcon, ChevronRightIcon, DownloadIcon, SaveIcon, MoreH
 import { toast } from "sonner"
 import { asDirectoryOrFile, driveItemMime, isLinkedEmbedItem, type DriveItem } from "@/features/drive/lib/item"
 import { type DriveVariant } from "@/features/drive/lib/preferences"
-import { extensionOf, previewType, unprobedTransportStream, type PreviewCategory } from "@/features/drive/lib/preview.logic"
+import {
+	extensionOf,
+	previewType,
+	unprobedTransportStream,
+	unsniffedTemplate,
+	type PreviewCategory
+} from "@/features/drive/lib/preview.logic"
 import { recordContentVerdict } from "@/features/drive/lib/contentVerdicts"
 import { startDownloads } from "@/features/drive/lib/download"
 import {
@@ -45,7 +51,7 @@ import { holdUnload } from "@/lib/unloadGuard"
 import { previewTitleSplitIndex } from "@/features/preview/lib/previewTitle"
 import { driveItemName } from "@filen/shared"
 import { ImageViewer, RawImageViewer } from "@/features/preview/components/imageViewer"
-import type { ContentVerdict } from "@filen/shared"
+import type { FileVerdict } from "@filen/shared"
 import { MediaViewer } from "@/features/preview/components/mediaViewer"
 import { TransportStreamGate } from "@/features/preview/components/transportStreamGate"
 import { fileKindVerdict, subscribeFileKindVerdicts } from "@/features/drive/lib/fileKindVerdicts"
@@ -64,6 +70,7 @@ import { PreviewLoading } from "@/features/preview/components/previewErrorState"
 import { useSettledSlot } from "@/features/preview/hooks/useSettledSlot"
 import {
 	isTextEditingTarget,
+	previewDownloadable,
 	previewNavigationUnmountsOverlay,
 	previewMenuHiddenActionIds,
 	resolveUnsavedConfirm,
@@ -284,8 +291,9 @@ export function PreviewOverlay({
 	// the unsaved edits) out from under the user. Taken again whenever the slot mounts anew, which is only
 	// ever clean (stepping to it, or a new document, see documentKeys): its name as it stands then decides.
 	// A `.ts` waiting on its probe (TransportStreamGate) has no viewer yet: the verdict that ends the wait
-	// takes it once more, by the name it was pinned under. A verdict landing after a viewer mounted (an
-	// audio-only `.webm` found out mid-playback) leaves it be until the slot is opened again.
+	// takes it once more, by the name it was pinned under; so does a `.dot` the docx viewer found to be text. A
+	// verdict landing after a viewer mounted (an audio-only `.webm` found out mid-playback) leaves it be until the
+	// slot is opened again.
 	const streamVerdict = useSyncExternalStore(subscribeFileKindVerdicts, () =>
 		driveItem === undefined ? undefined : fileKindVerdict(driveItem.data.uuid)
 	)
@@ -298,7 +306,7 @@ export function PreviewOverlay({
 			documentKey: currentDocumentKey,
 			item: pinFrom,
 			verdict: streamVerdict,
-			awaitingVerdict: !asText && unprobedTransportStream(pinFrom),
+			awaitingVerdict: !asText && (unprobedTransportStream(pinFrom) || unsniffedTemplate(pinFrom)),
 			pin: derivedPin
 		})
 	}
@@ -1010,12 +1018,11 @@ export function PreviewOverlay({
 
 	const name = driveItemName(driveItem)
 	// The header's Download, also handed to the viewers for a file they cannot show.
-	const download =
-		variant !== "trash" && downloadable
-			? () => {
-					void startDownloads([driveItem])
-				}
-			: null
+	const download = previewDownloadable(downloadable, variant)
+		? () => {
+				void startDownloads([driveItem])
+			}
+		: null
 	// The newer version the remote-change dialog asks about, for its comparison.
 	const remoteTheirs = remote.prompt?.kind === "revised" ? remote.prompt.theirs : undefined
 
@@ -1142,7 +1149,7 @@ export function PreviewOverlay({
 							) : (
 								<PreviewErrorBoundary key={slotKey}>
 									<PreviewDownloadableProvider
-										downloadable={downloadable}
+										downloadable={previewDownloadable(downloadable, variant)}
 										onDownload={download}
 									>
 										<TransportStreamGate
@@ -1280,8 +1287,9 @@ interface SlotPin {
 interface PinnedSlot {
 	documentKey: string
 	item: DriveItem
-	verdict: ContentVerdict | undefined
-	// Taken while a probe still had to tell TypeScript from a transport stream: no viewer mounted yet.
+	verdict: FileVerdict | undefined
+	// Taken while a read still had to tell what the file is: a `.ts` probe (no viewer mounted yet), or a `.dot` the
+	// docx viewer reads (a text file is then shown by the text viewer instead).
 	awaitingVerdict: boolean
 	pin: SlotPin
 }
@@ -1452,6 +1460,8 @@ function PreviewBody({
 					item={item}
 					alt={alt}
 					variant={variant}
+					canSaveCopy={canSaveCopy}
+					onOpenFile={onOpenFile}
 					{...(neverEditable
 						? {}
 						: {

@@ -18,6 +18,8 @@ export type ToSheetWorker =
 	| { readonly t: "call"; readonly s: number; readonly id: number; readonly method: SheetWorkerMethod; readonly args: readonly unknown[] }
 	| { readonly t: "abort"; readonly s: number; readonly id: number }
 	| { readonly t: "notice"; readonly s: number; readonly notice: SheetWorkerNotice; readonly args: readonly unknown[] }
+	// A job the worker was given (serveSheetWorker's `jobs`), run beside the session; "abort" with its id cancels it.
+	| { readonly t: "job"; readonly s: number; readonly id: number; readonly name: string; readonly args: unknown }
 
 export type SheetWorkerOpened =
 	| { readonly kind: "opened"; readonly info: SheetWorkbookInfo }
@@ -35,6 +37,13 @@ export type FromSheetWorker =
 	| { readonly t: "unlocked"; readonly s: number; readonly id: number; readonly result: SheetWorkerUnlocked }
 	| { readonly t: "event"; readonly s: number; readonly event: SheetEvent }
 	| { readonly t: "result"; readonly s: number; readonly id: number; readonly value?: unknown; readonly error?: string }
+	// How far a job is, as it reports it.
+	| { readonly t: "progress"; readonly s: number; readonly id: number; readonly value: unknown }
+
+// The job checking a protected workbook's password against the file as stored (jobs.ts), and its verdicts.
+export const SHEET_PASSWORD_JOB = "protection.check"
+
+export type SheetPasswordVerdict = "accepted" | "default" | "wrong" | "aborted" | "failed"
 
 // The buffers of every typed array in a message (each owns its whole buffer: the protocol's rule), to transfer.
 export function transferables(value: unknown, into: Set<ArrayBuffer> = new Set(), depth = 0): ArrayBuffer[] {

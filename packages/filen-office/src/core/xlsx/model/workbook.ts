@@ -1,6 +1,7 @@
 import { OpcError, ZipError } from "../../opc/errors"
 import type { ContentTypes } from "../../opc/contentTypes"
 import type { OpcPackage } from "../../opc/package"
+import type { NumFmtLocale } from "../../sheet/numfmt/locale"
 import type { SheetId } from "../../sheet/protocol"
 import { sliceClock, type SliceClock, type Slicing } from "../../slicing"
 import { XmlError } from "../../xml/index"
@@ -24,7 +25,25 @@ import type {
 	XlsxWorkbookProtection
 } from "./types"
 
+// Reads one sheet of a source whose sheets are not SpreadsheetML parts (an OpenDocument spreadsheet, whose sheets
+// are all in one stream): XlsxWorkbook.load asks it instead of parsing the sheet's part.
+export type XlsxSheetLoader = (
+	entry: XlsxSheetEntry,
+	clock: SliceClock | undefined,
+	signal: { readonly aborted: boolean } | undefined
+) => Promise<XlsxSheetModel>
+
+// The file format the workbook was read from: "ods" is an OpenDocument spreadsheet read into this model.
+export type XlsxSourceFormat = "xlsx" | "ods"
+
 export interface XlsxWorkbookInit {
+	readonly format?: XlsxSourceFormat
+	readonly loader?: XlsxSheetLoader
+	// The language data a number format's [$-xxxx] tag names, where the source carries languages (OpenDocument data
+	// styles): what the formatter shows for each.
+	readonly localeFor?: (lcid: number) => NumFmtLocale | undefined
+	// General shown as LibreOffice's "Standard" with this precision (negative: unlimited), for an OpenDocument source.
+	readonly standardPrecision?: number
 	readonly variant: XlsxVariant
 	readonly strict: boolean
 	readonly parts: XlsxParts
@@ -47,6 +66,9 @@ export interface XlsxWorkbookInit {
 }
 
 export class XlsxWorkbook implements XlsxWorkbookModel {
+	readonly format: XlsxSourceFormat
+	readonly localeFor: ((lcid: number) => NumFmtLocale | undefined) | undefined
+	readonly standardPrecision: number | undefined
 	readonly variant: XlsxVariant
 	readonly strict: boolean
 	readonly parts: XlsxParts
@@ -74,8 +96,13 @@ export class XlsxWorkbook implements XlsxWorkbookModel {
 	private nextId: number
 	// What the parsed sheets hold together, against the limits.
 	private readonly budget: XlsxReadBudget
+	private readonly loader: XlsxSheetLoader | undefined
 
 	constructor(init: XlsxWorkbookInit) {
+		this.format = init.format ?? "xlsx"
+		this.loader = init.loader
+		this.localeFor = init.localeFor
+		this.standardPrecision = init.standardPrecision
 		this.variant = init.variant
 		this.strict = init.strict
 		this.parts = init.parts
@@ -183,6 +210,19 @@ export class XlsxWorkbook implements XlsxWorkbookModel {
 		signal: { readonly aborted: boolean } | undefined
 	): Promise<XlsxSheetModel> {
 		const part = entry.part
+
+		if (this.loader !== undefined) {
+			try {
+				const model = await this.loader(entry, clock, signal)
+
+				entry.model = model
+
+				return model
+			} catch (error) {
+				throw readError(error, part)
+			}
+		}
+
 		const source = part === "" ? undefined : this.parts.get(part)
 
 		if (source?.source === undefined || source.source === null) {

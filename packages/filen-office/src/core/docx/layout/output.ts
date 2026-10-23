@@ -100,6 +100,8 @@ export interface OutputView {
 	readonly sourceTexts: readonly string[]
 	// The part each source's item belongs to (its paragraph may come from an overlay part), -1 without one.
 	readonly sourceParts: Int32Array
+	// The object (DocumentLayout.objects id) whose text box each source's paragraph is laid out in, -1 for none.
+	readonly sourceOwners: Int32Array
 	// Per source, when the layout records them, SOURCE_MAP_INTS per laid-out item of its paragraphs: all in
 	// one pool per page, source s using [sourceMapRanges[2s], sourceMapRanges[2s + 1]) of it.
 	readonly sourceMapPool: Int32Array
@@ -179,6 +181,7 @@ export class PageOutput {
 	sourceInts = new Int32Array(SOURCE_INTS * 64)
 	sourceTexts: string[] = []
 	sourceParts = new Int32Array(64)
+	sourceOwners = new Int32Array(64)
 	sourceMapPool = new Int32Array(0)
 	sourceMapRanges = new Int32Array(128)
 	private mapLength = 0
@@ -248,6 +251,7 @@ export class PageOutput {
 
 		if ((source + 1) * SOURCE_INTS > this.sourceInts.length) this.sourceInts = growI32(this.sourceInts, (source + 1) * SOURCE_INTS)
 		if (source + 1 > this.sourceParts.length) this.sourceParts = growI32(this.sourceParts, source + 1)
+		if (source + 1 > this.sourceOwners.length) this.sourceOwners = growI32(this.sourceOwners, source + 1)
 		if ((source + 1) * 2 > this.sourceMapRanges.length) this.sourceMapRanges = growI32(this.sourceMapRanges, (source + 1) * 2)
 
 		const at = source * SOURCE_INTS
@@ -258,6 +262,7 @@ export class PageOutput {
 		this.sourceInts[at + 3] = flags
 		this.sourceTexts[source] = text
 		this.sourceParts[source] = part
+		this.sourceOwners[source] = -1
 		this.sourceMapRanges[source * 2] = this.mapLength
 
 		if (map !== undefined && mapEnd > mapStart) {
@@ -276,6 +281,11 @@ export class PageOutput {
 		this.sourceCount++
 
 		return source
+	}
+
+	// Sources [from, to) are text of object `id`'s text box; those of a box inside it keep theirs.
+	ownSources(from: number, to: number, id: number): void {
+		for (let s = from; s < to; s++) if (this.sourceOwners[s] === -1) this.sourceOwners[s] = id
 	}
 
 	sourceFlags(source: number): number {
@@ -324,6 +334,55 @@ export class PageOutput {
 		this.objectInts[i + 1] = layer
 		this.objectInts[i + 2] = source
 		this.objectCount++
+	}
+
+	// Puts the objects of each layer in paint order: ascending `z` (wp:anchor/@relativeHeight, ECMA-376 §20.4.2.3),
+	// ties in the order they were placed. Each layer keeps its slots; objects a clip draws through keep theirs (clips
+	// name ranges of objects).
+	stackObjects(z: (id: number) => number): void {
+		const count = this.objectCount
+		let pinned: Uint8Array | undefined
+
+		for (let c = 0; c < this.clipCount; c++) {
+			const from = this.clipInts[c * CLIP_INTS + 2] ?? 0
+			const to = Math.min(count, this.clipInts[c * CLIP_INTS + 3] ?? 0)
+
+			if (to > from) pinned ??= new Uint8Array(count)
+
+			for (let o = from; o < to; o++) if (pinned !== undefined) pinned[o] = 1
+		}
+
+		for (const layer of [Layer.BEHIND, Layer.TEXT, Layer.FRONT]) {
+			const slots: number[] = []
+			let ordered = true
+			let last = -Infinity
+
+			for (let o = 0; o < count; o++) {
+				if (this.objectInts[o * OBJECT_INTS + 1] !== layer || pinned?.[o] === 1) continue
+
+				const value = z(this.objectInts[o * OBJECT_INTS] ?? -1)
+
+				if (value < last) ordered = false
+
+				last = Math.max(last, value)
+				slots.push(o)
+			}
+
+			if (ordered) continue
+
+			const keys = slots.map(o => z(this.objectInts[o * OBJECT_INTS] ?? -1))
+			const order = slots.map((_, k) => k).sort((a, b) => (keys[a] ?? 0) - (keys[b] ?? 0) || a - b)
+			const floats = this.objectFloats.slice(0, count * OBJECT_FLOATS)
+			const ints = this.objectInts.slice(0, count * OBJECT_INTS)
+
+			for (let k = 0; k < slots.length; k++) {
+				const to = slots[k] ?? 0
+				const from = slots[order[k] ?? k] ?? 0
+
+				this.objectFloats.set(floats.subarray(from * OBJECT_FLOATS, (from + 1) * OBJECT_FLOATS), to * OBJECT_FLOATS)
+				this.objectInts.set(ints.subarray(from * OBJECT_INTS, (from + 1) * OBJECT_INTS), to * OBJECT_INTS)
+			}
+		}
 	}
 
 	mark(into: OutputMark = new OutputMark()): OutputMark {
@@ -460,6 +519,7 @@ export class PageOutput {
 				source.sourceMapRanges[s * 2] ?? 0,
 				source.sourceMapRanges[s * 2 + 1] ?? 0
 			)
+			this.sourceOwners[sourceOffset + s] = source.sourceOwners[s] ?? -1
 		}
 
 		const text = source.text
@@ -621,6 +681,7 @@ export class PageDisplayList implements OutputView {
 	readonly sourceInts: Int32Array
 	readonly sourceTexts: readonly string[]
 	readonly sourceParts: Int32Array
+	readonly sourceOwners: Int32Array
 	readonly sourceMapPool: Int32Array
 	readonly sourceMapRanges: Int32Array
 	readonly clipCount: number
@@ -669,6 +730,7 @@ export class PageDisplayList implements OutputView {
 			this.sourceInts = output.sourceInts
 			this.sourceTexts = output.sourceTexts
 			this.sourceParts = output.sourceParts
+			this.sourceOwners = output.sourceOwners
 			this.sourceMapPool = output.sourceMapPool
 			this.sourceMapRanges = output.sourceMapRanges
 			this.clipCount = output.clipCount
@@ -689,6 +751,7 @@ export class PageDisplayList implements OutputView {
 		this.sourceInts = output.sourceInts.slice(0, output.sourceCount * SOURCE_INTS)
 		this.sourceTexts = output.sourceTexts.slice(0, output.sourceCount)
 		this.sourceParts = output.sourceParts.slice(0, output.sourceCount)
+		this.sourceOwners = output.sourceOwners.slice(0, output.sourceCount)
 		this.sourceMapRanges = output.sourceMapRanges.slice(0, output.sourceCount * 2)
 		this.sourceMapPool = output.sourceMapPool.slice(0, this.sourceMapRanges[output.sourceCount * 2 - 1] ?? 0)
 		this.clipCount = output.clipCount
@@ -707,6 +770,7 @@ export class PageDisplayList implements OutputView {
 			this.objectFloats.byteLength +
 			this.objectInts.byteLength +
 			this.sourceInts.byteLength +
+			this.sourceOwners.byteLength +
 			this.clipFloats.byteLength +
 			this.clipInts.byteLength
 		)

@@ -1,7 +1,8 @@
 import type { SpreadsheetKind } from "@filen/office/core/sheet"
 
-// What a spreadsheet file opens as: the office engine's kinds, and tab-separated text beside CSV.
-export type SpreadsheetFileKind = SpreadsheetKind | "tsv"
+// What a spreadsheet file opens as: the office engine's kinds, tab-separated text beside CSV, and OpenDocument
+// spreadsheets.
+export type SpreadsheetFileKind = SpreadsheetKind | "tsv" | "ods"
 
 // The one list of spreadsheet extensions: the preview category, the editable gate and the worker's kind
 // all read it. A Map, so a name like "constructor" is not found on a prototype.
@@ -17,7 +18,10 @@ const KINDS: ReadonlyMap<string, SpreadsheetFileKind> = new Map([
 	// A legacy template opens like an .xls (view-only, saved as an .xlsx), and a .tab file as the tab-separated text
 	// it is (edited, and saved as it was written).
 	["xlt", "xls"],
-	["tab", "tsv"]
+	["tab", "tsv"],
+	// OpenDocument spreadsheets and their templates: view-only (no writer of the format yet).
+	["ods", "ods"],
+	["ots", "ods"]
 ])
 
 export const SPREADSHEET_EXTENSIONS: readonly string[] = [...KINDS.keys()]
@@ -26,11 +30,12 @@ export function spreadsheetFileKind(extension: string): SpreadsheetFileKind | nu
 	return KINDS.get(extension) ?? null
 }
 
-// A legacy .xls (or .xlt) opens to be looked at only; every other kind saves in the format its extension names.
+// A legacy .xls (or .xlt) and an OpenDocument spreadsheet open to be looked at only; every other kind saves in the
+// format its extension names.
 export function isEditableSpreadsheetExtension(extension: string): boolean {
 	const kind = spreadsheetFileKind(extension)
 
-	return kind !== null && kind !== "xls"
+	return kind !== null && kind !== "xls" && kind !== "ods"
 }
 
 // The format a name promises, for telling whether a rename changed it: its kind, except that .xlsx, .xlsm

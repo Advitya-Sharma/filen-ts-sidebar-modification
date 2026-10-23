@@ -70,7 +70,10 @@ export class SfntFont {
 	readonly capHeight: number | undefined
 	// CFF outlines ("OTTO") rather than TrueType glyf.
 	readonly cff: boolean
+	// The file the font was read from (a collection when faceIndex was given).
+	readonly bytes: Uint8Array
 	private readonly data: DataView
+	private readonly tables: Map<number, Table>
 	private readonly nameTable: Table | undefined
 	private parsedNames: { names: SfntNames; familyNames: string[] } | null = null
 	private readonly hmtxOffset: number
@@ -82,6 +85,7 @@ export class SfntFont {
 		const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 
 		this.data = data
+		this.bytes = bytes
 
 		const base = sfntOffset(data, faceIndex)
 		const signature = data.getUint32(base)
@@ -89,6 +93,8 @@ export class SfntFont {
 		this.cff = signature === SFNT_CFF
 
 		const tables = readDirectory(data, base)
+
+		this.tables = tables
 		const head = required(tables, TAG_HEAD, 54, "head")
 		const hhea = required(tables, TAG_HHEA, 36, "hhea")
 		const maxp = required(tables, TAG_MAXP, 6, "maxp")
@@ -166,6 +172,12 @@ export class SfntFont {
 
 		this.cmap = tables.get(TAG_CMAP)
 		this.nameTable = tables.get(TAG_NAME)
+	}
+
+	// A table's byte range in `bytes`, by its tag ("glyf", "OS/2", "cvt "). Read-only access for writers
+	// that copy or subset tables.
+	table(tag: string): { readonly offset: number; readonly length: number } | undefined {
+		return tag.length === 4 ? this.tables.get(tagValue(tag)) : undefined
 	}
 
 	// Parsed on first use: layout never needs them, and a hostile name table should cost nothing then.
@@ -328,6 +340,10 @@ function required(tables: Map<number, Table>, tag: number, minimum: number, name
 	if (table.length < minimum) throw new FontError("truncated", `${name} table is too short`)
 
 	return table
+}
+
+function tagValue(tag: string): number {
+	return ((tag.charCodeAt(0) << 24) | (tag.charCodeAt(1) << 16) | (tag.charCodeAt(2) << 8) | tag.charCodeAt(3)) >>> 0
 }
 
 function tagName(tag: number): string {

@@ -229,11 +229,20 @@ export interface SheetPrintNames {
 	readonly printTitles: string | null
 }
 
+// A custom paper's sides, in points: a PDF page is at least 3 and at most 14,400 units a side (ISO 32000-1, Annex C.2),
+// and a print is laid out on the paper the PDF can hold.
+const MIN_PAPER = 3
+const MAX_PAPER = 14_400
+
+function paperSide(measure: number | null): number | null {
+	return measure === null ? null : Math.min(MAX_PAPER, Math.max(MIN_PAPER, measure))
+}
+
 export function readPageSetup(markup: SheetPrintMarkup, names: SheetPrintNames, fitToPage?: boolean): SheetPageSetup {
 	const page = rootOf(markup.pageSetup)
 	const attribute = (name: string): string | undefined => (page === null ? undefined : page.document.attribute(page.root, name))
-	const width = universalMeasure(attribute("paperWidth"))
-	const height = universalMeasure(attribute("paperHeight"))
+	const width = paperSide(universalMeasure(attribute("paperWidth")))
+	const height = paperSide(universalMeasure(attribute("paperHeight")))
 	const paperSize = unsigned(attribute("paperSize"), LETTER)
 	const custom = width !== null && height !== null
 	const margins = rootOf(markup.pageMargins)

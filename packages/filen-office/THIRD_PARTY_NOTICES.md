@@ -48,6 +48,48 @@ The limited permissions granted above are perpetual and will not be revoked by E
 This document and the information contained herein is provided on an “AS IS” basis and ECMA INTERNATIONAL DISCLAIMS ALL WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTY THAT THE USE OF THE INFORMATION HEREIN WILL NOT INFRINGE ANY OWNERSHIP RIGHTS OR ANY IMPLIED WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 ```
 
+## [MS-DOC] Word (.doc) Binary File Format
+
+- Source: [MS-DOC] v20260217 (release February 17, 2026), PDF (SHA-256 `23fd1a8413ff8fa2902097060ae7dea031fca9a7979ca20633c141a756ddb27c`), https://officeprotocoldoc.z19.web.core.windows.net/files/MS-DOC/%5BMS-DOC%5D.pdf
+- Copyright: © 2026 Microsoft Corporation
+- `src/core/doc/sprms.ts` holds the name and value of every sprm of §2.6.1–§2.6.5 (re-encoded as a table, not copied), implementing the format under the notice's permission to make copies in order to develop implementations. The rest of `src/core/doc/` implements the format from the specification; none of its text is copied.
+- Licence: the "Intellectual Property Rights Notice for Open Specifications Documentation" on the document's first page, reproduced verbatim (line breaks of the PDF joined into paragraphs):
+
+```
+Intellectual Property Rights Notice for Open Specifications Documentation
+Technical Documentation. Microsoft publishes Open Specifications documentation (“this documentation”) for protocols, file formats, data portability, computer languages, and standards support. Additionally, overview documents cover inter-protocol relationships and interactions.
+Copyrights. This documentation is covered by Microsoft copyrights. Regardless of any other terms that are contained in the terms of use for the Microsoft website that hosts this documentation, you can make copies of it in order to develop implementations of the technologies that are described in this documentation and can distribute portions of it in your implementations that use these technologies or in your documentation as necessary to properly document the implementation. You can also distribute in your implementation, with or without modification, any schemas, IDLs, or code samples that are included in the documentation. This permission also applies to any documents that are referenced in the Open Specifications documentation.
+No Trade Secrets. Microsoft does not claim any trade secret rights in this documentation.
+Patents. Microsoft has patents that might cover your implementations of the technologies described in the Open Specifications documentation. Neither this notice nor Microsoft's delivery of this documentation grants any licenses under those patents or any other Microsoft patents. However, a given Open Specifications document might be covered by the Microsoft Open Specifications Promise or the Microsoft Community Promise. If you would prefer a written license, or if the technologies described in this documentation are not covered by the Open Specifications Promise or Community Promise, as applicable, patent licenses are available by contacting iplg@microsoft.com.
+License Programs. To see all of the protocols in scope under a specific license program and the associated patents, visit the Patent Map.
+Trademarks. The names of companies and products contained in this documentation might be covered by trademarks or similar intellectual property rights. This notice does not grant any licenses under those rights. For a list of Microsoft trademarks, visit www.microsoft.com/trademarks.
+Fictitious Names. The example companies, organizations, products, domain names, email addresses, logos, people, places, and events that are depicted in this documentation are fictitious. No association with any real company, organization, product, domain name, email address, logo, person, place, or event is intended or should be inferred.
+Reservation of Rights. All other rights are reserved, and this notice does not grant any rights other than as specifically described above, whether by implication, estoppel, or otherwise.
+Tools. The Open Specifications documentation does not require the use of Microsoft programming tools or programming environments in order for you to develop an implementation. If you have access to Microsoft programming tools and environments, you are free to take advantage of them. Certain Open Specifications documents are intended for use in conjunction with publicly available standards specifications and network programming art and, as such, assume that the reader either is familiar with the aforementioned material or has immediate access to it.
+Support. For questions and support, please contact dochelp@microsoft.com.
+```
+
+## [MS-ODRAW] Office Drawing Binary File Format
+
+- Source: [MS-ODRAW] v20250819 (release August 19, 2025), PDF (SHA-256 `fbc67309646b0b95e87f66eb7a3d89c6f08153c46379f496b886a8deae42d7e5`), https://officeprotocoldoc.z19.web.core.windows.net/files/MS-ODRAW/%5bMS-ODRAW%5d.pdf
+- Copyright: © 2025 Microsoft Corporation
+- `src/core/doc/toDocx/officeArt.ts` holds the record types of §2.2 and the property ids of §2.3 it reads (re-encoded as constants, not copied), under the same permission. `src/core/doc/toDocx/convert.ts` implements the shape properties it converts from the specification; none of its text is copied.
+- Licence: the "Intellectual Property Rights Notice for Open Specifications Documentation" on the document's first page, reproduced verbatim (line breaks of the PDF joined into paragraphs):
+
+```
+Intellectual Property Rights Notice for Open Specifications Documentation
+Technical Documentation. Microsoft publishes Open Specifications documentation (“this documentation”) for protocols, file formats, data portability, computer languages, and standards support. Additionally, overview documents cover inter-protocol relationships and interactions.
+Copyrights. This documentation is covered by Microsoft copyrights. Regardless of any other terms that are contained in the terms of use for the Microsoft website that hosts this documentation, you can make copies of it in order to develop implementations of the technologies that are described in this documentation and can distribute portions of it in your implementations that use these technologies or in your documentation as necessary to properly document the implementation. You can also distribute in your implementation, with or without modification, any schemas, IDLs, or code samples that are included in the documentation. This permission also applies to any documents that are referenced in the Open Specifications documentation.
+No Trade Secrets. Microsoft does not claim any trade secret rights in this documentation.
+Patents. Microsoft has patents that might cover your implementations of the technologies described in the Open Specifications documentation. Neither this notice nor Microsoft's delivery of this documentation grants any licenses under those patents or any other Microsoft patents. However, a given Open Specifications document might be covered by the Microsoft Open Specifications Promise or the Microsoft Community Promise. If you would prefer a written license, or if the technologies described in this documentation are not covered by the Open Specifications Promise or Community Promise, as applicable, patent licenses are available by contacting iplg@microsoft.com.
+License Programs. To see all of the protocols in scope under a specific license program and the associated patents, visit the Patent Map.
+Trademarks. The names of companies and products contained in this documentation might be covered by trademarks or similar intellectual property rights. This notice does not grant any licenses under those rights. For a list of Microsoft trademarks, visit www.microsoft.com/trademarks.
+Fictitious Names. The example companies, organizations, products, domain names, email addresses, logos, people, places, and events that are depicted in this documentation are fictitious. No association with any real company, organization, product, domain name, email address, logo, person, place, or event is intended or should be inferred.
+Reservation of Rights. All other rights are reserved, and this notice does not grant any rights other than as specifically described above, whether by implication, estoppel, or otherwise.
+Tools. The Open Specifications documentation does not require the use of Microsoft programming tools or programming environments in order for you to develop an implementation. If you have access to Microsoft programming tools and environments, you are free to take advantage of them. Certain Open Specifications documents are intended for use in conjunction with publicly available standards specifications and network programming art and, as such, assume that the reader either is familiar with the aforementioned material or has immediate access to it.
+Support. For questions and support, please contact dochelp@microsoft.com.
+```
+
 ## Unicode symbol-font mappings
 
 `src/core/fonts/symbols.generated.ts` is generated by `src/scripts/symbolTables.ts` from two Unicode, Inc. publications (re-encoded as code tables, not copied):
@@ -105,6 +147,87 @@ defect or inaccuracy in this document or the included data.
 - Licence: Apache License 2.0 (text below)
 - Derived files, modified for `@filen/office`:
   - `src/css/pdf.css` (the `.textLayer` rules of `web/pdf_viewer.css`, selector renamed and colours made variables)
+
+## HarfBuzz
+
+- Source: HarfBuzz 14.6.0 (`COPYING` SHA-256 `ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64`), https://github.com/harfbuzz/harfbuzz
+- Copyright: the HarfBuzz authors (Google, Inc., Behdad Esfahbod, Red Hat, Inc. and the others its `COPYING` lists)
+- Licence: "Old MIT" (text below)
+- Derived files, written for `@filen/office` (tables and the structure of the algorithms ported to TypeScript, no source file copied), first ported and last changed on 2026-10-22:
+  - `src/core/pdfwrite/fonts/shape.ts` (the Arabic joining state table of `src/hb-ot-shaper-arabic.cc`; the default feature order of `src/hb-ot-shape.cc`)
+  - `src/core/pdfwrite/fonts/indic.ts` (the syllable grammar of `src/hb-ot-shaper-indic-machine.rl`; initial and final reordering and the per-script settings of `src/hb-ot-shaper-indic.cc`)
+  - `src/core/pdfwrite/fonts/unicode.ts` (the modified combining classes of `src/hb-unicode.hh`)
+  - `src/core/pdfwrite/fonts/gpos.ts` (the cursive attachment convention of `src/OT/Layout/GPOS/CursivePosFormat1.hh`)
+- `src/tests/fixtures/pdfFonts/harfbuzz.json` is the output of `hb-shape` 14.6.0 for the test samples.
+
+```
+Permission is hereby granted, without written agreement and without
+license or royalty fees, to use, copy, modify, and distribute this
+software and its documentation for any purpose, provided that the
+above copyright notice and the following two paragraphs appear in
+all copies of this software.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE TO ANY PARTY FOR
+DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES
+ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN
+IF THE COPYRIGHT HOLDER HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
+
+THE COPYRIGHT HOLDER SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING,
+BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS
+ON AN "AS IS" BASIS, AND THE COPYRIGHT HOLDER HAS NO OBLIGATION TO
+PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+```
+
+## Unicode Character Database (text shaping)
+
+- Source: the Unicode Character Database 18.0.0 (`Scripts.txt`, `ArabicShaping.txt`, `IndicSyllabicCategory.txt`, `IndicPositionalCategory.txt`, `BidiMirroring.txt`, `DerivedCoreProperties.txt`, `extracted/DerivedCombiningClass.txt`, `extracted/DerivedGeneralCategory.txt`; SHA-256 pinned in `src/scripts/shapingTables.ts`), https://www.unicode.org/Public/18.0.0/ucd/
+- Copyright: © 1991-2026 Unicode, Inc.
+- `src/core/pdfwrite/fonts/shaping.generated.ts` is generated from them by `src/scripts/shapingTables.ts` (re-encoded as run-length tables).
+- Licence: Unicode License v3 (https://www.unicode.org/license.txt, SHA-256 `e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96`), reproduced verbatim:
+
+```
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2026 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+```
 
 ## CodeMirror highlight styles
 

@@ -186,7 +186,10 @@ export function paragraphLinks(part: StoryPart, paragraph: number, text: string,
 export function bookmarkIndex(model: DocxModel): Map<string, { part: number; item: number }> {
 	const out = new Map<string, { part: number; item: number }>()
 
-	model.parts.forEach((part, partIndex) => {
+	model.parts.forEach((part: StoryPart | undefined, partIndex) => {
+		// An editing layout's model drops the parts edits replaced.
+		if (part === undefined) return
+
 		for (let row = 0; row < part.bookmarks.count; row++) {
 			const item = part.bookmarks.start[row] ?? -1
 			const name = part.bookmarkName(row)

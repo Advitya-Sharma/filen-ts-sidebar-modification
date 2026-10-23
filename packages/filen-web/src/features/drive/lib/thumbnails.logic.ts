@@ -1,5 +1,5 @@
 import { asDirectoryOrFile, type DriveItem } from "@/features/drive/lib/item"
-import type { ContentVerdict } from "@filen/shared"
+import type { FileVerdict } from "@filen/shared"
 import { itemTypeExtension, previewType } from "@/features/drive/lib/preview.logic"
 
 // Every category this app can produce a cached thumbnail for. "sdk" is every STILL raster image —
@@ -122,7 +122,7 @@ export const THUMB_EXT = ".thumb"
 // accounts for formats this app has never heard of, and duplicating it as a JS list would only create
 // a second answer that can drift.
 // `verdict` as previewType takes it.
-export function thumbnailCategory(item: DriveItem, verdict?: ContentVerdict): ThumbnailCategory {
+export function thumbnailCategory(item: DriveItem, verdict?: FileVerdict): ThumbnailCategory {
 	const base = asDirectoryOrFile(item)
 
 	if (base.type !== "file" || base.data.undecryptable) {

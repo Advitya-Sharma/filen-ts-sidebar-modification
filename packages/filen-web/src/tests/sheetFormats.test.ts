@@ -26,6 +26,29 @@ describe("spreadsheet formats", () => {
 		expect(fileKind.spreadsheetSaveFormat("xlt")).toBe(fileKind.spreadsheetSaveFormat("xls"))
 	})
 
+	it("routes .ods and .ots as spreadsheets that open view-only, saying the format", () => {
+		for (const extension of ["ods", "ots"]) {
+			expect(preview.previewCategoryForExtension(extension), extension).toBe("spreadsheet")
+			expect(fileKind.isEditableSpreadsheetExtension(extension), extension).toBe(false)
+		}
+
+		expect(sheetKind.sheetKindOf("ots", new Uint8Array([0x50, 0x4b, 3, 4]), false)).toEqual({ kind: "ots", unnamed: false })
+		expect(saveAs.savesAsXlsx("ods")).toBe(false)
+
+		const legacy = { state: "viewOnly", reason: "legacyFormat" } as const
+
+		expect(
+			messages.readOnlyNoteKey({
+				editable: false,
+				readOnlyReason: undefined,
+				unnamed: false,
+				renamed: false,
+				writability: legacy,
+				kind: "ods"
+			})
+		).toBe("previewSheetReadOnlyOds")
+	})
+
 	it("opens .xltx and .xltm as workbooks, telling them apart from .xlsx and .xlsm", () => {
 		expect(fileKind.spreadsheetFileKind("xltx")).toBe("xlsx")
 		expect(fileKind.spreadsheetFileKind("xltm")).toBe("xlsx")

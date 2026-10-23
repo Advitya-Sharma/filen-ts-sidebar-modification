@@ -397,6 +397,57 @@ export class StoryPart implements PartItems, PartTables {
 		return out
 	}
 
+	// What a MACROBUTTON field shows when it has no result: its display text, the instruction's second argument
+	// (ECMA-376 Part 1 §17.16.5.34). The instruction of a field can hold other fields (§17.16.2): their values,
+	// the results they last stored, are part of it, so a nested HYPERLINK's text shows as the button. Undefined
+	// for other fields.
+	macroButtonDisplay(field: number, view: RevisionView = RevisionView.Final): string | undefined {
+		const instruction = this.fieldInstruction(field, view)
+
+		if (macroButtonText(instruction) === undefined) return undefined
+		if (this.fields.simple[field] === 1) return macroButtonText(instruction)
+
+		const begin = this.fields.begin[field] ?? -1
+		// Per nested field, whether its result is being read; and how many are not (text shows only when none is).
+		const nested: boolean[] = []
+		let inCode = 0
+		let out = ""
+
+		for (let item = begin + 1; item >= 0 && item < this.count; item++) {
+			if (view !== RevisionView.Markup && this.hidden(item, view)) {
+				item = this.end(item) - 1
+
+				continue
+			}
+
+			const kind = this.kinds[item]
+
+			if (kind === Item.FieldChar) {
+				const type = this.fieldCharType(item)
+
+				if (type === FieldCharType.Begin) {
+					nested.push(false)
+					inCode++
+				} else if (nested.length === 0) break
+				else if (type === FieldCharType.Separate) {
+					if (nested[nested.length - 1] === false) inCode--
+
+					nested[nested.length - 1] = true
+				} else if (nested.pop() === false) inCode--
+
+				continue
+			}
+
+			if (kind === Item.InstrText || kind === Item.DeletedInstrText) {
+				if (nested.length === 0 && !(view === RevisionView.Final && kind === Item.DeletedInstrText)) out += this.text(item)
+			} else if ((kind === Item.Text || kind === Item.DeletedText) && nested.length > 0 && inCode === 0) {
+				if (!(view === RevisionView.Final && kind === Item.DeletedText)) out += this.text(item)
+			}
+		}
+
+		return macroButtonText(out)
+	}
+
 	// Whether a revision wrapper, row or cell around the item hides it in `view` (up to its story).
 	hiddenByAncestor(item: number, view: RevisionView): boolean {
 		for (let at = this.parent(item); at >= 0; at = this.parent(at)) {
@@ -487,7 +538,7 @@ export class StoryPart implements PartItems, PartTables {
 						const field = fieldDepth === 0 ? this.fieldOf(i) : -1
 
 						// Inside another field a MACROBUTTON shows nothing.
-						displays.push(field < 0 ? undefined : macroButtonText(this.fieldInstruction(field, view)))
+						displays.push(field < 0 ? undefined : this.macroButtonDisplay(field, view))
 						resultStarts.push(-1)
 						codeStack.push(codeDepth)
 						fieldDepth++

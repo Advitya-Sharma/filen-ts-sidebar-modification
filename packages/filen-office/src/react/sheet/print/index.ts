@@ -1,16 +1,18 @@
 export {
 	blackAndWhite,
 	layOutPrint,
+	MAX_PAGE_CELLS,
 	pageCount,
 	printedTile,
 	printPageAt,
-	renderPrintPage,
+	PrintPageTooLarge,
 	type NotesPage,
 	type PrintJob,
+	type PrintChart,
 	type PrintJobSheet,
-	type PrintRenderOptions,
 	type PrintSheetRequest
-} from "./printJob"
+} from "./printLayout"
+export { renderPrintPage, type PrintRenderOptions } from "./printJob"
 export {
 	clampRanges,
 	framePage,
@@ -25,3 +27,12 @@ export {
 	type PrintedSheet
 } from "./printPage"
 export { SvgCanvas } from "./svgCanvas"
+export {
+	SHEET_PDF_JOB,
+	sheetPdf,
+	type SheetPdfJobArgs,
+	type SheetPdfJobResult,
+	type SheetPdfRefusal,
+	type SheetPdfRequest
+} from "./pdfClient"
+export { sheetPdfJob } from "./pdfJob"

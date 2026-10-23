@@ -1,5 +1,8 @@
 import type { GridCanvas } from "../paint/canvas"
 
+// Whitespace SVG would collapse: at either end, or two characters of it in a row.
+const SPACES = /^\s|\s$|\s\s/
+
 // A GridCanvas that writes SVG instead of pixels, so the grid's own painters (cells, borders, text, conditional
 // formatting's bars and icons) draw a printed page as vectors: text stays text and lines stay sharp at any printer's
 // resolution. What it writes is in the canvas's coordinates under its current transform; the caller places the whole
@@ -438,7 +441,9 @@ export class SvgCanvas implements GridCanvas {
 
 		const anchor = ANCHORS[this.state.textAlign]
 		const baseline = BASELINES[this.state.textBaseline]
+		// SVG collapses a text's spaces (leading, trailing, runs of them) unless asked to keep them; a canvas draws each.
 		const attributes =
+			(SPACES.test(text) ? 'xml:space="preserve" ' : "") +
 			`fill="${this.paint(this.state.fillStyle)}" style="font:${escapeSvgText(this.state.font)}"` +
 			(anchor === "start" ? "" : ` text-anchor="${anchor}"`) +
 			(baseline === null ? "" : ` dominant-baseline="${baseline}"`)

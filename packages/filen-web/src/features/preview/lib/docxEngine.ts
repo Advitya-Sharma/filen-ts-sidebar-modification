@@ -37,6 +37,14 @@ export const docxHost = pool.host
 // decrypted package is on the page (an editor takes its own copy).
 export const docxProtection = pool.protection
 
+// Word 97–2003 documents: converted to a .docx package once, in the same worker, which holds the package while the
+// viewer shows it (Save as .docx takes a copy). The binary file is not kept there.
+export const docxLegacy = pool.legacy
+
+// RTF documents: read into their package in the same worker, which holds it with the file while the viewer shows it,
+// proves it for the editor (which takes a copy) and writes each save back as RTF.
+export const docxRtf = pool.rtf
+
 // Starts the worker while a document still downloads, so its script is parsed by the time the bytes arrive.
 export function prewarmDocxWorker(): void {
 	pool.prewarm()

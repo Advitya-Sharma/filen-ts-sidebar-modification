@@ -1,6 +1,9 @@
 import type {
+	DocNotConvertedKind,
 	DocxAnnotations,
+	DocxConvertedDocument,
 	DocxEncryptionRefusal,
+	DocxLegacyRefusal,
 	DocxErrorReason,
 	DocxMarkupInfo,
 	DocxMarkupMode,
@@ -12,6 +15,7 @@ import type {
 } from "@filen/office/dom/docx"
 import type { DocxDocument } from "@filen/office/react/docx"
 import type { DriveVariant } from "@/features/drive/lib/preferences"
+import { extensionOf } from "@/features/drive/lib/preview.logic"
 import type { PreviewKey } from "@/lib/i18n"
 
 // Which engine failures fall back to docx-preview for this release: the engine throwing (a defect or a
@@ -81,6 +85,97 @@ export function docxRefusalKey(reason: DocxEncryptionRefusal): DocxErrorKey {
 			return "previewDocxUnsupportedEncryption"
 		case "damaged":
 			return "previewDocxDamagedEncryption"
+	}
+}
+
+// A Word 97–2003 document with a password to open in a scheme the worker decrypts ([MS-DOC] §2.2.6): the password is
+// asked, then the file converted with it.
+export function legacyNeedsPassword(refusal: DocxLegacyRefusal): boolean {
+	return refusal.reason === "encrypted" && refusal.encryption !== undefined && refusal.encryption !== "unknown"
+}
+
+// Why a Word 97–2003 document is not shown: Word 6/95 files are refused, and encrypted ones the worker cannot decrypt;
+// anything else is not a Word document or could not be read.
+export function legacyRefusalKey(refusal: DocxLegacyRefusal): DocxErrorKey {
+	switch (refusal.reason) {
+		case "legacyVersion":
+			return "previewDocxLegacyFormat"
+		case "encrypted":
+		case "encryptedPackage":
+			return "previewDocxUnsupportedEncryption"
+		// The prompt answers a wrong password itself; reaching here, the file was not opened.
+		case "wrongPassword":
+			return "previewDocxNeedsPassword"
+		case "notWordBinary":
+		case "badSignature":
+			return "previewDocxNotDocument"
+		case "corrupt":
+		case "tooLarge":
+			return "previewDocxLoadFailed"
+	}
+}
+
+// What the Word 97–2003 badge lists, by what the conversion could not carry over as it was (plural keys, given
+// their count).
+export type NotConvertedKey =
+	| "previewDocxLegacyShapes"
+	| "previewDocxLegacyGroups"
+	| "previewDocxLegacyObjects"
+	| "previewDocxLegacyPictures"
+	| "previewDocxLegacyArtBorders"
+	| "previewDocxLegacyCharacters"
+	| "previewDocxLegacyDamaged"
+	| "previewDocxLegacyPassword"
+	| "previewDocxLegacyMacros"
+	| "previewDocxLegacyAutoText"
+
+export function notConvertedKey(kind: DocNotConvertedKind): NotConvertedKey {
+	switch (kind) {
+		case "shape":
+			return "previewDocxLegacyShapes"
+		case "group":
+			return "previewDocxLegacyGroups"
+		case "embeddedObject":
+			return "previewDocxLegacyObjects"
+		case "picture":
+			return "previewDocxLegacyPictures"
+		case "artBorder":
+			return "previewDocxLegacyArtBorders"
+		case "specialCharacter":
+			return "previewDocxLegacyCharacters"
+		case "damagedContent":
+			return "previewDocxLegacyDamaged"
+		case "passwordProtection":
+			return "previewDocxLegacyPassword"
+		case "macros":
+			return "previewDocxLegacyMacros"
+		case "autoText":
+			return "previewDocxLegacyAutoText"
+	}
+}
+
+// A converted Word 97–2003 document, held in the docx worker while its preview shows it, released a turn after the
+// preview let go of it (so a remount in the same turn, React's Strict Mode check, keeps it).
+export interface DocxConversionKey {
+	readonly document: DocxConvertedDocument
+	hold: () => void
+	drop: () => void
+}
+
+export function docxConversionKey(document: DocxConvertedDocument): DocxConversionKey {
+	let timer: ReturnType<typeof setTimeout> | undefined
+
+	return {
+		document,
+		hold: () => {
+			clearTimeout(timer)
+		},
+		drop: () => {
+			clearTimeout(timer)
+			timer = setTimeout(() => {
+				document.release()
+			}, 0)
+		}
 	}
 }
 
@@ -319,4 +414,16 @@ export function viewerFindControls(state: DocxViewerState, dispatch: (command: D
 			dispatch({ type: "find.close" })
 		}
 	}
+}
+
+// The format the docx viewer opens a file as, by its name: OpenDocument text is translated in the docx worker and
+// shown view-only (no editor, no docx-preview fallback); RTF is read in the docx worker and edited and saved as RTF.
+export function docxFormatOf(name: string): "docx" | "odt" | "rtf" {
+	const extension = extensionOf(name)
+
+	if (extension === "rtf") {
+		return "rtf"
+	}
+
+	return extension === "odt" || extension === "ott" ? "odt" : "docx"
 }

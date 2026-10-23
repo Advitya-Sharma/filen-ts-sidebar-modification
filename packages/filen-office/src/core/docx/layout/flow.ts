@@ -19,13 +19,14 @@ import {
 	type PrepareOptions
 } from "../../text/index"
 import type { DocxModel } from "../model/document"
-import { Item, RevisionView } from "../model/kinds"
+import { FieldCharType, Item, RevisionView } from "../model/kinds"
 import type { StoryPart } from "../model/part"
 import type { ListMarker, NumberingCounters } from "../numbering/counter"
 import type { PropsStore } from "../props/store"
 import type { FrameProps, ResolvedBorder, ResolvedParagraphBorders, ResolvedParagraphProps } from "../props/types"
 import type { CellFormat, ParagraphFormat, PropertyResolver } from "../styles/resolve"
-import { BuiltParagraph, ContentBuilder, type PageValues, type StoryContext } from "./content"
+import { BuiltParagraph, ContentBuilder, FieldFlag, type PageValues, type StoryContext } from "./content"
+import { FieldKind, fieldInfo, numberText } from "./fields"
 import { FIXED_AUTO_SPACING, Geometry, paragraphGeometry, spaceAfter, spaceBefore, type AutoSpacing, type LayoutCompat } from "./geometry"
 import type { NoteNumbering } from "./notes"
 import { ObjectKind, type FloatSpec, type ObjectSizer, type ObjectTable } from "./objects"
@@ -192,6 +193,8 @@ export class Engine {
 	// Placements read so far that depend on whether the page is odd or even (inside/outside alignment): a page
 	// that read one is laid out again rather than kept when its number changes parity.
 	parityReads = 0
+	// Text box contents being laid out lie behind the body text (their box does).
+	boxBehindText = false
 	// Endnote stories in reference order.
 	readonly endnotes: number[] = []
 	private readonly endnoteSet = new Set<number>()
@@ -479,6 +482,110 @@ const SCRATCH_ITEMS: number[] = []
 const SCRATCH_PARTS: StoryPart[] = []
 const SCRATCH_FORMATS: ParagraphFormat[] = []
 
+// Items measured again at a time for a page's numbers, and the list of those holding fields.
+const REFRESH_ITEMS = 256
+const REFRESH_LIST: number[] = []
+
+// See BlockFlow.renumberFields.
+interface PageFieldText {
+	// The paragraph's text between its PAGE fields.
+	readonly segments: readonly string[]
+	// The fields' \* format (undefined: the section's), the kind of characters they show (see resultKind) and the
+	// styles they are drawn in.
+	readonly format: string | undefined
+	readonly kind: number
+	readonly styles: readonly number[]
+	// What every field shows now.
+	result: string
+	// BuiltParagraph.pageFields index of the first field not measured for this page.
+	next: number
+}
+
+// 1 for digits, 2 for lower and 3 for upper case ASCII letters, 0 for anything else (or nothing).
+function resultKind(text: string): number {
+	return /^[0-9]+$/.test(text) ? 1 : /^[a-z]+$/.test(text) ? 2 : /^[A-Z]+$/.test(text) ? 3 : 0
+}
+
+// The fields (start, end pairs) ending at or before `offset`.
+function endedBy(ranges: readonly number[], offset: number): number {
+	let low = 0
+	let high = ranges.length >> 1
+
+	while (low < high) {
+		const mid = (low + high) >> 1
+
+		if ((ranges[mid * 2 + 1] ?? 0) <= offset) low = mid + 1
+		else high = mid
+	}
+
+	return low
+}
+
+// The pageFields index of the first field starting at or after `offset`.
+function firstFieldFrom(ranges: readonly number[], offset: number): number {
+	let low = 0
+	let high = ranges.length >> 1
+
+	while (low < high) {
+		const mid = (low + high) >> 1
+
+		if ((ranges[mid * 2] ?? 0) < offset) low = mid + 1
+		else high = mid
+	}
+
+	return low * 2
+}
+
+// Moves text offsets values[first + k * step] (non-decreasing, none inside a field) by `shift` per field
+// (`ranges`, before the change) ending at or before them.
+function shiftOffsets(
+	values: { [k: number]: number },
+	first: number,
+	step: number,
+	end: number,
+	ranges: readonly number[],
+	shift: number
+): void {
+	let field = 0
+	const fields = ranges.length >> 1
+
+	for (let k = first; k < end; k += step) {
+		const offset = values[k] ?? 0
+
+		if (field > 0 && (ranges[field * 2 - 1] ?? 0) > offset) field = endedBy(ranges, offset)
+
+		while (field < fields && (ranges[field * 2 + 1] ?? 0) <= offset) field++
+
+		values[k] = offset + shift * field
+	}
+}
+
+// Moves the text offsets of items `from` on likewise.
+function shiftItems(p: PreparedParagraph, from: number, ranges: readonly number[], shift: number): void {
+	if (from >= p.count) return
+
+	const fields = ranges.length >> 1
+	let field = endedBy(ranges, p.start[from] ?? 0)
+
+	for (let item = from; item < p.count; item++) {
+		const start = p.start[item] ?? 0
+		const contentEnd = p.contentEnd[item] ?? 0
+		const end = p.end[item] ?? 0
+
+		while (field < fields && (ranges[field * 2 + 1] ?? 0) <= start) field++
+
+		p.start[item] = start + shift * field
+
+		while (field < fields && (ranges[field * 2 + 1] ?? 0) <= contentEnd) field++
+
+		p.contentEnd[item] = contentEnd + shift * field
+
+		while (field < fields && (ranges[field * 2 + 1] ?? 0) <= end) field++
+
+		p.end[item] = end + shift * field
+	}
+}
+
 // Lays out a container's blocks (paragraphs and tables) into areas, resumably: run() returns when an
 // area is full and continues where it stopped in the next area.
 export class BlockFlow {
@@ -526,8 +633,12 @@ export class BlockFlow {
 	// Lays out the paragraphs of a frame (which do not float again).
 	private inFrame = false
 	private table: TableLayout | undefined = undefined
-	// The page values the pending paragraph was built with.
+	// The page values and column width the pending paragraph was built with.
 	private builtValues: PageValues | undefined = undefined
+	private builtWidth = 0
+	// How the pending paragraph's PAGE fields show another page's number without building it again: undefined
+	// until a page asks, null when they cannot.
+	private pageFields: PageFieldText | null | undefined = undefined
 	private chain: Chain | undefined = undefined
 	// Keep-with-next chains that moved off a page while the block they ran out of room at is still to come:
 	// pairs of pages back to that page and the block's index. An edit to that block or one before it may let
@@ -763,6 +874,8 @@ export class BlockFlow {
 
 		engine.content.build(this.story, parts, items, formats, area.width, values, this.built)
 		this.builtValues = values
+		this.builtWidth = area.width
+		this.pageFields = undefined
 
 		const props = this.built.format?.props
 
@@ -783,6 +896,8 @@ export class BlockFlow {
 	// A paragraph with PAGE fields continuing on another page is built again with that page's number; the
 	// cursor keeps its place in the text, moved by the fields before it that changed length.
 	private renumber(area: Area): void {
+		if (this.renumberFields(area)) return
+
 		const engine = this.engine
 		const built = this.built
 		const cursor = this.cursor
@@ -793,6 +908,8 @@ export class BlockFlow {
 
 		engine.content.build(this.story, parts, items, formats, area.width, area.values, built)
 		this.builtValues = area.values
+		this.builtWidth = area.width
+		this.pageFields = undefined
 
 		const props = built.format?.props
 
@@ -816,6 +933,209 @@ export class BlockFlow {
 
 		cursor.item = offset >= prepared.text.length ? prepared.count : item
 		cursor.offset = cursor.item < prepared.count && (prepared.start[item] ?? 0) !== offset ? offset : -1
+	}
+
+	// Renumbering without building again: when every PAGE field shows one format in characters of one kind
+	// (digits, lower or upper case ASCII letters) on this page as on the last, the paragraph's text differs only in
+	// those characters. Line breaking (UAX #14) gives the same opportunities around a run of such characters
+	// whatever its length, and items split the same way, so the prepared paragraph keeps its items: their offsets
+	// move by the fields before them that changed length, and the items holding fields are measured again as layout
+	// reaches them. False when the paragraph must be built again.
+	private renumberFields(area: Area): boolean {
+		const values = area.values
+		const before = this.builtValues
+
+		if (before === undefined || area.width !== this.builtWidth) return false
+		if (
+			(this.built.fieldFlags & FieldFlag.TOTALS) !== 0 &&
+			(before.numPages !== values.numPages || before.sectionPages !== values.sectionPages)
+		)
+			return false
+
+		if (this.pageFields === undefined) this.pageFields = this.pageFieldText(before)
+
+		const fields = this.pageFields
+
+		if (fields === null) return false
+
+		const result = numberText(values.page, fields.format ?? values.pageFormat)
+
+		if (resultKind(result) !== fields.kind) return false
+
+		for (const style of fields.styles) if (this.engine.styles.drawn(style, result) !== result) return false
+
+		this.builtValues = values
+
+		if (result === fields.result) return true
+
+		const built = this.built
+		const prepared = this.prepared
+		const cursor = this.cursor
+		const ranges = built.pageFields
+		const shift = result.length - fields.result.length
+		const from = Math.min(cursor.item, prepared.count)
+		const offset = from < prepared.count ? (cursor.offset >= 0 ? cursor.offset : (prepared.start[from] ?? 0)) : prepared.text.length
+		// As a paragraph built again: the cursor moves by the fields ending before it.
+		const moved = offset + shift * endedBy(ranges, offset)
+
+		built.text = fields.segments.join(result)
+		prepared.text = built.text
+		fields.result = result
+
+		if (shift !== 0) {
+			shiftItems(prepared, from, ranges, shift)
+			shiftOffsets(built.renderedBreaks, 0, 1, built.renderedBreaks.length, ranges, shift)
+
+			if (built.map !== undefined) {
+				shiftOffsets(built.map, 2, 4, built.map.length, ranges, shift)
+				shiftOffsets(built.map, 3, 4, built.map.length, ranges, shift)
+			}
+
+			for (let k = 0; k < ranges.length; k += 2) {
+				ranges[k] = (ranges[k] ?? 0) + (shift * k) / 2
+				ranges[k + 1] = (ranges[k + 1] ?? 0) + (shift * (k + 2)) / 2
+			}
+		}
+
+		let item = from
+
+		while (item + 1 < prepared.count && (prepared.start[item + 1] ?? 0) <= moved) item++
+
+		cursor.item = moved >= prepared.text.length ? prepared.count : item
+		cursor.offset = cursor.item < prepared.count && (prepared.start[item] ?? 0) !== moved ? moved : -1
+		// Items from the cursor on hold the last page's numbers until layout reaches them.
+		prepared.ready = cursor.item
+		fields.next = firstFieldFrom(ranges, prepared.start[cursor.item] ?? prepared.text.length)
+		prepared.refresh ??= item => this.refreshFields(item)
+
+		return true
+	}
+
+	// What renumbering the pending paragraph's PAGE fields needs, or null when they show different formats, other
+	// characters, or the paragraph depends on more than its text (right-to-left text, note references).
+	private pageFieldText(values: PageValues): PageFieldText | null {
+		const built = this.built
+		const prepared = this.prepared
+		const props = built.format?.props
+		const ranges = built.pageFields
+		const text = built.text
+
+		if (props === undefined || props.bidi || prepared.bidi || built.noteOffsets.length > 0 || ranges.length === 0) return null
+
+		const kinsoku = this.prepareOptions(props).kinsoku
+
+		// Custom line-start and line-end characters among digits or letters would break by the number shown.
+		if (kinsoku !== null && kinsoku !== undefined)
+			for (let c = 0x30; c < 0x7b; c++)
+				if (resultKind(String.fromCharCode(c)) !== 0 && (kinsoku.noStart.has(c) || kinsoku.noEnd.has(c))) return null
+
+		const result = text.slice(ranges[0], ranges[1])
+		const kind = resultKind(result)
+
+		if (kind === 0) return null
+
+		const segments: string[] = []
+		const styles: number[] = []
+		let item = 0
+		let end = 0
+
+		for (let k = 0; k < ranges.length; k += 2) {
+			const start = ranges[k] ?? 0
+
+			if ((ranges[k + 1] ?? 0) - start !== result.length || !text.startsWith(result, start)) return null
+
+			segments.push(text.slice(end, start))
+			end = start + result.length
+
+			while (item + 1 < prepared.count && (prepared.start[item + 1] ?? 0) <= start) item++
+
+			const style = prepared.style[item] ?? 0
+
+			if (!styles.includes(style)) styles.push(style)
+		}
+
+		segments.push(text.slice(end))
+
+		const format = this.pageFieldFormat()
+
+		if (format === null || numberText(values.page, format ?? values.pageFormat) !== result) return null
+
+		return { segments, format, kind, styles, result, next: 0 }
+	}
+
+	// The \* format all PAGE fields of the pending paragraph share (undefined: the section's), or null when they
+	// differ. Read from every PAGE field in its text, shown or not.
+	private pageFieldFormat(): string | undefined | null {
+		const { items, parts } = this.group()
+		const view = this.engine.view
+		let format: string | undefined
+		let found = false
+
+		for (let k = 0; k < items.length; k++) {
+			const part = parts[k]
+			const paragraph = items[k] ?? -1
+
+			if (part === undefined) continue
+
+			for (let item = paragraph + 1, end = part.end(paragraph); item < end; item++) {
+				const kind = part.kinds[item]
+				let own: string | undefined
+
+				if (kind === Item.PageNumber) own = undefined
+				else if (kind === Item.FieldSimple || (kind === Item.FieldChar && part.fieldCharType(item) === FieldCharType.Begin)) {
+					const field = kind === Item.FieldSimple ? (part.aux[item] ?? -1) : part.fieldOf(item)
+					const info = fieldInfo(field < 0 ? "" : part.fieldInstruction(field, view))
+
+					if (info.kind !== FieldKind.PAGE) continue
+
+					own = info.format
+				} else continue
+
+				if (found && own !== format) return null
+
+				found = true
+				format = own
+			}
+		}
+
+		return format
+	}
+
+	// Measures the items holding PAGE fields again, from the first not measured for this page's number to past
+	// `item` (a run of them at a time).
+	private refreshFields(item: number): void {
+		const prepared = this.prepared
+		const fields = this.pageFields
+		const ranges = this.built.pageFields
+		const from = prepared.ready
+
+		if (fields === null || fields === undefined) {
+			prepared.ready = Infinity
+
+			return
+		}
+
+		const to = Math.min(prepared.count, Math.max(item + 1, from + REFRESH_ITEMS))
+		const list = REFRESH_LIST
+		let next = fields.next
+		let count = 0
+
+		list.length = 0
+
+		// A field lies inside one item: no item boundary falls between its characters.
+		for (let at = from; at < to; at++) {
+			const end = prepared.end[at] ?? 0
+
+			if (next < ranges.length && (ranges[next] ?? 0) < end) {
+				list[count++] = at
+
+				while (next < ranges.length && (ranges[next] ?? 0) < end) next += 2
+			}
+		}
+
+		fields.next = next
+		prepared.ready = to === prepared.count ? Infinity : to
+		this.engine.layouter.remeasure(prepared, list, count)
 	}
 
 	// Where the flow continues: the next block, the table row it is in, and the text offset inside a
@@ -1138,6 +1458,8 @@ export class BlockFlow {
 			parts.length = 0
 			formats.length = 0
 			this.builtValues = area.values
+			this.builtWidth = area.width
+			this.pageFields = undefined
 
 			const props = built.format?.props
 
@@ -1196,7 +1518,13 @@ export class BlockFlow {
 				this.floatsPlaced = true
 				area.page.mark(this.floatMark)
 				this.floatExclusions = area.exclusions?.count ?? 0
-				this.placeFloats(area, top)
+
+				// A float kept on its anchor's page that does not fit there takes its paragraph to the next page.
+				if (!this.placeFloats(area, top) && !(this.areaPlaced === 0 && area.empty)) {
+					this.withdraw(area)
+
+					return FlowStatus.OVERFLOW
+				}
 			}
 
 			if (built.dropCap !== undefined) return this.dropCap(area, top)
@@ -1541,12 +1869,19 @@ export class BlockFlow {
 
 				const x = text.fragmentFloats[k * FRAGMENT_FLOATS] ?? 0
 
-				this.textboxes(area, id, x, baseline - (objects.ascents[id] ?? 0))
+				this.textboxes(area, id, x, baseline - (objects.ascents[id] ?? 0), this.behindText(area))
 			}
 		}
 	}
 
-	private textboxes(area: Area, id: number, x: number, y: number): void {
+	// Whether floats placed here lie behind the body text whatever their own setting: those of headers and footers
+	// (LibreOffice imports them so, as Word draws them), and those in a text box that does.
+	private behindText(area: Area): boolean {
+		return area.region === Region.HEADER || area.region === Region.FOOTER || this.engine.boxBehindText
+	}
+
+	// Lays out object `id`'s text box stories; `behind`: the box lies behind the body text.
+	private textboxes(area: Area, id: number, x: number, y: number, behind: boolean): void {
 		const engine = this.engine
 		const objects = engine.objects
 		const stories = objects.textboxes[id]
@@ -1555,28 +1890,38 @@ export class BlockFlow {
 		if (stories === undefined) return
 
 		const width = (objects.widths[id] ?? 0) - (insets[0] ?? 0) - (insets[2] ?? 0)
+		const firstSource = area.page.sourceCount
+		const outer = engine.boxBehindText
 		let top = y + (insets[1] ?? 0)
 
-		for (const index of stories) {
-			const story = engine.model.stories[index]
+		engine.boxBehindText = behind
 
-			if (story === undefined) continue
+		try {
+			for (const index of stories) {
+				const story = engine.model.stories[index]
 
-			const part = engine.model.parts[story.part]
+				if (story === undefined) continue
 
-			if (part === undefined) continue
+				const part = engine.model.parts[story.part]
 
-			top += engine.layoutBox(
-				{ part, story: index, counters: this.story.counters, noteMark: "", breaksAsLines: true, recount: this.story.recount },
-				Region.TEXTBOX,
-				area.page,
-				area.values,
-				area.frame,
-				x + (insets[0] ?? 0),
-				top,
-				width
-			)
+				if (part === undefined) continue
+
+				top += engine.layoutBox(
+					{ part, story: index, counters: this.story.counters, noteMark: "", breaksAsLines: true, recount: this.story.recount },
+					Region.TEXTBOX,
+					area.page,
+					area.values,
+					area.frame,
+					x + (insets[0] ?? 0),
+					top,
+					width
+				)
+			}
+		} finally {
+			engine.boxBehindText = outer
 		}
+
+		area.page.ownSources(firstSource, area.page.sourceCount, id)
 	}
 
 	// Builds text box contents ahead so their fonts are prepared with the paragraph's.
@@ -1603,10 +1948,13 @@ export class BlockFlow {
 		}
 	}
 
-	// Positions the paragraph's anchored objects and makes those that wrap text into obstacles.
-	private placeFloats(area: Area, paragraphTop: number): void {
+	// Positions the paragraph's anchored objects and makes those that wrap text into obstacles. False when a float
+	// kept on its anchor's page (LayoutCompat.floatsOnAnchorPage) would have to rise above the paragraph to fit.
+	private placeFloats(area: Area, paragraphTop: number): boolean {
 		const engine = this.engine
 		const objects = engine.objects
+		const onPage = engine.compat.floatsOnAnchorPage && area.region === Region.BODY && !area.inTable && area.breaks
+		let fits = true
 
 		for (const id of this.built.floats) {
 			const spec = objects.floats[id]
@@ -1620,10 +1968,19 @@ export class BlockFlow {
 			if (byParity(spec.horizontalAlign) || byParity(spec.verticalAlign) || marginByParity(spec.horizontalFrom))
 				this.engine.parityReads++
 
-			const layer = spec.behindDoc ? Layer.BEHIND : spec.wrap === "none" ? Layer.FRONT : Layer.TEXT
+			// Word stacks every float in front of the text in one order, wrapped or not (relativeHeight).
+			const behind = spec.behindDoc || this.behindText(area)
+			const layer = behind ? Layer.BEHIND : Layer.FRONT
 			const exclusions = area.exclusions
 			const wraps = exclusions !== null && spec.wrap !== "none" && !spec.behindDoc && spec.wrap !== "unknown"
 			let y = verticalPosition(spec, area, paragraphTop, height)
+
+			// Kept on the page: moved up from its bottom edge (LibreOffice), never above its paragraph.
+			if (onPage && followsAnchor(spec) && y + height > area.frame.height) {
+				y = Math.max(area.frame.height - height, paragraphTop)
+
+				if (y + height > area.frame.height) fits = false
+			}
 
 			// An object that may not overlap others moves down below the anchored drawings it would cover.
 			if (wraps && !spec.allowOverlap) y = clearOfDrawings(area.page, objects, x, y, width, height)
@@ -1639,8 +1996,10 @@ export class BlockFlow {
 				else exclusions.add(x - spec.distLeft, top, x + width + spec.distRight, bottom, wrapSide(spec.wrapText))
 			}
 
-			if (objects.textboxes[id] !== undefined) this.textboxes(area, id, x, y)
+			if (objects.textboxes[id] !== undefined) this.textboxes(area, id, x, y, behind)
 		}
+
+		return fits
 	}
 
 	// Paragraphs in a frame (w:framePr other than drop caps; neighbours with the same frame share it): laid
@@ -2125,6 +2484,21 @@ function horizontalPosition(spec: FloatSpec, area: Area, width: number): number 
 	}
 
 	return alignWithin(spec.horizontalAlign, start, size, width, frame.odd) ?? start + spec.horizontalOffset
+}
+
+// Placed relative to its anchor's text (paragraph, line or character), so the anchor decides its page.
+function followsAnchor(spec: FloatSpec): boolean {
+	switch (spec.verticalFrom) {
+		case "page":
+		case "margin":
+		case "topMargin":
+		case "bottomMargin":
+		case "insideMargin":
+		case "outsideMargin":
+			return false
+		default:
+			return true
+	}
 }
 
 function verticalPosition(spec: FloatSpec, area: Area, paragraphTop: number, height: number): number {

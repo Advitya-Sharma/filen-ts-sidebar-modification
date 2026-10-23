@@ -510,6 +510,17 @@ async function findEndRecord(source: ByteSource): Promise<EndRecord | null> {
 	return null
 }
 
+// Output stream() aims each inflate step at.
+const STREAM_CHUNK = 512 * 1024
+
+async function* counted(chunks: AsyncIterable<Uint8Array>, count: (length: number) => void): AsyncGenerator<Uint8Array> {
+	for await (const chunk of chunks) {
+		count(chunk.length)
+
+		yield chunk
+	}
+}
+
 async function* steps(chunks: AsyncIterable<Uint8Array>, size: () => number): AsyncGenerator<Uint8Array> {
 	for await (const chunk of chunks) {
 		for (let at = 0; at < chunk.length;) {
@@ -634,6 +645,92 @@ export class ZipArchive {
 	// read() giving the host a turn between inflate (or CRC) steps whenever the slice is used up.
 	readSliced(entry: ZipEntry, slicing: Slicing): Promise<Uint8Array> {
 		return this.content(entry, sliceClock(slicing))
+	}
+
+	// The entry's content in chunks, never held whole: what one inflate step gives (kept near STREAM_CHUNK by sizing
+	// the steps to the ratio seen so far), or views of a stored entry. A chunk is the caller's only until the next one
+	// is asked for. Size and CRC are checked as read() checks them, the CRC once the last chunk was handed over, so a
+	// caller keeps nothing it read until the stream ends without an error.
+	async *stream(entry: ZipEntry): AsyncGenerator<Uint8Array, void, undefined> {
+		if (entry.method !== METHOD_STORED && entry.method !== METHOD_DEFLATE) {
+			throw new ZipError("unsupported", `Compression method ${entry.method} of ${entry.name} is not supported`)
+		}
+
+		const { dataOffset } = await this.layout(entry)
+		let crc = 0
+		let written = 0
+
+		if (entry.method === METHOD_STORED) {
+			for (let read = 0; read < entry.compressedSize;) {
+				const length = Math.min(STREAM_CHUNK, entry.compressedSize - read)
+				const chunk = await this.source.read(dataOffset + read, length)
+
+				crc = crc32(chunk, crc)
+				read += length
+
+				yield chunk
+			}
+
+			if (crc !== entry.crc32) throw new ZipError("corrupt", `CRC mismatch in ${entry.name}`)
+
+			return
+		}
+
+		const size = entry.uncompressedSize
+		const take = (chunk: Uint8Array): void => {
+			if (written + chunk.length > size) throw new ZipError("corrupt", `${entry.name} inflates past its declared size`)
+
+			crc = crc32(chunk, crc)
+			written += chunk.length
+		}
+		let consumed = 0
+		// Compressed bytes per step: what yields about STREAM_CHUNK at the ratio seen so far, never past what the entry
+		// may still produce (as read() steps).
+		const stepSize = (): number => {
+			const ratio = consumed === 0 ? 1032 : Math.max(1, written / consumed)
+
+			return Math.max(MIN_INFLATE_STEP, Math.min(MAX_HOOK_STEP, Math.floor(STREAM_CHUNK / ratio), Math.ceil((size - written) / 1024)))
+		}
+		const input = steps(this.compressed(entry, dataOffset), stepSize)
+		// Set while the caller holds a chunk: what it throws is its own, not damage.
+		let yielding = false
+
+		try {
+			if (this.inflateHook !== undefined) {
+				for await (const chunk of this.inflateHook(counted(input, length => (consumed += length)))) {
+					take(chunk)
+					yielding = true
+					yield chunk
+					yielding = false
+				}
+			} else {
+				const pending: Uint8Array[] = []
+				const inflater = new Inflate(chunk => pending.push(chunk))
+
+				for await (const step of input) {
+					consumed += step.length
+					inflater.push(step, consumed === entry.compressedSize)
+
+					for (const chunk of pending) take(chunk)
+
+					yielding = true
+
+					for (const chunk of pending) yield chunk
+
+					yielding = false
+					pending.length = 0
+				}
+
+				if (entry.compressedSize === 0) inflater.push(new Uint8Array(0), true)
+			}
+		} catch (error) {
+			if (error instanceof ZipError || yielding) throw error
+
+			throw new ZipError("corrupt", `Damaged deflate data in ${entry.name}`)
+		}
+
+		if (written !== size) throw new ZipError("corrupt", `${entry.name} is shorter than its declared size`)
+		if (crc !== entry.crc32) throw new ZipError("corrupt", `CRC mismatch in ${entry.name}`)
 	}
 
 	private async content(entry: ZipEntry, clock: SliceClock | undefined): Promise<Uint8Array> {

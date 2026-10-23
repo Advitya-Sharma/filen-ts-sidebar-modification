@@ -22,6 +22,7 @@ import { HitTester } from "../../core/text/index"
 import type { XmlDocument } from "../../core/xml/index"
 import { DocxEngine, type DocxEngineOpen, type DocxEngineServices } from "./engine"
 import type { DocxHost } from "./host"
+import type { DocxPdfLive } from "./pdfSnapshot"
 import type { DocxOpenOptions } from "./protocol"
 import { isSealedOfficeFile } from "../../core/encryption/index"
 import { PackageSealError, packageSealer, type PackageSealer, type PackageSealFailure } from "../encryption/seal"
@@ -139,6 +140,9 @@ export interface DocxEditingHost {
 	addMedia(chunks: Uint8Array | readonly Uint8Array[], info?: DocxMediaInfo): number | undefined
 	// Gives up a handle addMedia gave that no command will use (the user cancelled, say): its bytes go now.
 	releaseMedia(handle: number): void
+	// The document with its unsaved edits in the Final view, for PDF export (pdfSnapshot.ts): the pages as laid
+	// out when they show that view, else laid out again apart. Undefined before it opened or once closed.
+	pdfSource(signal?: { readonly aborted: boolean }): Promise<DocxPdfLive | undefined>
 }
 
 export interface DocxWritten {
@@ -159,7 +163,7 @@ export interface DocxEditingOptions {
 	readonly paged?: PagedEditorOptions
 	// Gate 1 for the document, made from its editing context (writerProof, injected: the writer is not part
 	// of this entry). The body is proved in slices before the editor opens; other stories when entered.
-	readonly proof?: (context: DocxEditContext) => BlockProof
+	readonly proof?: (context: DocxEditContext) => BlockProof | DocxLaterProof
 	// The writer for save() and prepare() (prepareDocxSave, injected like the proof), and where saves zip the
 	// file (default: on this thread; web passes a worker's, docxZipWorker). Without it the host cannot save.
 	readonly writer?: DocxEditingWriter
@@ -169,6 +173,14 @@ export interface DocxEditingOptions {
 	// The document was opened from a password-protected file (docxSealer): every save is sealed with its key
 	// after the zip and its Gate 2, and checked, before the bytes are handed out.
 	readonly encryption?: DocxSealer
+}
+
+// A Gate 1 partly made elsewhere (an RTF document's writer proves in its worker): the body is checked with `first`
+// while `later` comes, then locked with `extra` before `first`'s verdicts; other stories are proved with `full`.
+// Editing starts after, so no edit precedes a lock.
+export interface DocxLaterProof {
+	readonly first: BlockProof
+	readonly later: Promise<{ readonly extra: BlockProof; readonly full: BlockProof }>
 }
 
 export interface DocxEditingWriter {
@@ -208,26 +220,13 @@ async function proveInSlices(session: DocxEditorSession, proof: BlockProof, slic
 		}
 
 		const failed = new Map<Node, LockReason>()
-		const recording: BlockProof = {
-			check(node, story) {
-				const reason = proof.check(node, story)
-
-				if (reason !== undefined) failed.set(node, reason)
-
-				return reason
-			},
-			*steps(node, story, due) {
-				const reason = proof.steps === undefined ? proof.check(node, story) : yield* proof.steps(node, story, due)
-
-				if (reason !== undefined) failed.set(node, reason)
-
-				return reason
-			}
-		}
+		const recording = recordingProof(proof, failed)
 		let looks = 0
 		// The clock is read every few steps (a step can be one table cell).
 		const due = (): boolean => (++looks & 15) === 0 && slicing.now() - started >= slicing.sliceMs
-		const steps = proveBlocksSteps(session.story, doc, recording, due, from, to)
+		// Each run starts the walk at its own first block.
+		const start = { index, pos: from }
+		const steps = proveBlocksSteps(session.story, doc, recording, due, from, to, start)
 
 		for (let step = steps.next(); step.done !== true; step = steps.next()) {
 			await slicing.pause()
@@ -244,7 +243,8 @@ async function proveInSlices(session: DocxEditorSession, proof: BlockProof, slic
 		}
 
 		// The run's verdicts lock what failed (proved again should the document have changed meanwhile).
-		locked += session.prove(session.state.doc === doc ? { check: node => failed.get(node) } : proof, from, to)
+		locked +=
+			session.state.doc === doc ? session.prove({ check: node => failed.get(node) }, from, to, start) : session.prove(proof, from, to)
 		from = to + session.state.doc.content.size - doc.content.size
 		index = end
 	}
@@ -252,6 +252,50 @@ async function proveInSlices(session: DocxEditorSession, proof: BlockProof, slic
 	if (locked > 0) session.markSaved()
 
 	return locked
+}
+
+// `proof`, keeping what fails in `failed`.
+function recordingProof(proof: BlockProof, failed: Map<Node, LockReason>): BlockProof {
+	return {
+		check(node, story) {
+			const reason = proof.check(node, story)
+
+			if (reason !== undefined) failed.set(node, reason)
+
+			return reason
+		},
+		*steps(node, story, due) {
+			const reason = proof.steps === undefined ? proof.check(node, story) : yield* proof.steps(node, story, due)
+
+			if (reason !== undefined) failed.set(node, reason)
+
+			return reason
+		}
+	}
+}
+
+// Gate 1's verdicts over the body in slices, nothing locked (a DocxLaterProof's `first`); undefined once closed.
+async function verdictsInSlices(
+	session: DocxEditorSession,
+	proof: BlockProof,
+	slicing: Slicing,
+	closed: () => boolean
+): Promise<Map<Node, LockReason> | undefined> {
+	const failed = new Map<Node, LockReason>()
+	let started = slicing.now()
+	let looks = 0
+	const due = (): boolean => (++looks & 15) === 0 && slicing.now() - started >= slicing.sliceMs
+	const steps = proveBlocksSteps(session.story, session.state.doc, recordingProof(proof, failed), due)
+
+	for (let step = steps.next(); step.done !== true; step = steps.next()) {
+		await slicing.pause()
+
+		if (closed()) return undefined
+
+		started = slicing.now()
+	}
+
+	return failed
 }
 
 // Pages laid out before the editor's open takes the thread from the layout: the first screen paints first.
@@ -413,6 +457,9 @@ export function inThreadEditingHost(
 		}
 	}
 
+	// The open document's engine (one per editing host).
+	let liveEngine: DocxEngine | undefined
+
 	const host: DocxHost = (source, listener, options = {}) => {
 		if (opened) throw new Error("An editing host opens one document")
 
@@ -474,19 +521,47 @@ export function inThreadEditingHost(
 				sliceMs: engineServices.sliceMs ?? 12,
 				now: engineServices.now ?? (() => Date.now())
 			}
-			const proof = editing.proof?.(context)
+			const made = editing.proof?.(context)
+			const split = made !== undefined && "later" in made ? made : undefined
+			const proof = made === undefined || !("later" in made) ? made : made.first
 
 			priority.hold(open.layout)
 
 			// With a proof the body is proved below, in slices; other stories prove as their sessions start.
 			const bodyOptions = proof === undefined ? (editing.session ?? {}) : { ...editing.session, proof: null }
-			const storyOptions = proof === undefined ? editing.session : { ...editing.session, proof }
 			// Built in slices: a long document opens without long tasks.
 			const session = await DocxEditorSession.open(context, bodyOptions, slicing)
 
 			if (closed) return
 
-			if (proof !== undefined) proofLocked = await proveInSlices(session, proof, slicing, () => closed)
+			let storyProof = proof
+
+			if (split !== undefined) {
+				const verdicts = await verdictsInSlices(session, split.first, slicing, () => closed)
+
+				if (verdicts === undefined) return
+
+				// The layout goes on while the rest of the proof comes.
+				priority.release()
+
+				const later = await split.later
+
+				if (closed) return
+
+				priority.hold(open.layout)
+
+				const extra = later.extra
+
+				proofLocked = await proveInSlices(
+					session,
+					{ check: (node, story) => extra.check(node, story) ?? verdicts.get(node) },
+					slicing,
+					() => closed
+				)
+				storyProof = later.full
+			} else if (proof !== undefined) proofLocked = await proveInSlices(session, proof, slicing, () => closed)
+
+			const storyOptions = storyProof === undefined ? editing.session : { ...editing.session, proof: storyProof }
 
 			if (closed) return
 
@@ -536,6 +611,7 @@ export function inThreadEditingHost(
 			resolve(editor)
 		}
 
+		liveEngine = engine
 		void engine.run()
 
 		return {
@@ -555,6 +631,7 @@ export function inThreadEditingHost(
 				paged?.session.dispose()
 				priority.release()
 				engine.close()
+				liveEngine = undefined
 				reject(new Error("closed"))
 			}
 		}
@@ -587,6 +664,8 @@ export function inThreadEditingHost(
 			)
 		},
 		addMedia: (chunks, info) => current?.addMedia(chunks, info),
+		pdfSource: async signal =>
+			(await liveEngine?.pdfFinalSource((current?.view ?? RevisionView.Final) === RevisionView.Final, signal)) ?? undefined,
 		releaseMedia(handle) {
 			const live = saveInput
 

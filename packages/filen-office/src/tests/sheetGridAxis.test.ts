@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { AxisFlag, SHEET_MAX_ROWS, type SheetAxisLayout, type SheetLayout } from "../core/sheet/protocol"
-import { createGridAxis, shownIndex } from "../react/sheet/axis"
+import { axisPositions } from "../core/xlsx/drawings/geometry"
+import { axisEntry, createGridAxis, shownIndex } from "../react/sheet/axis"
 import { MAX_SCROLL_PX, SCROLL_MARGIN_PX, domExtent, toDom, toVirtual } from "../react/sheet/scroll"
 import { bodyTotal, edgeAt, gridView, hitAxis, revealOffset, screenOf } from "../react/sheet/view"
 
@@ -110,6 +111,122 @@ describe("grid axes", () => {
 		expect(dragged.size(2)).toBe(64)
 		expect(dragged.size(5)).toBe(30)
 		expect(dragged.offset(6)).toBe(5 * 64 + 30)
+	})
+
+	it("answers runs of alike indices as walking every index does, a drag's overrides cutting into them", () => {
+		let seed = 11
+		const random = (): number => {
+			seed = (seed * 1103515245 + 12345) % 2 ** 31
+
+			return seed / 2 ** 31
+		}
+
+		for (let round = 0; round < 60; round++) {
+			const count = 1 + Math.floor(random() * 300)
+			const starts: number[] = []
+			const counts: number[] = []
+			const sizes: number[] = []
+			const flags: number[] = []
+			const truth = Array.from({ length: count + 20 }, () => 20)
+
+			for (let index = 0; index < count + 20;) {
+				if (random() < 0.2) {
+					const length = 1 + Math.floor(random() * 40)
+					const size = Math.round(random() * 60)
+					const hidden = random() < 0.4
+
+					starts.push(index)
+					counts.push(length)
+					sizes.push(size)
+					flags.push(hidden ? AxisFlag.HIDDEN : 0)
+
+					for (let k = index; k < index + length && k < truth.length; k++) truth[k] = hidden ? 0 : size
+
+					index += length
+				} else {
+					index++
+				}
+			}
+
+			const overrides = new Map<number, number>()
+
+			for (let k = 0; k < 4; k++) {
+				const index = Math.floor(random() * count)
+				const px = random() < 0.3 ? Number.NaN : Math.round(random() * 50)
+
+				overrides.set(index, px)
+			}
+
+			for (const [index, px] of overrides) truth[index] = Number.isNaN(px) ? 20 : px
+
+			const layout: SheetAxisLayout = {
+				defaultSize: 20,
+				indices: Uint32Array.from(starts),
+				sizes: Float32Array.from(sizes),
+				styles: new Uint32Array(starts.length),
+				flags: Uint16Array.from(flags),
+				counts: Uint32Array.from(counts)
+			}
+			const axis = createGridAxis(layout, count, 1, overrides)
+			const expected = truth.slice(0, count)
+
+			expect(axis.total).toBe(bruteOffset(expected, count))
+
+			for (let index = 0; index <= count; index++) expect(axis.offset(index)).toBe(bruteOffset(expected, index))
+			for (let index = 0; index < count; index++) expect(axis.size(index)).toBe(expected[index])
+			for (let position = 0; position < axis.total; position += 3)
+				expect(axis.indexAt(position)).toBe(bruteIndexAt(expected, position))
+
+			let lastShown = count - 1
+
+			while (lastShown >= 0 && expected[lastShown] === 0) lastShown--
+
+			expect(axis.lastShown).toBe(lastShown)
+		}
+	})
+
+	it("places drawings and finds row styles on runs as on the same indices one by one", () => {
+		const runs: SheetAxisLayout = {
+			defaultSize: 20,
+			indices: Uint32Array.of(3, 10),
+			sizes: Float32Array.of(35, 50),
+			styles: Uint32Array.of(4, 5),
+			flags: Uint16Array.of(0, AxisFlag.HIDDEN),
+			counts: Uint32Array.of(4, 3)
+		}
+		const single = axisLayout(20, [
+			[3, 35],
+			[4, 35],
+			[5, 35],
+			[6, 35],
+			[10, 50, AxisFlag.HIDDEN],
+			[11, 50, AxisFlag.HIDDEN],
+			[12, 50, AxisFlag.HIDDEN]
+		])
+		const a = axisPositions(runs)
+		const b = axisPositions(single)
+
+		for (let index = 0; index < 20; index++) {
+			expect(a.start(index)).toBe(b.start(index))
+			expect(a.size(index)).toBe(b.size(index))
+		}
+
+		expect(axisEntry(runs, 5)).toEqual({ style: 4, flags: 0 })
+		expect(axisEntry(runs, 7)).toBeNull()
+		expect(axisEntry(runs, 12)).toEqual({ style: 5, flags: AxisFlag.HIDDEN })
+	})
+
+	it("holds hidden rows to the grid's end as one entry", () => {
+		const layout: SheetAxisLayout = {
+			...axisLayout(20, [[10, 0, AxisFlag.HIDDEN]]),
+			counts: Uint32Array.of(SHEET_MAX_ROWS - 10)
+		}
+		const axis = createGridAxis(layout, SHEET_MAX_ROWS, 1)
+
+		expect(axis.total).toBe(200)
+		expect(axis.lastShown).toBe(9)
+		expect(axis.indexAt(199)).toBe(9)
+		expect(axis.hidden(SHEET_MAX_ROWS - 1)).toBe(true)
 	})
 
 	it("holds a million rows in memory for its exceptions alone and finds the last row", () => {

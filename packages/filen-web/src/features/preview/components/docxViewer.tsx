@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
 import { isCompoundFile } from "@filen/office/core/cfb"
 import { bytesSource, type ByteSource } from "@filen/office/core/opc"
 import {
@@ -7,6 +8,7 @@ import {
 	markupInfo,
 	type DocxEncryptionRefusal,
 	type DocxHost,
+	type DocxLegacyRefusal,
 	type DocxLockedDocument,
 	type DocxMarkupMode,
 	type DocxProtectedOpen
@@ -22,20 +24,29 @@ import {
 	type DocxSource
 } from "@filen/office/react/docx"
 import "@filen/office/css/docx.css"
-import { isLinkedEmbedItem, type DriveItem } from "@/features/drive/lib/item"
+import { recordContentVerdict } from "@/features/drive/lib/contentVerdicts"
+import { uploadConvertedCopy } from "@/features/drive/lib/convertedCopy"
+import { driveItemMime, isLinkedEmbedItem, type DriveItem } from "@/features/drive/lib/item"
+import { itemFileKind } from "@/features/drive/lib/preview.logic"
+import { TextViewer } from "@/features/preview/components/textViewer"
 import type { DriveVariant } from "@/features/drive/lib/preferences"
 import { usePreviewBytes } from "@/features/preview/hooks/usePreviewBytes"
 import { usePreviewAccessMode, usePreviewByteSource } from "@/features/preview/lib/accessMode"
-import { DOCX_FONT_URLS, docxHost, docxProtection, prewarmDocxWorker } from "@/features/preview/lib/docxEngine"
+import { DOCX_FONT_URLS, docxHost, docxLegacy, docxProtection, prewarmDocxWorker } from "@/features/preview/lib/docxEngine"
 import {
 	BALLOON_COLUMN_WIDTH,
 	balloonsFit,
 	hasBalloons,
+	docxConversionKey,
 	docxErrorKey,
 	docxFailure,
+	docxFormatOf,
 	docxRefusalKey,
 	docxSessionKey,
+	legacyNeedsPassword,
+	legacyRefusalKey,
 	viewOnlyReasons,
+	type DocxConversionKey,
 	type DocxGateReason,
 	type DocxOpenContext,
 	type DocxSessionKey
@@ -44,10 +55,15 @@ import { DocxAnnotationLayer, type DocxBalloonKey } from "@/features/preview/com
 import { DocxPreviewFallback } from "@/features/preview/components/docxPreviewFallback"
 import { DocxPasswordGate, type PasswordVerdict } from "@/features/preview/components/docxPasswordPrompt"
 import { DocxEditView, DocxProtectedEditView, type DocxSaveSource } from "@/features/preview/components/docxEditor"
-import { DocxToolbar, type PasswordIntegrity } from "@/features/preview/components/docxToolbar"
+import { DocxFileMenu } from "@/features/preview/components/docxFileMenu"
+import { useDocxPdfExport, type DocxPdfExportTarget } from "@/features/preview/hooks/useDocxPdfExport"
+import { DocxToolbar, type DocxLegacyInfo, type PasswordIntegrity } from "@/features/preview/components/docxToolbar"
+import { RtfDocument } from "@/features/preview/components/rtfDocument"
 import { useTrustedLinkGate } from "@/lib/trustedLinks/useTrustedLinkGate"
 import { LoadingState } from "@/components/loadingState"
+import { ConfirmDialog } from "@/components/dialogs/confirmDialog"
 import { PreviewDownloadButton, PreviewErrorState, PreviewGate, PreviewLoading } from "@/features/preview/components/previewErrorState"
+import { errorLabel } from "@/lib/i18n/errorLabel"
 import { isAnyDialogOpen } from "@/lib/keymap/dialogGuard"
 import { IN_EDITORS, useAction } from "@/lib/keymap/useAction"
 import { isSafeAbsoluteHref } from "@/lib/safeUrl"
@@ -63,6 +79,10 @@ export interface DocxViewerProps {
 	// The overlay's editing side for a file the user may edit (only with editing built in): the document
 	// opens in the editor when the file can be saved as it mounts.
 	editing?: DocxEditingProps
+	// A converted copy may be written beside this file (a Word 97–2003 document offers Save as .docx).
+	canSaveCopy?: boolean
+	// Shows another file in this preview's place: the .docx a Word 97–2003 document was just saved as.
+	onOpenFile?: (item: DriveItem) => void
 }
 
 export interface DocxEditingProps {
@@ -94,14 +114,16 @@ function fileContent(bytes: Uint8Array): DocxContent {
 }
 
 // Tracked changes are laid out as the markup mode shows them (a new layout per view).
-function sourceFor(content: DocxContent, mode: DocxMarkupMode): DocxSource {
-	return { host: content.host, bytes: content.bytes, options: { fontUrls: DOCX_FONT_URLS, view: markupInfo(mode).view } }
+function sourceFor(content: DocxContent, mode: DocxMarkupMode, format: "docx" | "odt"): DocxSource {
+	return { host: content.host, bytes: content.bytes, options: { fontUrls: DOCX_FONT_URLS, view: markupInfo(mode).view, format } }
 }
 
-export function DocxViewer({ item, alt, variant, editing }: DocxViewerProps) {
+export function DocxViewer({ item, alt, variant, editing, canSaveCopy, onOpenFile }: DocxViewerProps) {
 	// Editing or viewing is decided as the file mounts. The editor keeps the document it opened across the
 	// user's own saves (each makes the file a new version under a new uuid): its bytes stay the ones it read.
-	const [edit] = useState(() => editing?.writable === true)
+	const format = docxFormatOf(alt)
+	// An RTF document edits as the package it reads as and saves as RTF (rtfDocument.tsx).
+	const [edit] = useState(() => editing?.writable === true && (format === "docx" || format === "rtf"))
 	const [openedItem] = useState(item)
 	const result = usePreviewBytes(edit ? openedItem : item)
 	const downloading = result.status === "pending"
@@ -118,71 +140,189 @@ export function DocxViewer({ item, alt, variant, editing }: DocxViewerProps) {
 
 	return (
 		<PreviewGate result={result}>
-			{ready => (
-				<DocxPasswordBoundary
-					bytes={ready.bytes}
-					name={alt}
-				>
-					{(content, key) => {
-						const viewer = (
-							<DocxDocumentView
-								content={content}
-								alt={alt}
-								encrypted={key?.document.integrity}
-								context={{ anon, archive, linked: isLinkedEmbedItem(item), variant }}
-							/>
-						)
+			{ready =>
+				format === "rtf" ? (
+					<RtfDocument
+						bytes={ready.bytes}
+						edit={edit && editing !== undefined}
+					>
+						{rtf => {
+							const viewer = (
+								<DocxDocumentView
+									content={{ host: rtf.host, bytes: rtf.bytes, file: null }}
+									alt={alt}
+									format="docx"
+									encrypted={undefined}
+									context={{ anon, archive, linked: isLinkedEmbedItem(item), variant }}
+								/>
+							)
 
-						if (!edit || editing === undefined) {
-							return viewer
-						}
+							return rtf.editing === undefined || editing === undefined ? (
+								viewer
+							) : (
+								<DocxEditView
+									bytes={rtf.editing.docx}
+									backend={rtf.editing.backend}
+									alt={alt}
+									writable={editing.writable}
+									renamed={editing.renamed}
+									onDirtyChange={editing.onDirtyChange}
+									saveRef={editing.saveRef}
+									onAutosave={editing.onAutosave}
+									viewer={() => viewer}
+								/>
+							)
+						}}
+					</RtfDocument>
+				) : textTemplate(item, ready.bytes) ? (
+					<DocxTemplateAsText
+						item={item}
+						alt={alt}
+						anon={anon}
+					/>
+				) : (
+					<DocxPasswordBoundary
+						bytes={ready.bytes}
+						name={alt}
+					>
+						{(content, key, conversion) => {
+							const context = { anon, archive, linked: isLinkedEmbedItem(item), variant }
 
-						const editProps = {
-							alt,
-							writable: editing.writable,
-							renamed: editing.renamed,
-							onDirtyChange: editing.onDirtyChange,
-							saveRef: editing.saveRef,
-							onAutosave: editing.onAutosave,
-							viewer: () => viewer
-						}
+							// A Word 97–2003 document is shown from its conversion, read-only.
+							if (conversion !== null) {
+								return (
+									<DocxLegacyView
+										item={item}
+										conversion={conversion}
+										canSaveCopy={canSaveCopy === true}
+										onOpenFile={onOpenFile}
+									>
+										{legacy => (
+											<DocxDocumentView
+												content={content}
+												alt={alt}
+												format="docx"
+												encrypted={undefined}
+												legacy={legacy}
+												context={context}
+											/>
+										)}
+									</DocxLegacyView>
+								)
+							}
 
-						// A password-protected document's editor takes its own copy and seals its saves with its key.
-						return key === null || content.file !== null ? (
-							<DocxEditView
-								bytes={content.file ?? ready.bytes}
-								{...editProps}
-							/>
-						) : (
-							<DocxProtectedEditView
-								document={key.document}
-								{...editProps}
-							/>
-						)
-					}}
-				</DocxPasswordBoundary>
-			)}
+							// Download as ▸ PDF: the file laid out again in the PDF worker; a protected one's password is asked and
+							// checked against the file as stored, then protects the PDF.
+							const pdf: DocxPdfExportTarget = {
+								fileName: alt,
+								source: () =>
+									content.file === null
+										? { kind: "file", bytes: ready.bytes }
+										: { kind: "file", bytes: content.file, format },
+								encryptedFile: key === null ? undefined : ready.bytes
+							}
+							const viewer = (
+								<DocxDocumentView
+									content={content}
+									alt={alt}
+									format={format}
+									encrypted={key?.document.integrity}
+									context={context}
+									pdf={pdf}
+								/>
+							)
+
+							if (!edit || editing === undefined) {
+								return viewer
+							}
+
+							const editProps = {
+								alt,
+								encryptedFile: key === null ? undefined : ready.bytes,
+								writable: editing.writable,
+								renamed: editing.renamed,
+								onDirtyChange: editing.onDirtyChange,
+								saveRef: editing.saveRef,
+								onAutosave: editing.onAutosave,
+								viewer: () => viewer
+							}
+
+							// A password-protected document's editor takes its own copy and seals its saves with its key.
+							return key === null || content.file !== null ? (
+								<DocxEditView
+									bytes={content.file ?? ready.bytes}
+									{...editProps}
+								/>
+							) : (
+								<DocxProtectedEditView
+									document={key.document}
+									{...editProps}
+								/>
+							)
+						}}
+					</DocxPasswordBoundary>
+				)
+			}
 		</PreviewGate>
+	)
+}
+
+// A `.dot` is a Word 97–2003 template or a text file (Graphviz) under the same extension: bytes that are neither a
+// compound file nor a zip package are text.
+function textTemplate(item: DriveItem, bytes: Uint8Array): boolean {
+	const kind = itemFileKind(item)
+	const zip = bytes[0] === 0x50 && bytes[1] === 0x4b
+
+	return kind?.ambiguous === true && kind.extension === "dot" && !zip && !isCompoundFile(bytes)
+}
+
+// What the read found about a `.dot`, recorded (the drive preview then shows it in the text viewer, editable as any
+// text file there); meanwhile, and where nothing swaps the viewer (a public link, an archive), the text read-only.
+function DocxTemplateAsText({ item, alt, anon }: { item: DriveItem; alt: string; anon: boolean }) {
+	const uuid = item.data.uuid
+	const name = alt
+	const mime = driveItemMime(item)
+	const size = item.data.size
+
+	useEffect(() => {
+		recordContentVerdict({ uuid, name, mime, size }, "notWordBinary", { memoryOnly: anon })
+	}, [uuid, name, mime, size, anon])
+
+	return (
+		<TextViewer
+			item={item}
+			alt={alt}
+		/>
 	)
 }
 
 // What the file is before anything is shown: a zip opens at once; a compound file is probed for a password
 // ([MS-OFFCRYPTO] §2.3.4) in the docx worker: refused (rights management, an unsupported scheme, damage), locked,
-// or not encrypted at all (a legacy .doc, which the engine reports).
+// or not an encrypted package at all: a Word 97–2003 document, converted in the docx worker (or refused with the
+// reader's reason) and shown from the package it became. A Word 97–2003 document with a password to open asks for it
+// (legacyLocked) and is converted again with it.
 type Protection =
 	| { readonly kind: "probing" }
-	| { readonly kind: "open"; readonly content: DocxContent; readonly key: DocxSessionKey | null }
+	| { readonly kind: "converting" }
+	| {
+			readonly kind: "open"
+			readonly content: DocxContent
+			readonly key: DocxSessionKey | null
+			readonly conversion: DocxConversionKey | null
+	  }
 	| { readonly kind: "refused"; readonly reason: DocxEncryptionRefusal }
+	| { readonly kind: "legacyRefused"; readonly refusal: DocxLegacyRefusal }
+	| { readonly kind: "legacyLocked" }
 	| { readonly kind: "locked"; readonly locked: DocxLockedDocument }
 
 function initial(bytes: Uint8Array): Protection {
-	return isCompoundFile(bytes) ? { kind: "probing" } : { kind: "open", content: fileContent(bytes), key: null }
+	return isCompoundFile(bytes) ? { kind: "probing" } : { kind: "open", content: fileContent(bytes), key: null, conversion: null }
 }
 
-function protectionOf(bytes: Uint8Array, opened: Exclude<DocxProtectedOpen, { kind: "aborted" }>): Protection {
+function protectionOf(opened: Exclude<DocxProtectedOpen, { kind: "aborted" }>): Protection {
 	switch (opened.kind) {
 		case "plain":
-			return { kind: "open", content: fileContent(bytes), key: null }
+			return { kind: "converting" }
 		case "refused":
 			return { kind: "refused", reason: opened.reason }
 		case "needsPassword":
@@ -201,13 +341,15 @@ function DocxPasswordBoundary({
 }: {
 	bytes: Uint8Array
 	name: string
-	children: (content: DocxContent, key: DocxSessionKey | null) => ReactNode
+	children: (content: DocxContent, key: DocxSessionKey | null, conversion: DocxConversionKey | null) => ReactNode
 }) {
 	const { t } = useTranslation("preview")
 	const [state, setState] = useState(() => ({ bytes, protection: initial(bytes) }))
 	// Every document this preview unlocked and still holds: released when it unmounts, also one whose state
 	// never committed.
 	const [keys] = useState(() => new Set<DocxSessionKey>())
+	// Every converted Word 97–2003 document this preview holds, likewise.
+	const [conversions] = useState(() => new Set<DocxConversionKey>())
 	let current = state
 
 	if (state.bytes !== bytes) {
@@ -217,7 +359,9 @@ function DocxPasswordBoundary({
 
 	const { protection } = current
 	const probing = protection.kind === "probing"
+	const converting = protection.kind === "converting"
 	const key = protection.kind === "open" ? protection.key : null
+	const conversion = protection.kind === "open" ? protection.conversion : null
 	const locked = protection.kind === "locked" ? protection.locked : null
 
 	useEffect(() => {
@@ -237,7 +381,7 @@ function DocxPasswordBoundary({
 					return
 				}
 
-				const next = protectionOf(bytes, opened)
+				const next = protectionOf(opened)
 
 				setState(previous => (previous.bytes === bytes ? { bytes, protection: next } : previous))
 			},
@@ -248,7 +392,7 @@ function DocxPasswordBoundary({
 				if (!controller.signal.aborted) {
 					setState(previous =>
 						previous.bytes === bytes
-							? { bytes, protection: { kind: "open", content: fileContent(bytes), key: null } }
+							? { bytes, protection: { kind: "open", content: fileContent(bytes), key: null, conversion: null } }
 							: previous
 					)
 				}
@@ -259,6 +403,84 @@ function DocxPasswordBoundary({
 			controller.abort()
 		}
 	}, [bytes, probing])
+
+	// A compound file that is not an encrypted package: converted where the engine runs; the file's bytes are read
+	// once and the package it becomes is held there.
+	useEffect(() => {
+		if (!converting) {
+			return
+		}
+
+		const controller = new AbortController()
+
+		docxLegacy.open(bytesSource(bytes), { signal: controller.signal }).then(
+			opened => {
+				if (opened.kind === "aborted" || controller.signal.aborted) {
+					if (opened.kind === "converted") {
+						opened.document.release()
+					}
+
+					return
+				}
+
+				if (opened.kind === "refused") {
+					const next: Protection = legacyNeedsPassword(opened.refusal)
+						? { kind: "legacyLocked" }
+						: { kind: "legacyRefused", refusal: opened.refusal }
+
+					setState(previous => (previous.bytes === bytes ? { bytes, protection: next } : previous))
+
+					return
+				}
+
+				const held = docxConversionKey(opened.document)
+				const content: DocxContent = { host: opened.document.host, bytes: opened.document.bytes, file: null }
+
+				conversions.add(held)
+				setState(previous =>
+					previous.bytes === bytes ? { bytes, protection: { kind: "open", content, key: null, conversion: held } } : previous
+				)
+			},
+			(error: unknown) => {
+				log.error("docx", "converting a Word 97–2003 document failed", error)
+
+				if (!controller.signal.aborted) {
+					setState(previous =>
+						previous.bytes === bytes
+							? { bytes, protection: { kind: "legacyRefused", refusal: { reason: "corrupt" } } }
+							: previous
+					)
+				}
+			}
+		)
+
+		return () => {
+			controller.abort()
+		}
+	}, [bytes, converting, conversions])
+
+	useEffect(() => {
+		if (conversion === null) {
+			return
+		}
+
+		conversions.add(conversion)
+		conversion.hold()
+
+		return () => {
+			conversions.delete(conversion)
+			conversion.drop()
+		}
+	}, [conversion, conversions])
+
+	useEffect(
+		() => () => {
+			for (const held of conversions) {
+				held.drop()
+			}
+		},
+		[conversions]
+	)
 
 	// A locked file the prompt left without unlocking is dropped where the worker holds it, a turn later (a
 	// remount in the same turn, React's Strict Mode check, keeps it).
@@ -306,7 +528,15 @@ function DocxPasswordBoundary({
 
 	switch (protection.kind) {
 		case "probing":
+		case "converting":
 			return <PreviewLoading />
+		case "legacyRefused":
+			return (
+				<PreviewErrorState
+					message={t(legacyRefusalKey(protection.refusal))}
+					action={<PreviewDownloadButton />}
+				/>
+			)
 		case "refused":
 			return (
 				<PreviewErrorState
@@ -314,6 +544,63 @@ function DocxPasswordBoundary({
 					action={<PreviewDownloadButton />}
 				/>
 			)
+		case "legacyLocked": {
+			// Each try converts the file again with the password in the worker; nothing is kept between tries.
+			const verify = async (password: string, signal: AbortSignal): Promise<PasswordVerdict> => {
+				const opened = await docxLegacy.open(bytesSource(bytes), { signal, password }).catch((error: unknown) => {
+					log.error("docx", "opening an encrypted Word 97–2003 document failed", error)
+
+					return { kind: "refused", refusal: { reason: "corrupt" } } as const
+				})
+
+				if (opened.kind === "aborted") {
+					return "aborted"
+				}
+
+				if (opened.kind === "refused") {
+					if (opened.refusal.reason === "wrongPassword") {
+						return "wrong"
+					}
+
+					// The password verified, then the file could not be read: no prompt helps.
+					setState(previous =>
+						previous.bytes === bytes ? { bytes, protection: { kind: "legacyRefused", refusal: opened.refusal } } : previous
+					)
+
+					return "aborted"
+				}
+
+				if (signal.aborted) {
+					opened.document.release()
+
+					return "aborted"
+				}
+
+				const held = docxConversionKey(opened.document)
+				const content: DocxContent = { host: opened.document.host, bytes: opened.document.bytes, file: null }
+
+				conversions.add(held)
+				setState(previous =>
+					previous.bytes === bytes ? { bytes, protection: { kind: "open", content, key: null, conversion: held } } : previous
+				)
+
+				return "accepted"
+			}
+
+			return (
+				<DocxPasswordGate
+					title={t("previewDocxPasswordTitle")}
+					body={t("previewDocxPasswordBody", { name })}
+					wrongMessage={t("previewDocxPasswordWrong")}
+					label={t("previewDocxPasswordLabel")}
+					submitLabel={t("previewDocxPasswordSubmit")}
+					progressLabel={t("previewDocxPasswordUnlocking")}
+					message={t("previewDocxNeedsPassword")}
+					enterLabel={t("previewDocxEnterPassword")}
+					verify={verify}
+				/>
+			)
+		}
 		case "locked": {
 			const lockedDocument = protection.locked
 			const verify = async (password: string, signal: AbortSignal): Promise<PasswordVerdict> => {
@@ -348,7 +635,7 @@ function DocxPasswordBoundary({
 
 				keys.add(unlocked)
 				setState(previous =>
-					previous.bytes === bytes ? { bytes, protection: { kind: "open", content, key: unlocked } } : previous
+					previous.bytes === bytes ? { bytes, protection: { kind: "open", content, key: unlocked, conversion: null } } : previous
 				)
 
 				return "accepted"
@@ -369,7 +656,7 @@ function DocxPasswordBoundary({
 			)
 		}
 		case "open":
-			return children(protection.content, key)
+			return children(protection.content, key, conversion)
 	}
 }
 
@@ -384,37 +671,137 @@ interface Opened {
 	source: DocxSource
 }
 
+// A Word 97–2003 document shown from its conversion, with Save as .docx: a copy of the converted package uploaded
+// beside the file (the existing copy-name rule), then shown in this preview's place.
+function DocxLegacyView({
+	item,
+	conversion,
+	canSaveCopy,
+	onOpenFile,
+	children
+}: {
+	item: DriveItem
+	conversion: DocxConversionKey
+	canSaveCopy: boolean
+	onOpenFile: ((item: DriveItem) => void) | undefined
+	children: (legacy: DocxLegacyInfo) => ReactNode
+}) {
+	const { t } = useTranslation(["preview", "common"])
+	const [asked, setAsked] = useState(false)
+	const [saving, setSaving] = useState(false)
+	const save = async (): Promise<void> => {
+		const bytes = await conversion.document.take().catch((e: unknown) => {
+			log.error("docx", "taking the converted package failed", e)
+
+			return null
+		})
+
+		if (bytes === null) {
+			toast.error(t("previewDocxSaveAsDocxFailed"))
+
+			return
+		}
+
+		const outcome = await uploadConvertedCopy(item, bytes, "docx").catch((e: unknown) => {
+			log.error("docx", "uploading the .docx copy failed", e)
+
+			return { status: "error", dto: null } as const
+		})
+
+		if (outcome.status === "error") {
+			toast.error(outcome.dto === null ? t("previewDocxSaveAsDocxFailed") : errorLabel(outcome.dto))
+
+			return
+		}
+
+		toast.success(t("previewDocxSavedAsDocx", { name: outcome.name }))
+		onOpenFile?.(outcome.item)
+	}
+
+	return (
+		<>
+			{children({
+				notConverted: conversion.document.notConverted,
+				onSaveAs: canSaveCopy
+					? () => {
+							setAsked(true)
+						}
+					: undefined
+			})}
+			{canSaveCopy ? (
+				<ConfirmDialog
+					open={asked}
+					pending={saving}
+					title={t("previewDocxSaveAsDocxTitle")}
+					body={[
+						t("previewDocxSaveAsDocxBody"),
+						...(conversion.document.decrypted ? [t("previewDocxSaveAsDocxUnencrypted")] : []),
+						...(conversion.document.notConverted.some(item => item.kind === "passwordProtection")
+							? [t("previewDocxSaveAsDocxNoPassword")]
+							: []),
+						...(conversion.document.notConverted.some(item => item.kind === "macros")
+							? [t("previewDocxSaveAsDocxNoMacros")]
+							: []),
+						...(conversion.document.notConverted.some(item => item.kind === "autoText")
+							? [t("previewDocxSaveAsDocxNoAutoText")]
+							: [])
+					].join(" ")}
+					confirmLabel={t("previewDocxSaveAsDocx")}
+					cancelLabel={t("common:cancel")}
+					onOpenChange={setAsked}
+					onConfirm={() => {
+						setSaving(true)
+						void save().finally(() => {
+							setSaving(false)
+							setAsked(false)
+						})
+					}}
+				/>
+			) : null}
+		</>
+	)
+}
+
 function DocxDocumentView({
 	content,
 	alt,
+	format,
 	encrypted,
-	context
+	legacy,
+	context,
+	pdf
 }: {
 	content: DocxContent
 	alt: string
+	format: "docx" | "odt"
 	// Opened with its password, and whether its integrity was verified (the badge says so).
 	encrypted: PasswordIntegrity | undefined
+	// Shown from a Word 97–2003 document's conversion.
+	legacy?: DocxLegacyInfo
 	context: DocxOpenContext
+	// Download as ▸ PDF (absent: not offered).
+	pdf?: DocxPdfExportTarget
 }) {
 	const { t } = useTranslation("preview")
+	const pdfExport = useDocxPdfExport(pdf ?? null)
 	// A retry, or a markup mode laid out differently, opens the same content again under a fresh source (a new
 	// document on the shared worker).
 	const [opened, setOpened] = useState<Opened>(() => ({
 		content,
 		mode: DEFAULT_MARKUP_MODE,
-		source: sourceFor(content, DEFAULT_MARKUP_MODE)
+		source: sourceFor(content, DEFAULT_MARKUP_MODE, format)
 	}))
 	let current = opened
 
 	if (opened.content !== content) {
-		current = { content, mode: DEFAULT_MARKUP_MODE, source: sourceFor(content, DEFAULT_MARKUP_MODE) }
+		current = { content, mode: DEFAULT_MARKUP_MODE, source: sourceFor(content, DEFAULT_MARKUP_MODE, format) }
 		setOpened(current)
 	}
 
 	const document = useDocxDocument(current.source)
 	const failure = docxFailure(document, content.bytes.size)
 	// A decrypted package is not on the page: docx-preview has nothing to read.
-	const file = failure?.fallback === true ? content.file : null
+	const file = failure?.fallback === true && format === "docx" ? content.file : null
 	const detail = failure?.detail
 
 	useEffect(() => {
@@ -445,7 +832,7 @@ function DocxDocumentView({
 			<PreviewErrorState
 				message={t(docxErrorKey(document.error?.reason))}
 				onRetry={() => {
-					setOpened({ content, mode: current.mode, source: sourceFor(content, current.mode) })
+					setOpened({ content, mode: current.mode, source: sourceFor(content, current.mode, format) })
 				}}
 			/>
 		)
@@ -465,11 +852,14 @@ function DocxDocumentView({
 				setOpened(
 					markupInfo(mode).view === markupInfo(current.mode).view
 						? { ...current, mode }
-						: { content, mode, source: sourceFor(content, mode) }
+						: { content, mode, source: sourceFor(content, mode, format) }
 				)
 			}}
 			encrypted={encrypted}
+			legacy={legacy}
 			context={context}
+			fileMenu={pdfExport.onDownloadPdf === undefined ? undefined : <DocxFileMenu onDownloadPdf={pdfExport.onDownloadPdf} />}
+			prompt={pdfExport.prompt}
 		/>
 	)
 }
@@ -489,14 +879,21 @@ function DocxPageList({
 	mode,
 	onModeChange,
 	encrypted,
-	context
+	legacy,
+	context,
+	fileMenu,
+	prompt
 }: {
 	document: DocxDocument
 	alt: string
 	mode: DocxMarkupMode
 	onModeChange: (mode: DocxMarkupMode) => void
 	encrypted: PasswordIntegrity | undefined
+	legacy: DocxLegacyInfo | undefined
 	context: DocxOpenContext
+	// The File menu (Download as) and the password prompt a protected document's PDF asks first.
+	fileMenu: ReactNode
+	prompt: ReactNode
 }) {
 	const { t } = useTranslation("preview")
 	const [wrapper, setWrapper] = useState<HTMLDivElement | null>(null)
@@ -627,8 +1024,10 @@ function DocxPageList({
 
 					onModeChange(next)
 				}}
-				viewOnly={facts === null ? [] : viewOnlyReasons(facts.gate, context)}
+				viewOnly={facts === null || legacy !== undefined ? [] : viewOnlyReasons(facts.gate, context)}
 				encrypted={encrypted}
+				fileMenu={fileMenu}
+				legacy={legacy}
 				findFocus={findFocus}
 				onFindClosed={() => {
 					wrapper?.querySelector<HTMLElement>(".fo-docx-pages")?.focus()
@@ -670,6 +1069,7 @@ function DocxPageList({
 				) : null}
 			</div>
 			{linkGate.dialog}
+			{prompt}
 		</div>
 	)
 }

@@ -1,7 +1,7 @@
 import { Fragment, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import { AxisFlag, resetTargets, type LayerKey, type SheetAxis, type SheetAxisLayout, type SheetCommand } from "@filen/office/core/sheet"
-import { celllessSheet, type SheetGridState } from "@filen/office/react/sheet"
+import { axisEntry, celllessSheet, type SheetGridState } from "@filen/office/react/sheet"
 import {
 	ContextMenu,
 	ContextMenuContent,
@@ -34,16 +34,9 @@ const HIDE_ITEMS = [
 	{ axis: "cols", hide: "previewSheetHideColumns", unhide: "previewSheetUnhideColumns" }
 ] as const
 
+// An entry may stand for a run of rows or columns: looked up, never listed one by one.
 function hiddenIn(layout: SheetAxisLayout): (index: number) => boolean {
-	const hidden = new Set<number>()
-
-	layout.flags.forEach((flags, k) => {
-		if ((flags & AxisFlag.HIDDEN) !== 0) {
-			hidden.add(layout.indices[k] ?? -1)
-		}
-	})
-
-	return index => hidden.has(index)
+	return index => ((axisEntry(layout, index)?.flags ?? 0) & AxisFlag.HIDDEN) !== 0
 }
 
 // The grid's menu: rows and columns inserted, deleted, hidden and shown, contents cleared, panes frozen, cells merged,

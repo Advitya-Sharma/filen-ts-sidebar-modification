@@ -1,5 +1,5 @@
 import { asDirectoryOrFile, type DriveItem } from "@/features/drive/lib/item"
-import type { ContentVerdict } from "@filen/shared"
+import type { FileVerdict } from "@filen/shared"
 import { itemFileKind, previewType, type PreviewCategory } from "@/features/drive/lib/preview.logic"
 
 // Mobile parity (features/photos/utils.ts's own isPhotoGridItem): keep only file-kind items with
@@ -18,7 +18,7 @@ import { itemFileKind, previewType, type PreviewCategory } from "@/features/driv
 // previewType's fallback.
 //
 // `verdict` as previewType takes it: the store's when absent, none when null.
-export function isPhotoItem(item: DriveItem, verdict?: ContentVerdict | null): boolean {
+export function isPhotoItem(item: DriveItem, verdict?: FileVerdict | null): boolean {
 	const base = asDirectoryOrFile(item)
 
 	if (base.type !== "file" || base.data.decryptedMeta === null) {

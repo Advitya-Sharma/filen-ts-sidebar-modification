@@ -15,6 +15,7 @@ vi.mock("@/features/drive/lib/download", async importOriginal => {
 
 import {
 	isTextEditingTarget,
+	previewDownloadable,
 	previewMenuHiddenActionIds,
 	previewNavigationUnmountsOverlay,
 	resolveUnsavedConfirm,
@@ -246,5 +247,13 @@ describe("slotPinSource", () => {
 	it("takes a probe-waiting pin again once its verdict lands, by the item as pinned", () => {
 		expect(slotPinSource(pinned(true), { documentKey: "doc", item: "renamed", verdict: undefined })).toBeNull()
 		expect(slotPinSource(pinned(true), { documentKey: "doc", item: "renamed", verdict: "transportStream" })).toBe("as pinned")
+	})
+})
+
+describe("what the preview lets be downloaded", () => {
+	it("offers a file's bytes (Download, PDF, CSV) only where it may be downloaded and never in the trash", () => {
+		expect(previewDownloadable(true, "drive")).toBe(true)
+		expect(previewDownloadable(false, "drive")).toBe(false)
+		expect(previewDownloadable(true, "trash")).toBe(false)
 	})
 })

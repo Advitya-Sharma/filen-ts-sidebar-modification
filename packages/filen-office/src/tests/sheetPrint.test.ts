@@ -303,7 +303,7 @@ const PRINTED: Fixture = {
 }
 
 describe("print settings in a session", () => {
-	it("answers the rows at the heights the file stores, built once per version of the session", async () => {
+	it("answers the rows at the heights the file stores, each answer owning its buffers (a worker transfers them)", async () => {
 		const { session } = await open({
 			sheets: [
 				{
@@ -318,10 +318,16 @@ describe("print settings in a session", () => {
 		expect(Array.from(rows?.indices ?? [])).toEqual([1, 2])
 		expect(rows?.sizes[0]).toBeCloseTo(17.067, 3)
 		expect(Array.from(rows?.flags ?? [])).toEqual([0, 1])
-		expect(await session.query("print.rows", { sheet: 0 })).toBe(rows)
+		const again = await session.query("print.rows", { sheet: 0 })
 
-		changeOf(await session.command({ type: "cells.set", sheet: 0, cells: cells([[5, 0, "4"]]) }))
-		expect(await session.query("print.rows", { sheet: 0 })).not.toBe(rows)
+		expect(again).toEqual(rows)
+		expect(again?.indices.buffer).not.toBe(rows?.indices.buffer)
+
+		changeOf(await session.command({ type: "cells.set", sheet: 0, cells: cells([[1, 0, "4"]]) }))
+		changeOf(
+			await session.command({ type: "axis.resize", sheet: 0, axis: "rows", indices: Uint32Array.of(3), sizes: Float32Array.of(40) })
+		)
+		expect(Array.from((await session.query("print.rows", { sheet: 0 }))?.indices ?? [])).toEqual([1, 2, 3])
 	})
 
 	it("builds the rows in slices, giving the host a turn between them", async () => {

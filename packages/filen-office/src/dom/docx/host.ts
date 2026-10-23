@@ -2,8 +2,12 @@ import { bytesSource, type ByteSource } from "../../core/opc/index"
 import type { OfficeKeyTransfer } from "../encryption/webCrypto"
 import { DocxEngine, type DocxEngineServices } from "./engine"
 import type { DocxAnnotations } from "./annotations"
+import { docxLegacyServer, type DocxConvertAnswer, type DocxLegacy, type DocxLegacyOpen, type DocxLegacyOptions } from "./legacy"
 import { heldSource, type DocxDocumentUnlock, type DocxProtectedOpen, type DocxProtection, type DocxProtectionOptions } from "./protection"
 import { docxProtectionServer, type DocxProtectVerdict, type DocxUnlockAnswer } from "./protectionWorker"
+import { DocxRtfRefusal, type DocxRtf, type DocxRtfEdits, type DocxRtfOpen, type RtfLockedBlock } from "./rtf"
+import { RtfAborted } from "../../core/rtf/write/writer"
+import { docxRtfServer, type DocxRtfOpened, type DocxRtfWritten } from "./rtfWorker"
 import type { DocxEvent, DocxFindOptions, DocxSessionApi, DocxLocation, DocxMedia, DocxObjectData, DocxOpenOptions } from "./protocol"
 
 // Two ways to run the engine behind the same DocxSessionApi: in a worker (web), talking over a small
@@ -42,6 +46,13 @@ export function macrotaskYield(): () => Promise<void> {
 		waiting.shift()?.()
 	}
 
+	// Node keeps a listening port's process alive; nothing here should.
+	for (const end of [channel.port1, channel.port2]) {
+		const unref: unknown = Reflect.get(end, "unref")
+
+		if (typeof unref === "function") Reflect.apply(unref, end, [])
+	}
+
 	return () =>
 		new Promise<void>(resolve => {
 			waiting.push(resolve)
@@ -56,10 +67,18 @@ type Method = "objects" | "media" | "locate" | "find" | "annotations"
 // `s`: the session (one open document) a message belongs to.
 // A password-protected file (protection.ts) is a session of its own: "protect" classifies it from reads of the
 // page's bytes, "unlock" and "take" are calls on it, and an engine session opens its decrypted package with
-// `doc` (no reads from the page).
+// `doc` (no reads from the page). A Word binary document (legacy.ts) is one too: "convert" reads the page's bytes
+// once (with the password to open an encrypted one, kept for that request only), the package it becomes is held,
+// "take" copies it and engine sessions open it with `doc`. An RTF document (rtf.ts)
+// likewise: "rtf" hands the worker a copy of the file, read into its package and held with it; "rtfProve" and "rtfWrite"
+// are calls on it.
 type ToWorker =
 	| { readonly t: "open"; readonly s: number; readonly size: number; readonly options: DocxOpenOptions; readonly doc?: number }
 	| { readonly t: "protect"; readonly s: number; readonly size: number }
+	| { readonly t: "convert"; readonly s: number; readonly size: number; readonly password?: string }
+	| { readonly t: "rtf"; readonly s: number; readonly bytes: Uint8Array }
+	| { readonly t: "rtfProve"; readonly s: number; readonly id: number }
+	| { readonly t: "rtfWrite"; readonly s: number; readonly id: number; readonly edits: DocxRtfEdits }
 	| { readonly t: "unlock"; readonly s: number; readonly id: number; readonly password: string }
 	| { readonly t: "take"; readonly s: number; readonly id: number }
 	| { readonly t: "key"; readonly s: number; readonly id: number }
@@ -81,6 +100,16 @@ type FromWorker =
 	| { readonly t: "read"; readonly s: number; readonly id: number; readonly offset: number; readonly length: number }
 	| { readonly t: "result"; readonly s: number; readonly id: number; readonly value?: unknown; readonly error?: string }
 	| { readonly t: "protected"; readonly s: number; readonly verdict?: DocxProtectVerdict; readonly error?: string }
+	| { readonly t: "converted"; readonly s: number; readonly answer?: DocxConvertAnswer; readonly error?: string }
+	| { readonly t: "rtfOpened"; readonly s: number; readonly answer?: DocxRtfOpened; readonly error?: string }
+	| {
+			readonly t: "rtfProved"
+			readonly s: number
+			readonly id: number
+			readonly locked?: readonly RtfLockedBlock[]
+			readonly error?: string
+	  }
+	| { readonly t: "rtfWritten"; readonly s: number; readonly id: number; readonly answer?: DocxRtfWritten; readonly error?: string }
 	| { readonly t: "unlocked"; readonly s: number; readonly id: number; readonly answer?: DocxUnlockAnswer; readonly error?: string }
 	| {
 			readonly t: "taken"
@@ -133,7 +162,9 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 		scope.post(message, transfer)
 	}
 	const protection = docxProtectionServer()
-	// Reads of the page's bytes for a protected file being classified or unlocked.
+	const legacy = docxLegacyServer()
+	const rtf = docxRtfServer()
+	// Reads of the page's bytes for a protected file being classified or unlocked, or a Word binary file converted.
 	const protectReads = new Map<number, { reads: WorkerSession["reads"]; nextRead: number }>()
 	const pageSource = (id: number, size: number, reads: { reads: WorkerSession["reads"]; nextRead: number }): ByteSource => ({
 		size,
@@ -160,8 +191,11 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 			case "open": {
 				if (sessions.has(id) || typeof message.size !== "number") return
 
-				// An engine on a held document's decrypted package reads it here.
-				const held = typeof message.doc === "number" ? protection.plaintext(message.doc) : undefined
+				// An engine on a held document's decrypted or converted package reads it here.
+				const held =
+					typeof message.doc === "number"
+						? (protection.plaintext(message.doc) ?? legacy.package(message.doc) ?? rtf.package(message.doc))
+						: undefined
 
 				if (typeof message.doc === "number" && held === undefined) {
 					post({ t: "event", s: id, event: { type: "error", reason: "failed", message: "The document is no longer unlocked" } })
@@ -220,6 +254,71 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 
 				break
 			}
+			case "convert": {
+				if (protectReads.has(id) || sessions.has(id) || typeof message.size !== "number") return
+
+				const reads = { reads: new Map() as WorkerSession["reads"], nextRead: 1 }
+
+				protectReads.set(id, reads)
+				legacy
+					.convert(id, pageSource(id, message.size, reads), typeof message.password === "string" ? message.password : undefined)
+					.then(
+						answer => {
+							// Converted or refused, the page's bytes are not read again.
+							protectReads.delete(id)
+							post({ t: "converted", s: id, answer })
+						},
+						(error: unknown) => {
+							protectReads.delete(id)
+							legacy.close(id)
+							post({ t: "converted", s: id, error: messageOf(error) })
+						}
+					)
+
+				break
+			}
+			case "rtf": {
+				if (protectReads.has(id) || sessions.has(id) || !(message.bytes instanceof Uint8Array)) return
+
+				rtf.open(id, message.bytes).then(
+					answer => post({ t: "rtfOpened", s: id, answer }),
+					(error: unknown) => {
+						rtf.close(id)
+						post({ t: "rtfOpened", s: id, error: messageOf(error) })
+					}
+				)
+
+				break
+			}
+			case "rtfProve": {
+				const call = message.id
+
+				// Ended by the document's close: nobody waits for an answer.
+				rtf.prove(id).then(
+					locked => post({ t: "rtfProved", s: id, id: call, locked }),
+					(error: unknown) => {
+						if (!(error instanceof RtfAborted)) post({ t: "rtfProved", s: id, id: call, error: messageOf(error) })
+					}
+				)
+
+				break
+			}
+			case "rtfWrite": {
+				const call = message.id
+
+				rtf.write(id, message.edits).then(
+					answer =>
+						post(
+							{ t: "rtfWritten", s: id, id: call, answer },
+							answer.ok && bufferOf(answer.bytes) !== undefined ? [answer.bytes.buffer as ArrayBuffer] : []
+						),
+					(error: unknown) => {
+						if (!(error instanceof RtfAborted)) post({ t: "rtfWritten", s: id, id: call, error: messageOf(error) })
+					}
+				)
+
+				break
+			}
 			case "unlock": {
 				const call = message.id
 
@@ -237,17 +336,24 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 			}
 			case "take": {
 				const call = message.id
-				let bytes: Uint8Array
+				let taken: Promise<Uint8Array>
 
 				try {
-					bytes = protection.take(id)
+					taken =
+						rtf.package(id) !== undefined
+							? Promise.resolve(rtf.take(id))
+							: legacy.package(id) === undefined
+								? Promise.resolve(protection.take(id))
+								: legacy.take(id)
 				} catch (error) {
-					post({ t: "taken", s: id, id: call, error: messageOf(error) })
-
-					break
+					taken = Promise.reject(error instanceof Error ? error : new Error(String(error)))
 				}
 
-				post({ t: "taken", s: id, id: call, bytes }, bufferOf(bytes) === undefined ? [] : [bytes.buffer as ArrayBuffer])
+				taken.then(
+					bytes =>
+						post({ t: "taken", s: id, id: call, bytes }, bufferOf(bytes) === undefined ? [] : [bytes.buffer as ArrayBuffer]),
+					(error: unknown) => post({ t: "taken", s: id, id: call, error: messageOf(error) })
+				)
 
 				break
 			}
@@ -347,7 +453,7 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 
 				for (const pending of reads?.reads.values() ?? []) pending.reject(new Error("closed"))
 
-				if (protection.close(id)) break
+				if (protection.close(id) || legacy.close(id) || rtf.close(id)) break
 
 				const session = sessions.get(id)
 
@@ -375,6 +481,10 @@ export interface DocxWorkerPool {
 	readonly host: DocxHost
 	// Password-protected files, unlocked and held in the worker (protection.ts).
 	readonly protection: DocxProtection
+	// Word binary documents, converted and held in the worker (legacy.ts).
+	readonly legacy: DocxLegacy
+	// RTF documents, read, held, proved and written in the worker (rtf.ts).
+	readonly rtf: DocxRtf
 	// Starts the worker ahead of the first document (its script is parsed while the file downloads).
 	prewarm(): void
 	dispose(): void
@@ -564,9 +674,18 @@ export function docxWorkerPool(create: () => DocxWorkerLike, idleMs = 60_000): D
 		open: (source, options = {}) => openProtected(connect, () => nextSession++, scheduleIdle, openSession, source, options)
 	}
 
+	const legacy: DocxLegacy = {
+		open: (source, options = {}) => openConverted(connect, () => nextSession++, scheduleIdle, openSession, source, options)
+	}
+	const rtf: DocxRtf = {
+		open: (bytes, options = {}) => openRtf(connect, () => nextSession++, scheduleIdle, openSession, bytes, options)
+	}
+
 	return {
 		host,
 		protection,
+		legacy,
+		rtf,
 		prewarm() {
 			scheduleIdle(connect())
 		},
@@ -794,6 +913,289 @@ function openProtected(
 				}
 			},
 			(error: unknown) => {
+				close()
+
+				if (options.signal?.aborted === true) return { kind: "aborted" }
+
+				throw error
+			}
+		)
+}
+
+// The page's side of a Word binary document converted in the worker: reads of `source` answered while it converts,
+// then the held package (opened by engine sessions, copied by take()) until released.
+function openConverted(
+	connect: () => Connection,
+	nextId: () => number,
+	scheduleIdle: (connection: Connection) => void,
+	openSession: (source: ByteSource, listener: DocxListener, options: DocxOpenOptions, doc?: number) => DocxSessionApi,
+	source: ByteSource,
+	options: DocxLegacyOptions
+): Promise<DocxLegacyOpen> {
+	if (options.signal?.aborted === true) return Promise.resolve({ kind: "aborted" })
+
+	const current = connect()
+	const id = nextId()
+	const worker = current.worker
+	let closed = false
+	let nextCall = 1
+	let converting: { resolve: (answer: DocxConvertAnswer) => void; reject: (error: Error) => void } | undefined
+	const takes = new Map<number, { resolve: (bytes: Uint8Array) => void; reject: (error: Error) => void }>()
+	const end = (error: Error): void => {
+		if (closed) return
+
+		closed = true
+		current.sessions.delete(id)
+		current.failures.delete(id)
+		converting?.reject(error)
+
+		for (const pending of takes.values()) pending.reject(error)
+
+		takes.clear()
+		scheduleIdle(current)
+	}
+	const close = (): void => {
+		if (closed) return
+
+		worker.post({ t: "close", s: id } satisfies ToWorker, [])
+		end(new Error("closed"))
+	}
+
+	current.failures.set(id, () => end(new Error("The document worker failed")))
+	current.sessions.set(id, message => {
+		if (closed) return
+
+		switch (message.t) {
+			case "read":
+				source.read(message.offset, message.length).then(
+					view => {
+						if (closed) return
+
+						const copy = view.slice()
+
+						worker.post({ t: "read", s: id, id: message.id, bytes: copy } satisfies ToWorker, [copy.buffer])
+					},
+					(error: unknown) => {
+						if (!closed)
+							worker.post(
+								{
+									t: "read",
+									s: id,
+									id: message.id,
+									error: error instanceof Error ? error.message : String(error)
+								} satisfies ToWorker,
+								[]
+							)
+					}
+				)
+
+				break
+			case "converted":
+				if (message.answer === undefined) converting?.reject(new Error(message.error ?? "The conversion failed"))
+				else converting?.resolve(message.answer)
+
+				converting = undefined
+
+				break
+			case "taken": {
+				const pending = takes.get(message.id)
+
+				takes.delete(message.id)
+
+				if (message.bytes === undefined) pending?.reject(new Error(message.error ?? "The document could not be taken"))
+				else pending?.resolve(message.bytes)
+
+				break
+			}
+		}
+	})
+
+	const abort = (): void => close()
+
+	options.signal?.addEventListener?.("abort", abort)
+
+	return new Promise<DocxConvertAnswer>((resolve, reject) => {
+		converting = { resolve, reject }
+		worker.post(
+			{
+				t: "convert",
+				s: id,
+				size: source.size,
+				...(options.password === undefined ? {} : { password: options.password })
+			} satisfies ToWorker,
+			[]
+		)
+	})
+		.finally(() => options.signal?.removeEventListener?.("abort", abort))
+		.then(
+			(answer): DocxLegacyOpen => {
+				if (!answer.ok || options.signal?.aborted === true) {
+					close()
+
+					return answer.ok ? { kind: "aborted" } : { kind: "refused", refusal: answer.refusal }
+				}
+
+				return {
+					kind: "converted",
+					document: {
+						host: (held, listener, openOptions = {}) => openSession(held, listener, openOptions, id),
+						bytes: heldSource(answer.size),
+						notConverted: answer.notConverted,
+						decrypted: answer.decrypted,
+						take(takeOptions = {}) {
+							if (closed) return Promise.reject(new Error("closed"))
+							if (takeOptions.signal?.aborted === true) return Promise.reject(new Error("Aborted"))
+
+							const callId = nextCall++
+
+							return new Promise<Uint8Array>((resolve, reject) => {
+								takes.set(callId, { resolve, reject })
+								worker.post({ t: "take", s: id, id: callId } satisfies ToWorker, [])
+							})
+						},
+						release: close
+					}
+				}
+			},
+			(error: unknown): DocxLegacyOpen => {
+				close()
+
+				if (options.signal?.aborted === true) return { kind: "aborted" }
+
+				throw error
+			}
+		)
+}
+
+// The page's side of an RTF document read in the worker: the file handed over once, then the held package (opened by
+// engine sessions, copied by take()), proofs and writes as calls on it, until released.
+function openRtf(
+	connect: () => Connection,
+	nextId: () => number,
+	scheduleIdle: (connection: Connection) => void,
+	openSession: (source: ByteSource, listener: DocxListener, options: DocxOpenOptions, doc?: number) => DocxSessionApi,
+	bytes: Uint8Array,
+	options: DocxProtectionOptions
+): Promise<DocxRtfOpen> {
+	if (options.signal?.aborted === true) return Promise.resolve({ kind: "aborted" })
+
+	const current = connect()
+	const id = nextId()
+	const worker = current.worker
+	let closed = false
+	let nextCall = 1
+	let opening: { resolve: (answer: DocxRtfOpened) => void; reject: (error: Error) => void } | undefined
+	const calls = new Map<number, { resolve: (value: FromWorker) => void; reject: (error: Error) => void }>()
+	const end = (error: Error): void => {
+		if (closed) return
+
+		closed = true
+		current.sessions.delete(id)
+		current.failures.delete(id)
+		opening?.reject(error)
+
+		for (const pending of calls.values()) pending.reject(error)
+
+		calls.clear()
+		scheduleIdle(current)
+	}
+	const close = (): void => {
+		if (closed) return
+
+		worker.post({ t: "close", s: id } satisfies ToWorker, [])
+		end(new Error("closed"))
+	}
+	const call = (message: (callId: number) => ToWorker, transfer: readonly ArrayBuffer[] = []): Promise<FromWorker> => {
+		if (closed) return Promise.reject(new Error("closed"))
+
+		const callId = nextCall++
+
+		return new Promise<FromWorker>((resolve, reject) => {
+			calls.set(callId, { resolve, reject })
+			worker.post(message(callId), transfer)
+		})
+	}
+
+	current.failures.set(id, () => end(new Error("The document worker failed")))
+	current.sessions.set(id, message => {
+		if (closed) return
+
+		if (message.t === "rtfOpened") {
+			if (message.answer === undefined) opening?.reject(new Error(message.error ?? "The RTF document could not be read"))
+			else opening?.resolve(message.answer)
+
+			opening = undefined
+
+			return
+		}
+
+		if (message.t === "taken" || message.t === "rtfProved" || message.t === "rtfWritten") {
+			const pending = calls.get(message.id)
+
+			calls.delete(message.id)
+			pending?.resolve(message)
+		}
+	})
+
+	const abort = (): void => close()
+
+	options.signal?.addEventListener?.("abort", abort)
+
+	// The file goes as a copy: the page's buffer stays with the preview cache.
+	const copy = bytes.slice()
+
+	return new Promise<DocxRtfOpened>((resolve, reject) => {
+		opening = { resolve, reject }
+		worker.post({ t: "rtf", s: id, bytes: copy } satisfies ToWorker, [copy.buffer])
+	})
+		.finally(() => options.signal?.removeEventListener?.("abort", abort))
+		.then(
+			(answer): DocxRtfOpen => {
+				if (!answer.ok || options.signal?.aborted === true) {
+					close()
+
+					return answer.ok || !answer.notRtf ? { kind: "aborted" } : { kind: "notRtf" }
+				}
+
+				return {
+					kind: "opened",
+					document: {
+						host: (held, listener, openOptions = {}) => openSession(held, listener, openOptions, id),
+						bytes: heldSource(answer.size),
+						async take() {
+							const reply = await call(callId => ({ t: "take", s: id, id: callId }))
+
+							if (reply.t !== "taken" || reply.bytes === undefined)
+								throw new Error(reply.t === "taken" ? (reply.error ?? "") : "The document could not be taken")
+
+							return reply.bytes
+						},
+						async prove() {
+							const reply = await call(callId => ({ t: "rtfProve", s: id, id: callId }))
+
+							if (reply.t !== "rtfProved" || reply.locked === undefined)
+								throw new Error(reply.t === "rtfProved" ? (reply.error ?? "") : "The document could not be proved")
+
+							return reply.locked
+						},
+						async write(edits) {
+							const parts = edits.parts.map(([name, part]) => [name, part.slice()] as const)
+							const reply = await call(
+								callId => ({ t: "rtfWrite", s: id, id: callId, edits: { parts, removed: edits.removed } }),
+								parts.map(([, part]) => part.buffer as ArrayBuffer)
+							)
+
+							if (reply.t !== "rtfWritten" || reply.answer === undefined)
+								throw new Error(reply.t === "rtfWritten" ? (reply.error ?? "") : "The document could not be written")
+							if (!reply.answer.ok) throw new DocxRtfRefusal(reply.answer.reason, reply.answer.message)
+
+							return reply.answer.bytes
+						},
+						release: close
+					}
+				}
+			},
+			(error: unknown): DocxRtfOpen => {
 				close()
 
 				if (options.signal?.aborted === true) return { kind: "aborted" }

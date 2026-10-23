@@ -21,7 +21,26 @@ import { formatA1, readXlsxCells, type CellScalar } from "./oracles/sheet/xlsxCe
 // timeout), and LibreOffice's hard recalculation of each (the UNO runner) must give our results for the formulas
 // whose functions we calculate. Opt-in: FILEN_OFFICE_SOFFICE=<soffice>[,<soffice>]. Profiles and copies go under
 // FILEN_OFFICE_SHEET_LO_SCRATCH (default: the system temp directory). FILEN_OFFICE_SHEET_LO_MIN (default 0.99) is
-// the share of compared formula cells that must agree.
+// the share of compared formula cells that must agree. Two cases follow Excel, not LibreOffice, and are counted apart
+// rather than compared: a cell in or reading a circular reference (LibreOffice answers Err:522, "Circular
+// reference"; Excel without iteration calculates it as 0 and warns), and a reference to a sheet the workbook lacks,
+// an error on both sides whose kind neither file format fixes (LibreOffice #NAME?, ours #REF!).
+
+// LibreOffice's error for a circular reference.
+const CIRCULAR = "Err:522"
+
+// Whether a formula names a sheet the workbook does not have ("Calc!A1", "'My data'!A1").
+function readsMissingSheet(text: string, sheets: ReadonlySet<string>): boolean {
+	const outside = text.replace(/"(?:[^"]|"")*"/g, '""')
+
+	for (const match of outside.matchAll(/(?:'((?:[^']|'')+)'|([A-Za-z_\u00C0-\uFFFF][\w.\u00C0-\uFFFF]*))!/g)) {
+		const name = (match[1]?.replaceAll("''", "'") ?? match[2] ?? "").toUpperCase()
+
+		if (!sheets.has(name)) return true
+	}
+
+	return false
+}
 
 const INSTALLS = sheetOffices()
 const UNO = unoOffice(INSTALLS)
@@ -187,6 +206,8 @@ describe.skipIf(INSTALLS.length === 0)("LibreOffice on edited saves", () => {
 		const byFunction = new Map<string, number>()
 		let compared = 0
 		let matched = 0
+		let circular = 0
+		let missingSheet = 0
 
 		try {
 			for (const save of saves) {
@@ -199,6 +220,7 @@ describe.skipIf(INSTALLS.length === 0)("LibreOffice on edited saves", () => {
 				if (result.calculated !== true) continue
 
 				const read = await readXlsxCells(bytes, cell => cell.formula !== undefined)
+				const names = new Set(read.sheets.map(sheet => sheet.name.toUpperCase()))
 
 				for (const sheet of read.sheets) {
 					const theirs = unoSheetByName(result.before ?? { sheets: [], names: [] }, sheet.name)
@@ -225,6 +247,16 @@ describe.skipIf(INSTALLS.length === 0)("LibreOffice on edited saves", () => {
 						const ourValue = ours.get(key)
 						const actual = ourValue ?? { type: "n" as const, value: 0 }
 
+						if (expected.type === "e" && expected.value === CIRCULAR) {
+							circular++
+							continue
+						}
+
+						if (expected.type === "e" && actual.type === "e" && readsMissingSheet(text, names)) {
+							missingSheet++
+							continue
+						}
+
 						compared++
 
 						const reason = compareCached(expected, actual)
@@ -249,6 +281,7 @@ describe.skipIf(INSTALLS.length === 0)("LibreOffice on edited saves", () => {
 
 		console.log(
 			`sheet-uno ${UNO?.name}: ${saves.length} saves, ${compared} formula cells compared, ${matched} agree (${(rate * 100).toFixed(2)} %); ` +
+				`left out: ${circular} in or reading a circular reference, ${missingSheet} reading a missing sheet; ` +
 				`by function ${JSON.stringify([...byFunction].sort((a, z) => z[1] - a[1]).slice(0, 20))}\n${mismatches.slice(0, 40).join("\n")}`
 		)
 		expect(compared).toBeGreaterThan(0)

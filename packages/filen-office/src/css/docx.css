@@ -35,6 +35,8 @@
 
 .fo-docx-page-content {
 	position: relative;
+	/* Objects and text box lines stack by z-index (stacking order) inside the page only. */
+	isolation: isolate;
 	color: var(--fo-auto-text, #000);
 	cursor: text;
 }
@@ -161,7 +163,11 @@
 	background-color: var(--fo-find-active-bg, rgb(249 115 22 / 0.6));
 }
 
-/* Find without the CSS Custom Highlight API: boxes over the matches. */
+/* Find without the CSS Custom Highlight API: boxes over the matches, above every stacked object. */
+.fo-docx-find-layer {
+	z-index: 2147483647;
+}
+
 .fo-docx-find {
 	position: absolute;
 	background: var(--fo-find-bg, rgb(250 204 21 / 0.45));

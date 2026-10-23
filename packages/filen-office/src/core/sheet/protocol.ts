@@ -299,7 +299,8 @@ export interface SheetStyleAppend {
 
 // --- Workbook and sheets ---
 
-export type SheetFileKind = "xlsx" | "xlsm" | "xltx" | "xltm" | "xls" | "xlt" | "csv" | "tsv" | "tab"
+// "ods" and "ots" open view-only (an OpenDocument spreadsheet and its template).
+export type SheetFileKind = "xlsx" | "xlsm" | "xltx" | "xltm" | "xls" | "xlt" | "ods" | "ots" | "csv" | "tsv" | "tab"
 
 export type SheetState = "visible" | "hidden" | "veryHidden"
 
@@ -316,7 +317,9 @@ export interface SheetSummary {
 	readonly ready: boolean
 }
 
-// The rows or columns that differ from the default (size, visibility, outline or style), ascending by index.
+// The rows or columns that differ from the default (size, visibility, outline or style), ascending by index. An
+// entry may stand for a run of indices alike (`counts`): an OpenDocument sheet's hidden rows to the grid's end cost
+// one entry, not a million.
 export interface SheetAxisLayout {
 	// Pixels at 100 %.
 	readonly defaultSize: number
@@ -327,6 +330,8 @@ export interface SheetAxisLayout {
 	readonly styles: Uint32Array
 	// AxisFlag bits.
 	readonly flags: Uint16Array
+	// How many indices from indices[k] on entry k stands for (at least 1); absent: one each. Entries never overlap.
+	readonly counts?: Uint32Array
 }
 
 export const AxisFlag = {

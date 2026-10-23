@@ -48,7 +48,13 @@ export interface LayoutCompat {
 	readonly mirrorMargins: boolean
 	readonly gutterAtTop: boolean
 	readonly evenAndOddHeaders: boolean
+	// Floats stay on the page their anchor is on (ODF 1.3 Part 3 §20.267 style:flow-with-text false), asked for by
+	// a document translated from OpenDocument: WordprocessingML lets them run off it.
+	readonly floatsOnAnchorPage: boolean
 }
+
+// The compatibility setting an OpenDocument translation writes for style:flow-with-text.
+export const ODF_STYLE_NS = "urn:oasis:names:tc:opendocument:xmlns:style:1.0"
 
 export function layoutCompat(settings: DocxSettings): LayoutCompat {
 	const legacy = new Set(settings.legacyCompat)
@@ -64,7 +70,10 @@ export function layoutCompat(settings: DocxSettings): LayoutCompat {
 		suppressTopSpacing: legacy.has("suppressTopSpacing"),
 		mirrorMargins: settings.mirrorMargins,
 		gutterAtTop: settings.gutterAtTop,
-		evenAndOddHeaders: settings.evenAndOddHeaders
+		evenAndOddHeaders: settings.evenAndOddHeaders,
+		floatsOnAnchorPage: settings.compatSettings.some(
+			setting => setting.name === "flow-with-text" && setting.uri === ODF_STYLE_NS && setting.value === "false"
+		)
 	}
 }
 

@@ -22,6 +22,7 @@ import {
 	vmlAltText,
 	type DocumentLayout,
 	type DocxModel,
+	type DocxOpenFailure,
 	type DocxPackage,
 	type DocxStyles,
 	type LayoutEdits,
@@ -55,7 +56,9 @@ import {
 	type TextMeasurer
 } from "../../core/text/index"
 import { XmlError, type XmlDocument } from "../../core/xml/index"
+import type { OdtDocxOpenResult, OdtTranslateOptions } from "../../core/odt/index"
 import { collectAnnotations } from "./annotate"
+import type { DocxPdfLive } from "./pdfSnapshot"
 import type { DocxAnnotations } from "./annotations"
 import { encryptedPackageVerdict } from "../encryption/sealedPackage"
 import { findMatches, type FindablePage } from "./find"
@@ -92,6 +95,9 @@ export interface DocxEngineServices {
 	readonly yield: () => Promise<void>
 	readonly sliceMs?: number
 	readonly now?: () => number
+	// Opens an OpenDocument text document as the package it translates to (format "odt"). A host without it
+	// (the in-thread editor) keeps the translator out of its bundle and opens no ODT.
+	readonly openOdt?: (source: ByteSource, options: OdtTranslateOptions) => Promise<OdtDocxOpenResult>
 }
 
 export type DocxEmit = (event: DocxEvent, transfer: readonly ArrayBuffer[]) => void
@@ -123,6 +129,35 @@ const MAX_MEDIA_PIXELS = 50_000_000
 const COLOR = /^[0-9A-Fa-f]{6}$/
 const NO_LINKS: readonly LinkRange[] = []
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp", "image/svg+xml"])
+
+// An ODF text document as the word-processing package it translates to. Encrypted ODF (Part 2 §4.8: Blowfish or
+// AES with a PBKDF2 key) is refused, typed; other failures read as the docx reasons nearest them.
+async function openOdt(
+	source: ByteSource,
+	slicing: Slicing,
+	services: DocxEngineServices
+): Promise<
+	| { readonly ok: true; readonly package: DocxPackage }
+	| { readonly ok: false; readonly reason: DocxOpenFailure | "malformed" | "failed"; readonly message: string }
+> {
+	if (services.openOdt === undefined) return { ok: false, reason: "failed", message: "This host does not open OpenDocument files" }
+
+	const opened = await services.openOdt(source, { slicing })
+
+	if (opened.ok) return { ok: true, package: opened.package }
+
+	switch (opened.reason) {
+		case "encrypted":
+		case "notZip":
+		case "compoundFile":
+		case "tooLarge":
+		case "invalidPackage":
+		case "malformed":
+			return { ok: false, reason: opened.reason, message: opened.message }
+		default:
+			return { ok: false, reason: "notWordprocessing", message: opened.message }
+	}
+}
 
 function isDocumentError(error: unknown): boolean {
 	return error instanceof XmlError || error instanceof OpcError || error instanceof ZipError
@@ -237,6 +272,7 @@ export class DocxEngine implements DocxSessionApi {
 	private drawings: Promise<DocxDrawings> | undefined = undefined
 	private bookmarks: Map<string, { part: number; item: number }> | undefined = undefined
 	private readonly retain: boolean
+	private readonly format: "docx" | "odt"
 	// The zip directory and content types: images are read from them after the model is gone.
 	private pkg: { readonly opc: OpcPackage; readonly contentTypes: ContentTypes } | undefined = undefined
 	private pages: readonly PageDisplayList[] = []
@@ -246,6 +282,11 @@ export class DocxEngine implements DocxSessionApi {
 	private objectCache: Map<number, DocxObjectData> | undefined = undefined
 	private bookmarkLocations: Map<string, DocxLocation> | undefined = undefined
 	private releasing: Promise<void> | undefined = undefined
+	// Held with the model, for PDF export (pdfSource).
+	private resolver: PropertyResolver | undefined = undefined
+	private store: PropsStore | undefined = undefined
+	// An editor's edits the layout lays out (pdfSource lays them out again in the Final view).
+	private layoutEdits: LayoutEdits | undefined = undefined
 	private annotationCache: DocxAnnotations | undefined = undefined
 	private readonly mathSizes = new Map<number, number>()
 	private readonly pendingFaces: DocxFontFace[] = []
@@ -275,6 +316,7 @@ export class DocxEngine implements DocxSessionApi {
 		this.view =
 			options.view === "original" ? RevisionView.Original : options.view === "markup" ? RevisionView.Markup : RevisionView.Final
 		this.retain = options.retain === true || editing !== undefined
+		this.format = options.format ?? "docx"
 		this.editing = editing
 	}
 
@@ -313,9 +355,16 @@ export class DocxEngine implements DocxSessionApi {
 			sliceMs: this.services.sliceMs ?? 12,
 			now: this.services.now ?? Date.now
 		})
-		const opened = await openDocxPackage(this.source, { slicing })
+		const opened =
+			this.format === "odt" ? await openOdt(this.source, slicing, this.services) : await openDocxPackage(this.source, { slicing })
 
 		if (this.closed) return
+
+		if (!opened.ok && opened.reason === "encrypted" && this.format === "odt") {
+			this.fail("unsupportedEncryption", opened.message)
+
+			return
+		}
 
 		if (!opened.ok) {
 			if (opened.reason === "encrypted") {
@@ -377,6 +426,9 @@ export class DocxEngine implements DocxSessionApi {
 		}
 
 		const resolver = new PropertyResolver({ styles, numbering, theme, settings: styleSettings(model.settings) })
+
+		this.resolver = resolver
+		this.store = store
 		const body = model.body === undefined ? undefined : model.partOf(model.body)
 		let breaks = 0
 
@@ -421,6 +473,7 @@ export class DocxEngine implements DocxSessionApi {
 		const prepared = this.editing?.prepare(model)
 
 		this.layoutModel = prepared?.model
+		this.layoutEdits = prepared?.edits
 
 		const layout = layoutDocument(prepared?.model ?? model, resolver, fonts, services.measurer, {
 			store,
@@ -692,6 +745,7 @@ export class DocxEngine implements DocxSessionApi {
 			sourceCount: page.sourceCount,
 			sourceInts: page.sourceInts.slice(),
 			sourceTexts: page.sourceTexts,
+			...(page.sourceOwners.some(owner => owner >= 0) ? { sourceOwners: page.sourceOwners.slice() } : {}),
 			linkCount: linkInts.length / LINK_INTS,
 			linkInts: Int32Array.from(linkInts)
 		}
@@ -709,8 +763,11 @@ export class DocxEngine implements DocxSessionApi {
 			data.objectInts,
 			data.objectKinds,
 			data.sourceInts,
+			data.sourceOwners,
 			data.linkInts
 		]) {
+			if (array === undefined) continue
+
 			const buffer = bufferOf(array)
 
 			if (buffer !== undefined && buffer.byteLength > 0) transfer.push(buffer)
@@ -1005,11 +1062,70 @@ export class DocxEngine implements DocxSessionApi {
 
 		this.layout = undefined
 		this.model = undefined
+		this.resolver = undefined
+		this.store = undefined
+		this.layoutEdits = undefined
 		this.drawings = undefined
 		this.bookmarks = undefined
 		this.paragraphLinkCache = new WeakMap()
 		this.mathSizes.clear()
 		this.objectIds.clear()
+	}
+
+	// What a PDF export reads (dom/docx/pdfSnapshot.ts): the document as laid out, while the model is held (a
+	// retained engine, or a viewer's before its release). Undefined before the layout starts or once closed.
+	pdfSource(): DocxPdfLive | undefined {
+		const model = this.layoutModel ?? this.model
+		const { layout, fonts, resolver, store } = this
+
+		if (
+			this.closed ||
+			model === undefined ||
+			layout === undefined ||
+			fonts === undefined ||
+			resolver === undefined ||
+			store === undefined
+		)
+			return undefined
+
+		return {
+			model,
+			layout,
+			fonts,
+			resolver,
+			store,
+			view: this.view,
+			objects: ids => this.objects(ids),
+			media: partName => this.media(partName)
+		}
+	}
+
+	// pdfSource in the Final view (the view a PDF shows): the layout as it is when it shows that view, else the
+	// document (an editor's edits included) laid out again apart in slices, the pages on screen untouched.
+	async pdfFinalSource(final: boolean, signal?: { readonly aborted: boolean }): Promise<DocxPdfLive | undefined> {
+		const live = this.pdfSource()
+
+		if (live === undefined || final) return live
+
+		const services = this.services
+		const stop = { aborted: false }
+		const layout = layoutDocument(live.model, live.resolver, live.fonts, services.measurer, {
+			store: live.store,
+			view: RevisionView.Final,
+			signal: stop,
+			sliceMs: services.sliceMs ?? 12,
+			yield: async () => {
+				await services.yield()
+
+				if (signal?.aborted === true || this.closed) stop.aborted = true
+			},
+			...(services.now === undefined ? {} : { now: services.now }),
+			...(this.layoutEdits === undefined ? {} : { edits: this.layoutEdits })
+		})
+
+		await layout.done
+
+		return layout.cancelled ? undefined : { ...live, layout, view: RevisionView.Final }
 	}
 
 	close(): void {
@@ -1021,6 +1137,9 @@ export class DocxEngine implements DocxSessionApi {
 		this.fonts = undefined
 		this.layout = undefined
 		this.model = undefined
+		this.resolver = undefined
+		this.store = undefined
+		this.layoutEdits = undefined
 		this.pkg = undefined
 		this.pages = []
 		this.drawings = undefined

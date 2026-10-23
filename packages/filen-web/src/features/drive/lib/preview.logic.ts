@@ -2,7 +2,7 @@ import { asDirectoryOrFile, type DriveItem } from "@/features/drive/lib/item"
 import { clampListboxIndex } from "@/features/drive/lib/listbox"
 import { ARCHIVE_NAME_EXTENSIONS } from "@/features/drive/lib/archiveFormats"
 import { SPREADSHEET_EXTENSIONS } from "@/features/spreadsheet/lib/fileKind"
-import { CODE_FILE_EXTENSIONS, extensionStart, resolveFileKind, type ContentVerdict, type FileKind } from "@filen/shared"
+import { CODE_FILE_EXTENSIONS, extensionStart, resolveFileKind, type FileVerdict, type FileKind } from "@filen/shared"
 import { codeLanguageExtensions, codeLanguageForExtension, type CodeLanguageId } from "@filen/office/core/code"
 import { fileKindVerdict } from "@/features/drive/lib/fileKindVerdicts"
 
@@ -100,8 +100,9 @@ const EXTENSION_CATEGORIES: ReadonlyMap<string, PreviewCategory> = buildExtensio
 		"audio"
 	],
 	[["pdf"], "pdf"],
-	// Macro-enabled documents and templates open (and edit) as documents; macros are never run.
-	[["docx", "docm", "dotx", "dotm"], "docx"],
+	// Macro-enabled documents and templates open (and edit) as documents; macros are never run. Word 97–2003 documents
+	// and templates open from their conversion and OpenDocument text (and its templates) translated, both view-only.
+	[["docx", "docm", "dotx", "dotm", "doc", "dot", "odt", "ott", "rtf"], "docx"],
 	[SPREADSHEET_EXTENSIONS, "spreadsheet"],
 	[["md", "markdown"], "markdown"],
 	[["txt", "log"], "text"],
@@ -133,7 +134,7 @@ export function previewCategoryForExtension(ext: string): PreviewCategory | null
 // `verdict`, here and below: the file's verdict as a component holds it (useFileKindVerdict), so what it
 // computes from it follows a change; the store's when absent, which is the same value. Null resolves
 // without one (the SDK worker, which holds no verdicts).
-export function fileTypeExtension(name: string, mime: string | null | undefined, uuid?: string, verdict?: ContentVerdict | null): string {
+export function fileTypeExtension(name: string, mime: string | null | undefined, uuid?: string, verdict?: FileVerdict | null): string {
 	return resolveFileKind(
 		{ name, mime, verdict: verdict === undefined ? (uuid === undefined ? null : fileKindVerdict(uuid)) : verdict },
 		previewCategoryForExtension
@@ -142,14 +143,14 @@ export function fileTypeExtension(name: string, mime: string | null | undefined,
 
 // The extension a drive item's type reads from, content verdicts included (itemFileKind); "" for a
 // directory or an undecryptable file.
-export function itemTypeExtension(item: DriveItem, verdict?: ContentVerdict | null): string {
+export function itemTypeExtension(item: DriveItem, verdict?: FileVerdict | null): string {
 	return itemFileKind(item, verdict)?.extension ?? ""
 }
 
 // The file's kind by the shared resolver (resolveFileKind): its extension, a verdict an earlier read of its
 // content left (fileKindVerdicts.ts), its stored MIME type, a well-known name. A directory, or a file
 // without decrypted metadata, has none.
-export function itemFileKind(item: DriveItem, verdict?: ContentVerdict | null): FileKind<PreviewCategory> | null {
+export function itemFileKind(item: DriveItem, verdict?: FileVerdict | null): FileKind<PreviewCategory> | null {
 	const base = asDirectoryOrFile(item)
 
 	if (base.type !== "file" || base.data.decryptedMeta === null) {
@@ -175,9 +176,17 @@ export function unprobedTransportStream(item: DriveItem): boolean {
 	return kind !== null && kind.sniffable && (kind.extension === "ts" || kind.extension === "mts")
 }
 
+// A `.dot` no read has told apart yet: the docx viewer's own read decides whether it is a Word 97–2003 template
+// or a text file (a Graphviz graph), and records the verdict that settles it.
+export function unsniffedTemplate(item: DriveItem): boolean {
+	const kind = itemFileKind(item)
+
+	return kind !== null && kind.sniffable && kind.extension === "dot"
+}
+
 // A directory (or a shared-directory arm, which asDirectoryOrFile normalizes to one) always resolves
 // "other" — there is nothing to preview.
-export function previewType(item: DriveItem, verdict?: ContentVerdict | null): PreviewCategory {
+export function previewType(item: DriveItem, verdict?: FileVerdict | null): PreviewCategory {
 	return itemFileKind(item, verdict)?.kind ?? "other"
 }
 

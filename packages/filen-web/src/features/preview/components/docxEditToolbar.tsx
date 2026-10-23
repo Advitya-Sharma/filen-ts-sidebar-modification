@@ -131,6 +131,8 @@ const PARAGRAPH_DIALOG = COMMAND_LABELS["paragraph.indent"] !== undefined || COM
 const PAGE_SETUP = COMMAND_LABELS["page.setup"] !== undefined
 
 export interface DocxEditToolbarProps {
+	// The File menu (Download as), first in the row; absent when it offers nothing.
+	fileMenu?: ReactNode
 	snapshot: DocxEditorSnapshot | undefined
 	// The host's read-only state on top of the session's (a save writing, a file that cannot be saved).
 	readOnly: boolean
@@ -403,6 +405,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 	const fit = toolbarFit(
 		width,
 		(props.viewOnly.length > 0 ? 100 : 0) +
+			(props.fileMenu === undefined || props.fileMenu === null ? 0 : 32) +
 			(props.encrypted === undefined ? 0 : 140) +
 			(locked === null ? 0 : 120) +
 			(props.markup === null || REVIEW_SLOT.length > 0 ? 0 : 40) +
@@ -469,6 +472,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 			aria-label={t("previewDocxEditToolbar")}
 			className="flex h-10 shrink-0 items-center gap-0.5 border-b border-border px-2"
 		>
+			{props.fileMenu}
 			{/* The groups, fitted to the row (toolbarFit); what still does not fit (badges, a Picture group on a
 			phone) scrolls here, never pushing the ⋯ menu out of the row. */}
 			<div className="-mx-1 flex min-w-0 flex-1 [scrollbar-width:none] items-center gap-0.5 self-stretch overflow-x-auto px-1 [&::-webkit-scrollbar]:hidden">

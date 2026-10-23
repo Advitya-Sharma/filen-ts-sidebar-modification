@@ -1,5 +1,5 @@
 {
-	"comment": "Bundled substitutes for document fonts, each family with its licence file. Arimo, Tinos, Cousine, Gelasio and Selawik are the upstream WOFF2 files unchanged; Carlito and Caladea are published upstream only as TTF and were compressed to WOFF2 here (see each face's conversion). Apps serve or read the files by their path here and must ship each family's licence file with them. Regenerate src/core/fonts/tables.generated.ts with `pnpm run generate:fonts` after any change.",
+	"comment": "Bundled substitutes for document fonts, each family with its licence file. Arimo, Tinos, Cousine, Gelasio and Selawik are the upstream WOFF2 files unchanged; Carlito and Caladea are published upstream only as TTF and were compressed to WOFF2 here (see each face's conversion). Apps serve or read the files by their path here and must ship each family's licence file with them. Regenerate src/core/fonts/tables.generated.ts with `pnpm run generate:fonts` after any change. Each family's \"pdf\" faces are TrueType files for PDF embedding, gzip-compressed and fetched only when a PDF is exported (upstream TTFs, or static instances of the variable fonts); \"fallbacks\" are Noto families fetched only when exported text is in a script the bundled families lack. Regenerate src/core/pdfwrite/fonts/faces.generated.ts with `pnpm run generate:pdf-fonts` after any change to those.",
 	"families": [
 		{
 			"id": "carlito",
@@ -59,6 +59,88 @@
 						"sha256": "b32928186c119599e03ca6a1ffc680fdcb7fac95772f4b95d989cf6cd3861517",
 						"conversion": "Compressed to WOFF2 with fontTools 4.60.1 (brotli 1.1.0) without WOFF metadata or private data. Every table decompresses to the upstream bytes (glyf/loca glyph for glyph); in head only checkSumAdjustment and the flags bit 11 that WOFF2 sets differ. Original font data unchanged except for WOFF compression, so not a Modified Version under OFL FAQ 2.2.1 and the Reserved Font Name stays."
 					}
+				}
+			],
+			"pdf": [
+				{
+					"file": "carlito/Carlito-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 268221,
+					"sha256": "95ef987010e277155c93d943f18314eb46aadefd4c91c7917ad070ab1523bdb4",
+					"ttf": {
+						"bytes": 628032,
+						"sha256": "f6418f708baede9789daef5d458c0f53d2a888af9820e8062934e504fedc6595",
+						"postScriptName": "Carlito-Regular",
+						"version": "Version 1.104",
+						"fsType": 0,
+						"glyphs": 2783
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/carlito/3a810cab78ebd6e2e4eed42af9e8453c4f9b850a/fonts/ttf/Carlito-Regular.ttf",
+						"sha256": "f6418f708baede9789daef5d458c0f53d2a888af9820e8062934e504fedc6595"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				},
+				{
+					"file": "carlito/Carlito-Italic.ttf.gz",
+					"weight": 400,
+					"italic": true,
+					"bytes": 280876,
+					"sha256": "37f25969e46a18d5b286b8e17409f79fa5b2414abef5bca4ec273d9926ac38b1",
+					"ttf": {
+						"bytes": 615236,
+						"sha256": "0b019225e58d702bfedcbd35c21696769f8ee115cb6343f84c2f240312450d1c",
+						"postScriptName": "Carlito-Italic",
+						"version": "Version 1.104",
+						"fsType": 0,
+						"glyphs": 2783
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/carlito/3a810cab78ebd6e2e4eed42af9e8453c4f9b850a/fonts/ttf/Carlito-Italic.ttf",
+						"sha256": "0b019225e58d702bfedcbd35c21696769f8ee115cb6343f84c2f240312450d1c"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				},
+				{
+					"file": "carlito/Carlito-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 279345,
+					"sha256": "525e941c926a01240059071b69d4b3808455c2972a4cb1d768d6f5137bbcd51a",
+					"ttf": {
+						"bytes": 682468,
+						"sha256": "bb5d20f79b82599ec72983597437373a80f2d2085fa91fc144fd74e876a594db",
+						"postScriptName": "Carlito-Bold",
+						"version": "Version 1.104",
+						"fsType": 0,
+						"glyphs": 2783
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/carlito/3a810cab78ebd6e2e4eed42af9e8453c4f9b850a/fonts/ttf/Carlito-Bold.ttf",
+						"sha256": "bb5d20f79b82599ec72983597437373a80f2d2085fa91fc144fd74e876a594db"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				},
+				{
+					"file": "carlito/Carlito-BoldItalic.ttf.gz",
+					"weight": 700,
+					"italic": true,
+					"bytes": 321946,
+					"sha256": "cc74941c6279902b35247b864908051e71e98c314aab763214fd2121b51ec1e1",
+					"ttf": {
+						"bytes": 808508,
+						"sha256": "b32928186c119599e03ca6a1ffc680fdcb7fac95772f4b95d989cf6cd3861517",
+						"postScriptName": "Carlito-BoldItalic",
+						"version": "Version 1.104",
+						"fsType": 0,
+						"glyphs": 2782
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/carlito/3a810cab78ebd6e2e4eed42af9e8453c4f9b850a/fonts/ttf/Carlito-BoldItalic.ttf",
+						"sha256": "b32928186c119599e03ca6a1ffc680fdcb7fac95772f4b95d989cf6cd3861517"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
 				}
 			]
 		},
@@ -120,6 +202,88 @@
 						"conversion": "Compressed to WOFF2 with fontTools 4.60.1 (brotli 1.1.0) without WOFF metadata or private data. Every table decompresses to the upstream bytes (glyf/loca glyph for glyph); in head only checkSumAdjustment and the flags bit 11 that WOFF2 sets differ. The DSIG signature table, invalid after re-encoding, is dropped as WOFF2 requires; that makes this a Modified Version under OFL FAQ 2.2.1, which the OFL allows. Caladea has no Reserved Font Name."
 					}
 				}
+			],
+			"pdf": [
+				{
+					"file": "caladea/Caladea-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 40896,
+					"sha256": "333db46545dbc56bcd21426b6faf38c28ab386a2feb52651adbf8a6d072ee5b2",
+					"ttf": {
+						"bytes": 81600,
+						"sha256": "f1e899278b7b4491aba5b6a8253c4b04c050cc59b21865be5c37559a775153cd",
+						"postScriptName": "Caladea-Regular",
+						"version": "Version 1.001",
+						"fsType": 0,
+						"glyphs": 464
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/caladea/336a529cfad3d103d6527752686f8331d13e820a/fonts/ttf/Caladea-Regular.ttf",
+						"sha256": "f1e899278b7b4491aba5b6a8253c4b04c050cc59b21865be5c37559a775153cd"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				},
+				{
+					"file": "caladea/Caladea-Italic.ttf.gz",
+					"weight": 400,
+					"italic": true,
+					"bytes": 42164,
+					"sha256": "b662c0c5beef4f1a707292b6688040fda0e724aa764fb7c0c71fcb07b5c206da",
+					"ttf": {
+						"bytes": 83780,
+						"sha256": "4359a8e24f748b6447b1ff6d7a174febe70961d29f8bb8634b56dacd740a3deb",
+						"postScriptName": "Caladea-Italic",
+						"version": "Version 1.001",
+						"fsType": 0,
+						"glyphs": 459
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/caladea/336a529cfad3d103d6527752686f8331d13e820a/fonts/ttf/Caladea-Italic.ttf",
+						"sha256": "4359a8e24f748b6447b1ff6d7a174febe70961d29f8bb8634b56dacd740a3deb"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				},
+				{
+					"file": "caladea/Caladea-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 41234,
+					"sha256": "991d2c9449743cea02ad463ac8b10954a0ec6291a9aa344d1e085a70d6279942",
+					"ttf": {
+						"bytes": 84492,
+						"sha256": "ae3cb2dcbc925809dd29d2a44e9802211cab66be541bacbfc9c08c74b27c3742",
+						"postScriptName": "Caladea-Bold",
+						"version": "Version 1.001",
+						"fsType": 0,
+						"glyphs": 464
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/caladea/336a529cfad3d103d6527752686f8331d13e820a/fonts/ttf/Caladea-Bold.ttf",
+						"sha256": "ae3cb2dcbc925809dd29d2a44e9802211cab66be541bacbfc9c08c74b27c3742"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				},
+				{
+					"file": "caladea/Caladea-BoldItalic.ttf.gz",
+					"weight": 700,
+					"italic": true,
+					"bytes": 42468,
+					"sha256": "776eacaadc34b2fe17a27f830676477075933299ff5500f06120057d743efc1e",
+					"ttf": {
+						"bytes": 83356,
+						"sha256": "ccabaa7b7e2fdf253d2b1a5fa699dd8a3df8d835a9eb285ad82631a677eb76c0",
+						"postScriptName": "Caladea-BoldItalic",
+						"version": "Version 1.001",
+						"fsType": 0,
+						"glyphs": 459
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/caladea/336a529cfad3d103d6527752686f8331d13e820a/fonts/ttf/Caladea-BoldItalic.ttf",
+						"sha256": "ccabaa7b7e2fdf253d2b1a5fa699dd8a3df8d835a9eb285ad82631a677eb76c0"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				}
 			]
 		},
 		{
@@ -159,6 +323,88 @@
 						"url": "https://raw.githubusercontent.com/googlefonts/arimo/4a6255f269916ae7ad3fc2706b0935e7621396b8/fonts/webfonts/Arimo-Italic%5Bwght%5D.woff2",
 						"sha256": "a9d5da4ebfbe0ba41c284b440ac15dec375be0ba08079e9748ff49ff6ac0066d"
 					}
+				}
+			],
+			"pdf": [
+				{
+					"file": "arimo/Arimo-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 187986,
+					"sha256": "2096961be1896d153ed20386276426976ed194c19bfdb6742cb046a8f97fe747",
+					"ttf": {
+						"bytes": 321444,
+						"sha256": "b35e6b7e217258f4c27eace103f3987c6fdb0cb1af08c3d43b68984e27f23fcd",
+						"postScriptName": "Arimo-Regular",
+						"version": "Version 1.341",
+						"fsType": 0,
+						"glyphs": 3301
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/arimo/4a6255f269916ae7ad3fc2706b0935e7621396b8/fonts/variable/Arimo%5Bwght%5D.ttf",
+						"sha256": "e43898b143ec826ac8cb4034816458a7047fbe0836558de2a1f8c6223ae3e0ca"
+					},
+					"conversion": "Static instance at wght=400 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name Arimo-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "arimo/Arimo-Italic.ttf.gz",
+					"weight": 400,
+					"italic": true,
+					"bytes": 204324,
+					"sha256": "abbd4db007307131c7b0ea293aeb550a5416105b50c2c1ab0b87c77b2cd870a8",
+					"ttf": {
+						"bytes": 345480,
+						"sha256": "8114d31fecff4411e0fa0e7cf14090e9edf8a5acdd1c937c6768e270c0d9f774",
+						"postScriptName": "Arimo-Italic",
+						"version": "Version 1.341",
+						"fsType": 0,
+						"glyphs": 3306
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/arimo/4a6255f269916ae7ad3fc2706b0935e7621396b8/fonts/variable/Arimo-Italic%5Bwght%5D.ttf",
+						"sha256": "a80fc54fd0233c1dfe298577c4d00f5ae81d5bb83510975e473c47e699b7f4ed"
+					},
+					"conversion": "Static instance at wght=400 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name Arimo-Italic, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "arimo/Arimo-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 187870,
+					"sha256": "f3e5f39de381557a67a7feee797e2306d933453e8ff980b9843fda0817b5e971",
+					"ttf": {
+						"bytes": 322004,
+						"sha256": "6ee331e4367aaa9799e64bbdc79ab4710c2e060b2136f3033125b78060f7d42b",
+						"postScriptName": "Arimo-Bold",
+						"version": "Version 1.341",
+						"fsType": 0,
+						"glyphs": 3301
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/arimo/4a6255f269916ae7ad3fc2706b0935e7621396b8/fonts/variable/Arimo%5Bwght%5D.ttf",
+						"sha256": "e43898b143ec826ac8cb4034816458a7047fbe0836558de2a1f8c6223ae3e0ca"
+					},
+					"conversion": "Static instance at wght=700 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name Arimo-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "arimo/Arimo-BoldItalic.ttf.gz",
+					"weight": 700,
+					"italic": true,
+					"bytes": 203967,
+					"sha256": "a9ce45bd389d0856c60cc3fb9db410c721f8a049c2b2402c0074543e9dd44d23",
+					"ttf": {
+						"bytes": 346868,
+						"sha256": "c0bbf6733889a1f2e4dc903858fa3680e9dd8415e3e694742dbd2240f617ede1",
+						"postScriptName": "Arimo-BoldItalic",
+						"version": "Version 1.341",
+						"fsType": 0,
+						"glyphs": 3306
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/arimo/4a6255f269916ae7ad3fc2706b0935e7621396b8/fonts/variable/Arimo-Italic%5Bwght%5D.ttf",
+						"sha256": "a80fc54fd0233c1dfe298577c4d00f5ae81d5bb83510975e473c47e699b7f4ed"
+					},
+					"conversion": "Static instance at wght=700 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name Arimo-BoldItalic, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
 				}
 			]
 		},
@@ -216,6 +462,88 @@
 						"sha256": "fe7ac295c7672860594e97cb66cec26f65dc0a76164e88696ef357335e4a2ad2"
 					}
 				}
+			],
+			"pdf": [
+				{
+					"file": "tinos/Tinos-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 275166,
+					"sha256": "f3e70b5d5eaa5b37e2282d639a58eed394e7a4b68f66b4f3bf6d512bbccf3f94",
+					"ttf": {
+						"bytes": 521588,
+						"sha256": "60a0e8ef0c04dd5dd69ffe91025fa2ae5836cbd35600a82ba031977557e2cb61",
+						"postScriptName": "Tinos-Regular",
+						"version": "Version 1.340; ttfautohint (v1.8.4.16-eb64)",
+						"fsType": 0,
+						"glyphs": 3285
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/tinos/3b4482a99b80ea5fc75f187b1be3120a3f5905b3/fonts/ttf/Tinos-Regular.ttf",
+						"sha256": "60a0e8ef0c04dd5dd69ffe91025fa2ae5836cbd35600a82ba031977557e2cb61"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				},
+				{
+					"file": "tinos/Tinos-Italic.ttf.gz",
+					"weight": 400,
+					"italic": true,
+					"bytes": 303940,
+					"sha256": "9280880bd6471e75a6b5d6a0a30ebefffe3a9928565c66ec7989715d399dbaec",
+					"ttf": {
+						"bytes": 565016,
+						"sha256": "5942266ed398b155d7dc23e36833e7ec6be988f2439bdbeb8ef1bede808eaa91",
+						"postScriptName": "Tinos-Italic",
+						"version": "Version 1.340; ttfautohint (v1.8.4.16-eb64)",
+						"fsType": 0,
+						"glyphs": 3290
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/tinos/3b4482a99b80ea5fc75f187b1be3120a3f5905b3/fonts/ttf/Tinos-Italic.ttf",
+						"sha256": "5942266ed398b155d7dc23e36833e7ec6be988f2439bdbeb8ef1bede808eaa91"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				},
+				{
+					"file": "tinos/Tinos-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 299110,
+					"sha256": "05b7117e4fba1ca3dd31143f6a87881d093d39a56e5213e5b3ba6d0dc0a43357",
+					"ttf": {
+						"bytes": 597880,
+						"sha256": "393269dbab8899f938db19783eca5eac92eb431f7ae0ab45b8349ca895f1a06b",
+						"postScriptName": "Tinos-Bold",
+						"version": "Version 1.340; ttfautohint (v1.8.4.16-eb64)",
+						"fsType": 0,
+						"glyphs": 3285
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/tinos/3b4482a99b80ea5fc75f187b1be3120a3f5905b3/fonts/ttf/Tinos-Bold.ttf",
+						"sha256": "393269dbab8899f938db19783eca5eac92eb431f7ae0ab45b8349ca895f1a06b"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				},
+				{
+					"file": "tinos/Tinos-BoldItalic.ttf.gz",
+					"weight": 700,
+					"italic": true,
+					"bytes": 306255,
+					"sha256": "ef263fa33d382fb935e68c2c3125e3ace1d4cdfe8f74202daf4028ebc6d719e3",
+					"ttf": {
+						"bytes": 578976,
+						"sha256": "a5de79f0fe863ea0954757acb3d47b3ccd0a930ce3dd5b97230cd3866790a06e",
+						"postScriptName": "Tinos-BoldItalic",
+						"version": "Version 1.340; ttfautohint (v1.8.4.16-eb64)",
+						"fsType": 0,
+						"glyphs": 3290
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/tinos/3b4482a99b80ea5fc75f187b1be3120a3f5905b3/fonts/ttf/Tinos-BoldItalic.ttf",
+						"sha256": "a5de79f0fe863ea0954757acb3d47b3ccd0a930ce3dd5b97230cd3866790a06e"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				}
 			]
 		},
 		{
@@ -272,6 +600,88 @@
 						"sha256": "08accd82919cc9b3f2e73d100299084bb7af898472ef9c0293b92a207aec96d9"
 					}
 				}
+			],
+			"pdf": [
+				{
+					"file": "cousine/Cousine-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 162588,
+					"sha256": "7f19da2d7a5ab31ae30921770a5d7c6ec409b90371d82459118f29b9c2baaac9",
+					"ttf": {
+						"bytes": 296856,
+						"sha256": "5a57f0184000371cb22fe3fcea4c500354cab1a69efaf7beaf3e6eca6ecfefea",
+						"postScriptName": "Cousine-Regular",
+						"version": "Version 1.241; ttfautohint (v1.8.4.16-eb64)",
+						"fsType": 0,
+						"glyphs": 2396
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/cousine/c0fbdb438443968c884a5c13f5f9bee916a7f89b/fonts/ttf/Cousine-Regular.ttf",
+						"sha256": "5a57f0184000371cb22fe3fcea4c500354cab1a69efaf7beaf3e6eca6ecfefea"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				},
+				{
+					"file": "cousine/Cousine-Italic.ttf.gz",
+					"weight": 400,
+					"italic": true,
+					"bytes": 173309,
+					"sha256": "08c4c84f788dddacc368135821b21e69361efda1c1ad62e02b7c4a36190f15e7",
+					"ttf": {
+						"bytes": 306880,
+						"sha256": "afb869eee8643d09915c3286edb61dad66278ceb1511c79b474ce21548421bcd",
+						"postScriptName": "Cousine-Italic",
+						"version": "Version 1.241; ttfautohint (v1.8.4.16-eb64)",
+						"fsType": 0,
+						"glyphs": 2401
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/cousine/c0fbdb438443968c884a5c13f5f9bee916a7f89b/fonts/ttf/Cousine-Italic.ttf",
+						"sha256": "afb869eee8643d09915c3286edb61dad66278ceb1511c79b474ce21548421bcd"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				},
+				{
+					"file": "cousine/Cousine-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 164353,
+					"sha256": "d06e65667d7324101e7754aa47ac975968d76f5fa5ff6dd59996a85366267086",
+					"ttf": {
+						"bytes": 298048,
+						"sha256": "331215ec6445f41e98d8971251bb6237e722907f4101faae990583accfe79545",
+						"postScriptName": "Cousine-Bold",
+						"version": "Version 1.241; ttfautohint (v1.8.4.16-eb64)",
+						"fsType": 0,
+						"glyphs": 2396
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/cousine/c0fbdb438443968c884a5c13f5f9bee916a7f89b/fonts/ttf/Cousine-Bold.ttf",
+						"sha256": "331215ec6445f41e98d8971251bb6237e722907f4101faae990583accfe79545"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				},
+				{
+					"file": "cousine/Cousine-BoldItalic.ttf.gz",
+					"weight": 700,
+					"italic": true,
+					"bytes": 174428,
+					"sha256": "6316d9b4d38e0e2581d7fee09e38941dda0b85a559bb2722aeef7710998cd84b",
+					"ttf": {
+						"bytes": 308292,
+						"sha256": "7f804549c941ceaac0a9635389ed09c4bbc86e4bfe37589191dacd1b5b0e26a5",
+						"postScriptName": "Cousine-BoldItalic",
+						"version": "Version 1.241; ttfautohint (v1.8.4.16-eb64)",
+						"fsType": 0,
+						"glyphs": 2401
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/googlefonts/cousine/c0fbdb438443968c884a5c13f5f9bee916a7f89b/fonts/ttf/Cousine-BoldItalic.ttf",
+						"sha256": "7f804549c941ceaac0a9635389ed09c4bbc86e4bfe37589191dacd1b5b0e26a5"
+					},
+					"conversion": "Upstream TTF unchanged, gzip-compressed (level 9, no name or time stamp) for transfer; the font data is not modified."
+				}
 			]
 		},
 		{
@@ -311,6 +721,88 @@
 						"url": "https://raw.githubusercontent.com/SorkinType/Gelasio/9228e69b160d79f33950e026293f6e13ba9780d0/fonts/webfonts/Gelasio-Italic%5Bwght%5D.woff2",
 						"sha256": "91164b31301c9e72922371df0ce81334d3c68e44172fc8ef597ad63c873e9215"
 					}
+				}
+			],
+			"pdf": [
+				{
+					"file": "gelasio/Gelasio-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 55751,
+					"sha256": "f0a3192cd1e77aebb931e4720c8362765d9b589d6107ff0cbba0dded8d62009e",
+					"ttf": {
+						"bytes": 107588,
+						"sha256": "fb77e349dbbc9b376c160f2751a01cda00e3f7ce545cf94f3fa997f7f41ea2e8",
+						"postScriptName": "Gelasio-Regular",
+						"version": "Version 1.008",
+						"fsType": 0,
+						"glyphs": 1070
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/SorkinType/Gelasio/9228e69b160d79f33950e026293f6e13ba9780d0/fonts/variable/Gelasio%5Bwght%5D.ttf",
+						"sha256": "4daecea457258c9ebeb8bc99ed3fd24353618bfad3ea4b93fa0b5d0468fc04e4"
+					},
+					"conversion": "Static instance at wght=400 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name Gelasio-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "gelasio/Gelasio-Italic.ttf.gz",
+					"weight": 400,
+					"italic": true,
+					"bytes": 60206,
+					"sha256": "2a97f249932fad0b48e7f2fe7cf3dab8b105bd3fbab4d3718dbb3d21e5633b5c",
+					"ttf": {
+						"bytes": 107904,
+						"sha256": "a9d49460a3f715a05a2c5d957c65eb8e3b7c6f599b1f95d5cf2cb5db5ce4bf36",
+						"postScriptName": "Gelasio-Italic",
+						"version": "Version 1.008",
+						"fsType": 0,
+						"glyphs": 1069
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/SorkinType/Gelasio/9228e69b160d79f33950e026293f6e13ba9780d0/fonts/variable/Gelasio-Italic%5Bwght%5D.ttf",
+						"sha256": "52559e845a4d33514e5f93bb9ae7dbeae1894a53f2c565a15f18af40cd337c09"
+					},
+					"conversion": "Static instance at wght=400 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name Gelasio-Italic, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "gelasio/Gelasio-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 56126,
+					"sha256": "ca41d1c77ddd6a0e2e425ac119eb51f6d78e38d95aab3f16f87d5ba16127cf21",
+					"ttf": {
+						"bytes": 107832,
+						"sha256": "0667e9d981e2f8e735ed3d2192a39f3d31c0054c27fe5eb10fd4c5e16f401b64",
+						"postScriptName": "Gelasio-Bold",
+						"version": "Version 1.008",
+						"fsType": 0,
+						"glyphs": 1070
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/SorkinType/Gelasio/9228e69b160d79f33950e026293f6e13ba9780d0/fonts/variable/Gelasio%5Bwght%5D.ttf",
+						"sha256": "4daecea457258c9ebeb8bc99ed3fd24353618bfad3ea4b93fa0b5d0468fc04e4"
+					},
+					"conversion": "Static instance at wght=700 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name Gelasio-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "gelasio/Gelasio-BoldItalic.ttf.gz",
+					"weight": 700,
+					"italic": true,
+					"bytes": 60599,
+					"sha256": "81ed8335eb2225d843802685c94b7de3acb78ad7912db9abb9f21ed23587a295",
+					"ttf": {
+						"bytes": 107980,
+						"sha256": "a6c66054bf5c2922185c17f3d3a85c7a95844957d1dd5c6578cc6b97dceec75a",
+						"postScriptName": "Gelasio-BoldItalic",
+						"version": "Version 1.008",
+						"fsType": 0,
+						"glyphs": 1069
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/SorkinType/Gelasio/9228e69b160d79f33950e026293f6e13ba9780d0/fonts/variable/Gelasio-Italic%5Bwght%5D.ttf",
+						"sha256": "52559e845a4d33514e5f93bb9ae7dbeae1894a53f2c565a15f18af40cd337c09"
+					},
+					"conversion": "Static instance at wght=700 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name Gelasio-BoldItalic, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
 				}
 			]
 		},
@@ -364,6 +856,113 @@
 					"bytes": 14424,
 					"sha256": "e8e9896309b2b003e2eefca4c51f82d2d3fb693a440cb969dd0650f0d5070012"
 				}
+			],
+			"pdf": [
+				{
+					"file": "selawik/selawkl.ttf.gz",
+					"weight": 300,
+					"italic": false,
+					"bytes": 24057,
+					"sha256": "cdfbb60970ab1bf39ecb852bca099b6a82321f177395f9e6747e46ef15f32f3e",
+					"ttf": {
+						"bytes": 44232,
+						"sha256": "8e19d073091a1e869b5b0d48b925e605c0a4c6ece7df7b22a364fb065314c4c5",
+						"postScriptName": "Selawik-Light",
+						"version": "Version 1.01",
+						"fsType": 0,
+						"glyphs": 352
+					},
+					"upstream": {
+						"url": "https://github.com/microsoft/Selawik/releases/download/1.01/Selawik_Release.zip",
+						"member": "selawkl.ttf",
+						"sha256": "8e19d073091a1e869b5b0d48b925e605c0a4c6ece7df7b22a364fb065314c4c5"
+					},
+					"conversion": "The selawkl.ttf member of the upstream release archive, unchanged, gzip-compressed (level 9, no name or time stamp) for transfer."
+				},
+				{
+					"file": "selawik/selawksl.ttf.gz",
+					"weight": 350,
+					"italic": false,
+					"bytes": 24466,
+					"sha256": "c05b1a2b3439a96dd96987d8467ab08e0409d39ef6c7ad09259646befd6284c8",
+					"ttf": {
+						"bytes": 44260,
+						"sha256": "8620960344f12093482cded984a1aafa5a57d24cbf7e9299da125ccf0e9d4102",
+						"postScriptName": "Selawik-Semilight",
+						"version": "Version 1.01",
+						"fsType": 0,
+						"glyphs": 352
+					},
+					"upstream": {
+						"url": "https://github.com/microsoft/Selawik/releases/download/1.01/Selawik_Release.zip",
+						"member": "selawksl.ttf",
+						"sha256": "8620960344f12093482cded984a1aafa5a57d24cbf7e9299da125ccf0e9d4102"
+					},
+					"conversion": "The selawksl.ttf member of the upstream release archive, unchanged, gzip-compressed (level 9, no name or time stamp) for transfer."
+				},
+				{
+					"file": "selawik/selawk.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 24105,
+					"sha256": "5a9cb4b53dd9e1f52838f7925a3ebb81abbbfa0dcfdeae1e52e7dd48728f7dcb",
+					"ttf": {
+						"bytes": 44224,
+						"sha256": "e9d98518d8ac2817782a9a382430463a2e0793ea68350b695bb727d9a830ee1c",
+						"postScriptName": "Selawik-Regular",
+						"version": "Version 1.01",
+						"fsType": 0,
+						"glyphs": 352
+					},
+					"upstream": {
+						"url": "https://github.com/microsoft/Selawik/releases/download/1.01/Selawik_Release.zip",
+						"member": "selawk.ttf",
+						"sha256": "e9d98518d8ac2817782a9a382430463a2e0793ea68350b695bb727d9a830ee1c"
+					},
+					"conversion": "The selawk.ttf member of the upstream release archive, unchanged, gzip-compressed (level 9, no name or time stamp) for transfer."
+				},
+				{
+					"file": "selawik/selawksb.ttf.gz",
+					"weight": 600,
+					"italic": false,
+					"bytes": 24358,
+					"sha256": "5a6aeabe18f871e532598f1a1269aacdf354600c2905556c1c1939c49dc07304",
+					"ttf": {
+						"bytes": 44192,
+						"sha256": "0a9e9d0549a10f24bef9b3a29e06fe6e0b5c21e7a784c503b048a307841a7783",
+						"postScriptName": "Selawik-Semibold",
+						"version": "Version 1.01",
+						"fsType": 0,
+						"glyphs": 352
+					},
+					"upstream": {
+						"url": "https://github.com/microsoft/Selawik/releases/download/1.01/Selawik_Release.zip",
+						"member": "selawksb.ttf",
+						"sha256": "0a9e9d0549a10f24bef9b3a29e06fe6e0b5c21e7a784c503b048a307841a7783"
+					},
+					"conversion": "The selawksb.ttf member of the upstream release archive, unchanged, gzip-compressed (level 9, no name or time stamp) for transfer."
+				},
+				{
+					"file": "selawik/selawkb.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 23881,
+					"sha256": "85d4e31f3fd3ed1f05f0a9fc23e8ee552594055d8f6de8572a0811493f02d555",
+					"ttf": {
+						"bytes": 44068,
+						"sha256": "f0db5e174a90e0956ad7d2844bdca1d5e6da92ec65b2c04e57ba9b180668c904",
+						"postScriptName": "Selawik-Bold",
+						"version": "Version 1.01",
+						"fsType": 0,
+						"glyphs": 352
+					},
+					"upstream": {
+						"url": "https://github.com/microsoft/Selawik/releases/download/1.01/Selawik_Release.zip",
+						"member": "selawkb.ttf",
+						"sha256": "f0db5e174a90e0956ad7d2844bdca1d5e6da92ec65b2c04e57ba9b180668c904"
+					},
+					"conversion": "The selawkb.ttf member of the upstream release archive, unchanged, gzip-compressed (level 9, no name or time stamp) for transfer."
+				}
 			]
 		}
 	],
@@ -396,6 +995,1094 @@
 			"ascent": 903,
 			"descent": 337,
 			"evidence": "Line height fitted to Word's recorded page breaks in 10 public Word documents of the test corpus using the family (41 breaks, ground truth consistent with the documents' page references): on the same line 12.2 % with the substitute's own metrics, 43.9 % fitted, 17.1 % held out (each file scored with the values fitted on the others); never measured from the font. Drawn with Arimo at the fitted size 1.01 (CALIBRATED_TAHOMA_SCALE)."
+		}
+	],
+	"fallbacks": [
+		{
+			"id": "noto-naskh-arabic",
+			"name": "Noto Naskh Arabic",
+			"version": "2.021",
+			"scripts": [
+				"Arab"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-naskh-arabic/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notonaskharabic",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-naskh-arabic/NotoNaskhArabic-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 95192,
+					"sha256": "03d355878ba2f9cc58d047b7f6719a1c3211af7d4f58259aad321e0437a970c3",
+					"ttf": {
+						"bytes": 200416,
+						"sha256": "0919edeba540a6b27875d4651f2bf26dcbae00324b4bb034f7a030f7f294d381",
+						"postScriptName": "NotoNaskhArabic-Regular",
+						"version": "Version 2.021",
+						"fsType": 0,
+						"glyphs": 1719
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notonaskharabic/NotoNaskhArabic%5Bwght%5D.ttf",
+						"sha256": "67b5a525a661b607971fbd3f96a81b89d3a768e74534fca84f18ac97e6fab72f"
+					},
+					"conversion": "Static instance at wght=400 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoNaskhArabic-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-naskh-arabic/NotoNaskhArabic-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 96339,
+					"sha256": "eaa7977efd77196d485592dba7583ab4744257249415d790c54f668f4b53047b",
+					"ttf": {
+						"bytes": 200524,
+						"sha256": "3c2b940e1916831afafcd1849dd12b753afd467a3d0e053167a7811c30233aa9",
+						"postScriptName": "NotoNaskhArabic-Bold",
+						"version": "Version 2.021",
+						"fsType": 0,
+						"glyphs": 1719
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notonaskharabic/NotoNaskhArabic%5Bwght%5D.ttf",
+						"sha256": "67b5a525a661b607971fbd3f96a81b89d3a768e74534fca84f18ac97e6fab72f"
+					},
+					"conversion": "Static instance at wght=700 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoNaskhArabic-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-hebrew",
+			"name": "Noto Sans Hebrew",
+			"version": "3.001",
+			"scripts": [
+				"Hebr"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-hebrew/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanshebrew",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-hebrew/NotoSansHebrew-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 27405,
+					"sha256": "4a45cfbe531d4f9c27eafc13621e7f936dbf2e029a49a07fd02bfd71e97951f3",
+					"ttf": {
+						"bytes": 47756,
+						"sha256": "5fb2e1fc38c242d64f9fc5f77e026473f288b9791762d80df98a3ec762d5bbdf",
+						"postScriptName": "NotoSansHebrew-Regular",
+						"version": "Version 3.001",
+						"fsType": 0,
+						"glyphs": 470
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanshebrew/NotoSansHebrew%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "7ef36a2c3593758cdb622e1bdef4f84523e92fbc3ccc667438dd80ff54c2de88"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansHebrew-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-hebrew/NotoSansHebrew-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 27481,
+					"sha256": "ad6a5421b92e85ad2ba46d4f7e2367c54e51b50b0f5e75881511bc6cbcf01067",
+					"ttf": {
+						"bytes": 47724,
+						"sha256": "2aea024b57ba381f7ce84547e35fa4b39ef75d824284ce632a204eb61756f531",
+						"postScriptName": "NotoSansHebrew-Bold",
+						"version": "Version 3.001",
+						"fsType": 0,
+						"glyphs": 470
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanshebrew/NotoSansHebrew%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "7ef36a2c3593758cdb622e1bdef4f84523e92fbc3ccc667438dd80ff54c2de88"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansHebrew-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-armenian",
+			"name": "Noto Sans Armenian",
+			"version": "2.008",
+			"scripts": [
+				"Armn"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-armenian/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansarmenian",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-armenian/NotoSansArmenian-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 28113,
+					"sha256": "5fe08aa0091087ac36d2ed39add39b34d3122a38fa752d3aeb6eb021ae7ca895",
+					"ttf": {
+						"bytes": 49744,
+						"sha256": "e6ed326863317fcbe6c6a0bf79934ce389b81b6c152443a331ab7209088bd456",
+						"postScriptName": "NotoSansArmenian-Regular",
+						"version": "Version 2.008",
+						"fsType": 0,
+						"glyphs": 436
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansarmenian/NotoSansArmenian%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "0870908d8318435a5daf1cd280ae15063f990cd9ad60f3e94c734ce9e1ffef71"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansArmenian-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-armenian/NotoSansArmenian-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 27871,
+					"sha256": "225fb3d50663d783a3bf8a933ba8f2e8da95149e9766e0987354ba08045e64d8",
+					"ttf": {
+						"bytes": 49776,
+						"sha256": "ba23a4b4215655d18326bc850b1a4f0fbe4236a2728f004eed1e117c892bcdd4",
+						"postScriptName": "NotoSansArmenian-Bold",
+						"version": "Version 2.008",
+						"fsType": 0,
+						"glyphs": 436
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansarmenian/NotoSansArmenian%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "0870908d8318435a5daf1cd280ae15063f990cd9ad60f3e94c734ce9e1ffef71"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansArmenian-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-georgian",
+			"name": "Noto Sans Georgian",
+			"version": "2.005",
+			"scripts": [
+				"Geor"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-georgian/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansgeorgian",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-georgian/NotoSansGeorgian-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 37293,
+					"sha256": "2825804006f63df98b0b954a73a78097cb5b244ca8210824f708164624b8dbfd",
+					"ttf": {
+						"bytes": 65436,
+						"sha256": "14b6bd628abf816bd1db00af57f7e6c94ad315186faa362fa26b73d49e059994",
+						"postScriptName": "NotoSansGeorgian-Regular",
+						"version": "Version 2.005",
+						"fsType": 0,
+						"glyphs": 554
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansgeorgian/NotoSansGeorgian%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "dc591156f36842d38996c4a7a17fee9bb58e45da3e2cac7a31b7d33de700adb9"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansGeorgian-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-georgian/NotoSansGeorgian-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 38249,
+					"sha256": "4bc5fd76b5ca20be819ab7ca0a41753967486df96b265773959149f2dfd308cc",
+					"ttf": {
+						"bytes": 65372,
+						"sha256": "11316250fcbd20a94140743c16ba93f25c9bb9d89106a4623ede59705ab9c403",
+						"postScriptName": "NotoSansGeorgian-Bold",
+						"version": "Version 2.005",
+						"fsType": 0,
+						"glyphs": 554
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansgeorgian/NotoSansGeorgian%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "dc591156f36842d38996c4a7a17fee9bb58e45da3e2cac7a31b7d33de700adb9"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansGeorgian-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-ethiopic",
+			"name": "Noto Sans Ethiopic",
+			"version": "2.102",
+			"scripts": [
+				"Ethi"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-ethiopic/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansethiopic",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-ethiopic/NotoSansEthiopic-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 145302,
+					"sha256": "0254b300d94ccfb3a791af571ba29f156ed59aa913686a343bd2ae8d031d8bab",
+					"ttf": {
+						"bytes": 366000,
+						"sha256": "a1698b4b8168721f717b054261a2ab730e855c55708b15efe1d1fccca91279d1",
+						"postScriptName": "NotoSansEthiopic-Regular",
+						"version": "Version 2.102",
+						"fsType": 0,
+						"glyphs": 925
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansethiopic/NotoSansEthiopic%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "0dbccc00b22d180ebd6a4bd8a733918a29e709fa6798023adc3e6cd40da65077"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansEthiopic-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-ethiopic/NotoSansEthiopic-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 145609,
+					"sha256": "688a874d0901cc133a791fc44d76f245e62cfd4313c3ee0a381ceb69a83b1342",
+					"ttf": {
+						"bytes": 365952,
+						"sha256": "c02e26a8b7ca5b4517c158b992c72a9597bde5233165985ea9064f08733c4ee9",
+						"postScriptName": "NotoSansEthiopic-Bold",
+						"version": "Version 2.102",
+						"fsType": 0,
+						"glyphs": 925
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansethiopic/NotoSansEthiopic%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "0dbccc00b22d180ebd6a4bd8a733918a29e709fa6798023adc3e6cd40da65077"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansEthiopic-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-devanagari",
+			"name": "Noto Sans Devanagari",
+			"version": "2.007",
+			"scripts": [
+				"Deva"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-devanagari/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansdevanagari",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-devanagari/NotoSansDevanagari-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 88523,
+					"sha256": "ca0c19c1f51401718aa2f83bea818ff6770ca5568872f0260903075a45613850",
+					"ttf": {
+						"bytes": 218236,
+						"sha256": "c08b31cb15937175a62a2ad3a2659b78a0330395213f0e9c424b3b0c3635336a",
+						"postScriptName": "NotoSansDevanagari-Regular",
+						"version": "Version 2.007",
+						"fsType": 0,
+						"glyphs": 1117
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansdevanagari/NotoSansDevanagari%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "14ec4af41f27482216d1c2229f417ff9b1425e1babb014e57d1d40d03229853e"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansDevanagari-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-devanagari/NotoSansDevanagari-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 92062,
+					"sha256": "f9686c8eacc95446589bbcf1c88cd5cd34ae85c42776f961ce3c1ce9ee2c9c41",
+					"ttf": {
+						"bytes": 218796,
+						"sha256": "ada94f119c1ad559b69617ac7715822f0d96ec4abc4389118fe461ee00391c59",
+						"postScriptName": "NotoSansDevanagari-Bold",
+						"version": "Version 2.007",
+						"fsType": 0,
+						"glyphs": 1117
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansdevanagari/NotoSansDevanagari%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "14ec4af41f27482216d1c2229f417ff9b1425e1babb014e57d1d40d03229853e"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansDevanagari-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-bengali",
+			"name": "Noto Sans Bengali",
+			"version": "3.011",
+			"scripts": [
+				"Beng"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-bengali/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansbengali",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-bengali/NotoSansBengali-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 73027,
+					"sha256": "535e25219937e4c12d3525753e0e9c50a99f8895f4a8d4d46c9444f8cbfd0664",
+					"ttf": {
+						"bytes": 141012,
+						"sha256": "1e9e00dd135c770ec3428e6791893a2a14f9c923615e708c2bb8f5e40a965e9e",
+						"postScriptName": "NotoSansBengali-Regular",
+						"version": "Version 3.011",
+						"fsType": 0,
+						"glyphs": 730
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansbengali/NotoSansBengali%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "dcd42978094e584a849c84a51450eeac40c8826057d566ea6d4b9627a403a05a"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansBengali-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-bengali/NotoSansBengali-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 76715,
+					"sha256": "2021e487e610b2d06ae4f7910e4491cb7af31d54307cd888e1fa5b30f463640e",
+					"ttf": {
+						"bytes": 141416,
+						"sha256": "d5ec48292ca71780ae9a8aa47836e9e9aafacb9345b6c9390ec658cb8c724f24",
+						"postScriptName": "NotoSansBengali-Bold",
+						"version": "Version 3.011",
+						"fsType": 0,
+						"glyphs": 730
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansbengali/NotoSansBengali%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "dcd42978094e584a849c84a51450eeac40c8826057d566ea6d4b9627a403a05a"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansBengali-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-gurmukhi",
+			"name": "Noto Sans Gurmukhi",
+			"version": "2.004",
+			"scripts": [
+				"Guru"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-gurmukhi/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansgurmukhi",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-gurmukhi/NotoSansGurmukhi-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 35651,
+					"sha256": "ea3196b56f1413144539f70d10d2a8ccf93d4a15242d5acf7a804b604ade8d33",
+					"ttf": {
+						"bytes": 67264,
+						"sha256": "cea14b97a7f63b464740a3d5946eb519270be0c5848b686b42deb3829bb162b0",
+						"postScriptName": "NotoSansGurmukhi-Regular",
+						"version": "Version 2.004",
+						"fsType": 0,
+						"glyphs": 615
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansgurmukhi/NotoSansGurmukhi%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "1e6f728fa620e566f842d81e220265813faa12771214765d289c98e035adc5f2"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansGurmukhi-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-gurmukhi/NotoSansGurmukhi-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 35663,
+					"sha256": "2c612253c5d809a6c9262e77caca82d56c722fdc4424730f55e79fd9bb4c41db",
+					"ttf": {
+						"bytes": 67332,
+						"sha256": "e43e25b5cae228b04762fb5b1f93a2e6545cd87fa35b79a2f50331665f49938e",
+						"postScriptName": "NotoSansGurmukhi-Bold",
+						"version": "Version 2.004",
+						"fsType": 0,
+						"glyphs": 615
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansgurmukhi/NotoSansGurmukhi%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "1e6f728fa620e566f842d81e220265813faa12771214765d289c98e035adc5f2"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansGurmukhi-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-gujarati",
+			"name": "Noto Sans Gujarati",
+			"version": "2.106",
+			"scripts": [
+				"Gujr"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-gujarati/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansgujarati",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-gujarati/NotoSansGujarati-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 72502,
+					"sha256": "bf88e038e5179573de9e091419f445e52adaeb3594c1d1d2288b686a8fc80933",
+					"ttf": {
+						"bytes": 179052,
+						"sha256": "e0807d55f025e98ffc62cd2db1a8cb4d4a2d2531724c44fdb0a7d23bd9f9d9d2",
+						"postScriptName": "NotoSansGujarati-Regular",
+						"version": "Version 2.106",
+						"fsType": 0,
+						"glyphs": 1110
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansgujarati/NotoSansGujarati%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "9901d8552f1dd5d2c50dbd4caa6f6e174e74e8264f06594ab259ae6e7b1ac428"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansGujarati-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-gujarati/NotoSansGujarati-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 72831,
+					"sha256": "0da4fda4da7ed26df173618372a828531a3ac86eb3dafc3183cf9565049f4c82",
+					"ttf": {
+						"bytes": 179252,
+						"sha256": "271d1bc516d030e79f3477ca83610c3ff47980daab21baa393b2c8ce6050ed38",
+						"postScriptName": "NotoSansGujarati-Bold",
+						"version": "Version 2.106",
+						"fsType": 0,
+						"glyphs": 1110
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansgujarati/NotoSansGujarati%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "9901d8552f1dd5d2c50dbd4caa6f6e174e74e8264f06594ab259ae6e7b1ac428"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansGujarati-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-oriya",
+			"name": "Noto Sans Oriya",
+			"version": "2.007",
+			"scripts": [
+				"Orya"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-oriya/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansoriya",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-oriya/NotoSansOriya-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 76615,
+					"sha256": "bb737c400ad5b7eb432e0ebb4b18ec953da3b0c17ca67ebe829afd16360a6779",
+					"ttf": {
+						"bytes": 171472,
+						"sha256": "9d00dcf34edc3e5562fb4c339d974febdc0b52f2954ddce8ee8cf708cf79c54b",
+						"postScriptName": "NotoSansOriya-Regular",
+						"version": "Version 2.007",
+						"fsType": 0,
+						"glyphs": 901
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansoriya/NotoSansOriya%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "910342275d619081b896b4ed25fd9ad6ff320c25591b810de1fcc4beb153ba82"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansOriya-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-oriya/NotoSansOriya-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 77921,
+					"sha256": "f81c5a11b7ee3ffba86e8e00d4dd00a1821f9ea3c21ceda151a9e34b0a03a404",
+					"ttf": {
+						"bytes": 171736,
+						"sha256": "f32ac55645cd197ca5291fd5f585f1f0e18747cb1e0ec422d1a64d83ad3a22cc",
+						"postScriptName": "NotoSansOriya-Bold",
+						"version": "Version 2.007",
+						"fsType": 0,
+						"glyphs": 901
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansoriya/NotoSansOriya%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "910342275d619081b896b4ed25fd9ad6ff320c25591b810de1fcc4beb153ba82"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansOriya-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-tamil",
+			"name": "Noto Sans Tamil",
+			"version": "2.004",
+			"scripts": [
+				"Taml"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-tamil/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanstamil",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-tamil/NotoSansTamil-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 41197,
+					"sha256": "8f916206e38e06a7cab2732bd8b3ebd950be1549cc7abc67b52fe1f550b72490",
+					"ttf": {
+						"bytes": 82612,
+						"sha256": "fec0c632226e56947bec61a5ab59e330344877655830e1989755be1b6a446f57",
+						"postScriptName": "NotoSansTamil-Regular",
+						"version": "Version 2.004",
+						"fsType": 0,
+						"glyphs": 576
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanstamil/NotoSansTamil%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "aa3a9b321f4b0bb2c40203ffbde9af89713227866e0e13f76e5b9eeea727cf88"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansTamil-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-tamil/NotoSansTamil-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 40924,
+					"sha256": "6c98c9329b4892a9b18f90c4485f332960f01f67559f721e5762d83924d4d444",
+					"ttf": {
+						"bytes": 82636,
+						"sha256": "1feff733e9af2042b9c8ef4fecde65997262e3673c27af847cb7d2879d5569fa",
+						"postScriptName": "NotoSansTamil-Bold",
+						"version": "Version 2.004",
+						"fsType": 0,
+						"glyphs": 576
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanstamil/NotoSansTamil%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "aa3a9b321f4b0bb2c40203ffbde9af89713227866e0e13f76e5b9eeea727cf88"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansTamil-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-telugu",
+			"name": "Noto Sans Telugu",
+			"version": "2.005",
+			"scripts": [
+				"Telu"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-telugu/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanstelugu",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-telugu/NotoSansTelugu-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 79610,
+					"sha256": "f62b060a2a7a7d2b6210d62c5bd45a4b71593e8976e0fdbe5c3eb6596acd4341",
+					"ttf": {
+						"bytes": 208876,
+						"sha256": "a31abec3733818aa43af99dd3814aa59ad9780bd6cdba2bb2b4805a1f9c25753",
+						"postScriptName": "NotoSansTelugu-Regular",
+						"version": "Version 2.005",
+						"fsType": 0,
+						"glyphs": 1247
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanstelugu/NotoSansTelugu%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "e618af7bf999df192ed4f388eba2e563f2b5015034e9cbb317b5bd793bd7334d"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansTelugu-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-telugu/NotoSansTelugu-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 81748,
+					"sha256": "a76fcd667e09aa0f1199c02c5306ce27221c5c845189afb795ed39645c8d47e1",
+					"ttf": {
+						"bytes": 209372,
+						"sha256": "d331e43088795551749ea514f2725c3bc5d17c0142a3cec9341ec96d95ec79c1",
+						"postScriptName": "NotoSansTelugu-Bold",
+						"version": "Version 2.005",
+						"fsType": 0,
+						"glyphs": 1247
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanstelugu/NotoSansTelugu%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "e618af7bf999df192ed4f388eba2e563f2b5015034e9cbb317b5bd793bd7334d"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansTelugu-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-kannada",
+			"name": "Noto Sans Kannada",
+			"version": "2.006",
+			"scripts": [
+				"Knda"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-kannada/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanskannada",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-kannada/NotoSansKannada-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 63825,
+					"sha256": "8126e85a5761c042315ffa22d26a7d562edf2d668283ea2e2d757b03fd097cff",
+					"ttf": {
+						"bytes": 169104,
+						"sha256": "e0d60c498ee14ac74cf8a4e502831dd50ba3631d3dd267790e94f2cc9c8c2df5",
+						"postScriptName": "NotoSansKannada-Regular",
+						"version": "Version 2.006",
+						"fsType": 0,
+						"glyphs": 933
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanskannada/NotoSansKannada%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "cca4f3b3a8cb12fb261f1b43baf5d2f7f59d90fe123d41f0065ed3a183997ec9"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansKannada-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-kannada/NotoSansKannada-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 64359,
+					"sha256": "1e2a9dda79beab91c2a06c1ed4baaf8e38d082093c01f686c4aab9da69d35156",
+					"ttf": {
+						"bytes": 169220,
+						"sha256": "0171c3baf4745de728d69cfc1fe9ca7b9b468c23743f7047b403635e8cbda7a6",
+						"postScriptName": "NotoSansKannada-Bold",
+						"version": "Version 2.006",
+						"fsType": 0,
+						"glyphs": 933
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanskannada/NotoSansKannada%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "cca4f3b3a8cb12fb261f1b43baf5d2f7f59d90fe123d41f0065ed3a183997ec9"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansKannada-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-malayalam",
+			"name": "Noto Sans Malayalam",
+			"version": "2.104",
+			"scripts": [
+				"Mlym"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-malayalam/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansmalayalam",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-malayalam/NotoSansMalayalam-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 50811,
+					"sha256": "4cca6661cfd5aa4b23cbdae7a736fcbdf9331d1907ddcd95d8edccecc9eab9b3",
+					"ttf": {
+						"bytes": 111492,
+						"sha256": "7f8d04803c949b598e104d2978b7bfe153868de894eb3fe078d087ab48742eb2",
+						"postScriptName": "NotoSansMalayalam-Regular",
+						"version": "Version 2.104",
+						"fsType": 0,
+						"glyphs": 697
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansmalayalam/NotoSansMalayalam%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "312e0e7c3cc15fa09eb42a8f749eeb246b593ed420e3c81aafe8d910c3a6fb56"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansMalayalam-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-malayalam/NotoSansMalayalam-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 50079,
+					"sha256": "5862275c436a416893e3484693f55df295287f30ecf71ebd2195ee86a1130c91",
+					"ttf": {
+						"bytes": 111444,
+						"sha256": "94fa5dc026bad3abe8f0d74251e34f67cab8cd28d0f51185edbab321aa55dcc4",
+						"postScriptName": "NotoSansMalayalam-Bold",
+						"version": "Version 2.104",
+						"fsType": 0,
+						"glyphs": 697
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansmalayalam/NotoSansMalayalam%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "312e0e7c3cc15fa09eb42a8f749eeb246b593ed420e3c81aafe8d910c3a6fb56"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansMalayalam-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-sinhala",
+			"name": "Noto Sans Sinhala",
+			"version": "2.006",
+			"scripts": [
+				"Sinh"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-sinhala/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanssinhala",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-sinhala/NotoSansSinhala-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 73891,
+					"sha256": "4ceb4665b9e4073c51f3fd21ef8e6b2ae0593ff9956eb6c051e52031d7d6f509",
+					"ttf": {
+						"bytes": 247156,
+						"sha256": "9e62aa1a46b89a40a7cebbf9f4450a8da0ad659902ad7fa90c6829583ce480c4",
+						"postScriptName": "NotoSansSinhala-Regular",
+						"version": "Version 2.006",
+						"fsType": 0,
+						"glyphs": 979
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanssinhala/NotoSansSinhala%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "9bd93e407a278075be403324063bc94a7e306c44de4df81214e932330c22eecf"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansSinhala-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-sinhala/NotoSansSinhala-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 73997,
+					"sha256": "534d16bf84b51bd50b0ddccd42b8bf12a85ac615b7c5e5eeb5feef98d6e87c5f",
+					"ttf": {
+						"bytes": 246808,
+						"sha256": "2c1f382857f28e99f046ae5b041cc4d758310e9b8c4f5c9051359da93abcb42a",
+						"postScriptName": "NotoSansSinhala-Bold",
+						"version": "Version 2.006",
+						"fsType": 0,
+						"glyphs": 979
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanssinhala/NotoSansSinhala%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "9bd93e407a278075be403324063bc94a7e306c44de4df81214e932330c22eecf"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansSinhala-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-thai",
+			"name": "Noto Sans Thai",
+			"version": "2.002",
+			"scripts": [
+				"Thai"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-thai/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansthai",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-thai/NotoSansThai-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 27670,
+					"sha256": "ac2a2343b87089d96be610d2216f0dfbc063e2786bc0cfe90573d7675de3ef18",
+					"ttf": {
+						"bytes": 47788,
+						"sha256": "6473d5fce0f52829430dd9a55b1647a02f4a2913734a35fb00e54dc69de7fbc8",
+						"postScriptName": "NotoSansThai-Regular",
+						"version": "Version 2.002",
+						"fsType": 0,
+						"glyphs": 467
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansthai/NotoSansThai%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "5a1c559bb539583c8a1fd99d1c5b9491e5e14478c9cd2bd0970d5c3096cc9ef8"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansThai-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-thai/NotoSansThai-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 27553,
+					"sha256": "592f15903d210f796aa2c049440852902ea24f02b914c533d3d314efa72f1747",
+					"ttf": {
+						"bytes": 47800,
+						"sha256": "63d2f9698c1443cca0287f2c2490fad8690c69d6253e72d2635896c6fdb2783f",
+						"postScriptName": "NotoSansThai-Bold",
+						"version": "Version 2.002",
+						"fsType": 0,
+						"glyphs": 467
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansthai/NotoSansThai%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "5a1c559bb539583c8a1fd99d1c5b9491e5e14478c9cd2bd0970d5c3096cc9ef8"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansThai-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-lao",
+			"name": "Noto Sans Lao",
+			"version": "2.003",
+			"scripts": [
+				"Laoo"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-lao/OFL.txt",
+			"reservedFontName": null,
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanslao",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-lao/NotoSansLao-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 28994,
+					"sha256": "2aaf97233cf3c3b9fc70c65ba3679fa682c34d6cb3646b2abe65268153653026",
+					"ttf": {
+						"bytes": 52828,
+						"sha256": "80a7cc1f1e551023da349523479f0e56dc7b9049933ca447055b7c144ab5c025",
+						"postScriptName": "NotoSansLao-Regular",
+						"version": "Version 2.003",
+						"fsType": 0,
+						"glyphs": 466
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanslao/NotoSansLao%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "9608b94603a82d09a8038946f9775242f99e3b3459b7f1e4d5b335b578cd7ab3"
+					},
+					"conversion": "Static instance at wght=400, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansLao-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				},
+				{
+					"file": "noto/noto-sans-lao/NotoSansLao-Bold.ttf.gz",
+					"weight": 700,
+					"italic": false,
+					"bytes": 29664,
+					"sha256": "e507a13be88cc6efdea4d5068fd0fba4bd6e5295977dbbb3ef28095e3aa82032",
+					"ttf": {
+						"bytes": 52968,
+						"sha256": "856d885ad5956992e2d9e8c98ec4e4042648eb2720fcd1b3891f6b13fa47c7f3",
+						"postScriptName": "NotoSansLao-Bold",
+						"version": "Version 2.003",
+						"fsType": 0,
+						"glyphs": 466
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanslao/NotoSansLao%5Bwdth%2Cwght%5D.ttf",
+						"sha256": "9608b94603a82d09a8038946f9775242f99e3b3459b7f1e4d5b335b578cd7ab3"
+					},
+					"conversion": "Static instance at wght=700, wdth=100 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansLao-Bold, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-sc",
+			"name": "Noto Sans SC",
+			"version": "2.004",
+			"scripts": [
+				"Hani",
+				"Hira",
+				"Kana",
+				"Bopo"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-sc/OFL.txt",
+			"reservedFontName": "Source",
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanssc",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-sc/NotoSansSC-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 6303515,
+					"sha256": "ade97f77004fc4364379272592a06a7d7a951748694195bf5684399a47f13c70",
+					"ttf": {
+						"bytes": 10595932,
+						"sha256": "eeb06b8a64fd04a2744d95579db1571b51027cda61ed78c62e4b730791525461",
+						"postScriptName": "NotoSansSC-Regular",
+						"version": "Version 2.004-H2;hotconv 1.0.118;makeotfexe 2.5.65603",
+						"fsType": 0,
+						"glyphs": 31036
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf",
+						"sha256": "a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da"
+					},
+					"conversion": "Static instance at wght=400 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansSC-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-tc",
+			"name": "Noto Sans TC",
+			"version": "2.004",
+			"scripts": [
+				"Hani",
+				"Hira",
+				"Kana",
+				"Bopo"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-tc/OFL.txt",
+			"reservedFontName": "Source",
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanstc",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-tc/NotoSansTC-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 4268219,
+					"sha256": "d5c161308a78ca32ad090cee655af9dad60f5b8010dc14e9bd4229883207a0f8",
+					"ttf": {
+						"bytes": 7149180,
+						"sha256": "82559d4a2ab69224de5cb6191ddf40b0027c4b519ff891e9342d354045285014",
+						"postScriptName": "NotoSansTC-Regular",
+						"version": "Version 2.004-H2;hotconv 1.0.118;makeotfexe 2.5.65603",
+						"fsType": 0,
+						"glyphs": 20950
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanstc/NotoSansTC%5Bwght%5D.ttf",
+						"sha256": "864727d210d54f2537bbe23b3a839436c3992af72de9322af5270897246bd44f"
+					},
+					"conversion": "Static instance at wght=400 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansTC-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-jp",
+			"name": "Noto Sans JP",
+			"version": "2.004",
+			"scripts": [
+				"Hani",
+				"Hira",
+				"Kana"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-jp/OFL.txt",
+			"reservedFontName": "Source",
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansjp",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-jp/NotoSansJP-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 3316166,
+					"sha256": "e27ae5d5956931e052884d2477774ba8a5e6d4a98ea0a0bffaedcd8477f6ad33",
+					"ttf": {
+						"bytes": 5766884,
+						"sha256": "57458d02bb14502d7ae98abe1e2f79b52783ceda9e4628df145faae23a3d31d2",
+						"postScriptName": "NotoSansJP-Regular",
+						"version": "Version 2.004-H2;hotconv 1.0.118;makeotfexe 2.5.65603",
+						"fsType": 0,
+						"glyphs": 17936
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf",
+						"sha256": "c2f3b4d463500a2ddcd3849cded1fceeb9fd6d1c32e6cbecd568453ba50fc68f"
+					},
+					"conversion": "Static instance at wght=400 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansJP-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
+		},
+		{
+			"id": "noto-sans-kr",
+			"name": "Noto Sans KR",
+			"version": "2.004",
+			"scripts": [
+				"Hang",
+				"Hani",
+				"Hira",
+				"Kana"
+			],
+			"license": "OFL-1.1",
+			"licenseFile": "noto/noto-sans-kr/OFL.txt",
+			"reservedFontName": "Source",
+			"source": "https://github.com/google/fonts/tree/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanskr",
+			"commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+			"faces": [
+				{
+					"file": "noto/noto-sans-kr/NotoSansKR-Regular.ttf.gz",
+					"weight": 400,
+					"italic": false,
+					"bytes": 3017089,
+					"sha256": "80a1106a71f586b26deae45bdcd766db999c63f7d439ae876081528ba2e98d22",
+					"ttf": {
+						"bytes": 6224868,
+						"sha256": "4609a7b62a6da24cae3a8b73ecde7003581b8f60662d60cc8f55a3793de07763",
+						"postScriptName": "NotoSansKR-Regular",
+						"version": "Version 2.004-H2;hotconv 1.0.118;makeotfexe 2.5.65603",
+						"fsType": 0,
+						"glyphs": 24964
+					},
+					"upstream": {
+						"url": "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/notosanskr/NotoSansKR%5Bwght%5D.ttf",
+						"sha256": "194018e6b2b293a7964f037b25c0249ce1418bc9ab3c971060a03aa57861e252"
+					},
+					"conversion": "Static instance at wght=400 of the upstream variable font, made with fontTools 4.60.1 varLib.instancer (updateFontNames, timestamps kept) with PostScript name NotoSansKR-Regular, then gzip-compressed (level 9, no name or time stamp). Generating an instance modifies the font (a Modified Version under the OFL); the family has no Reserved Font Name in its OFL.txt."
+				}
+			]
 		}
 	]
 }

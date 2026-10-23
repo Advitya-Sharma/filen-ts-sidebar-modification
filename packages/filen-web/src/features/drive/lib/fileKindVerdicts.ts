@@ -1,4 +1,4 @@
-import { boundedVerdicts, VERDICT_MAX_RECORDS, type ContentVerdict, type StoredVerdict } from "@filen/shared"
+import { boundedVerdicts, VERDICT_MAX_RECORDS, type ContentVerdict, type FileVerdict, type StoredVerdict } from "@filen/shared"
 import { createListenerSet } from "@/lib/listenerSet"
 import { log } from "@/lib/log"
 
@@ -17,8 +17,19 @@ export interface FileKindVerdictStorage {
 	remove: (uuid: string) => Promise<void>
 }
 
+// A verdict as memory holds it: a document verdict (a `.dot` read as a Word template or not) as well as the media
+// ones kv keeps.
+interface HeldVerdict {
+	v: FileVerdict
+	at: number
+}
+
+function isContentVerdict(verdict: FileVerdict): verdict is ContentVerdict {
+	return verdict !== "wordBinary" && verdict !== "notWordBinary"
+}
+
 // Most recently written last.
-const verdicts = new Map<string, StoredVerdict>()
+const verdicts = new Map<string, HeldVerdict>()
 // Held in memory only (a public link's file, read without a session): nothing of it reaches kv.
 const unsaved = new Set<string>()
 // Each change names the files it concerns; null for any (a load, a reset).
@@ -78,29 +89,30 @@ export function attachFileKindVerdictStorage(target: FileKindVerdictStorage): vo
 		})
 }
 
-export function fileKindVerdict(uuid: string): ContentVerdict | undefined {
+export function fileKindVerdict(uuid: string): FileVerdict | undefined {
 	return verdicts.get(uuid)?.v
 }
 
 // `memoryOnly` keeps the verdict for this session alone: what an anonymous visitor's reads said is never left
-// in kv for whoever signs in on the browser next. A later persistent record of the same verdict saves it.
-export function recordFileKindVerdict(uuid: string, verdict: ContentVerdict, options: { memoryOnly?: boolean } = {}): void {
-	const memoryOnly = options.memoryOnly === true
+// in kv for whoever signs in on the browser next. A later persistent record of the same verdict saves it. Document
+// verdicts stay in memory: the viewer that reads a `.dot` reads it anyway, so a later session tells again.
+export function recordFileKindVerdict(uuid: string, verdict: FileVerdict, options: { memoryOnly?: boolean } = {}): void {
+	const at = Date.now()
+	// What kv may keep: a media verdict not asked to stay in memory.
+	const stored: StoredVerdict | undefined = options.memoryOnly !== true && isContentVerdict(verdict) ? { v: verdict, at } : undefined
 
-	if (verdicts.get(uuid)?.v === verdict && (memoryOnly || !unsaved.has(uuid))) {
+	if (verdicts.get(uuid)?.v === verdict && (stored === undefined || !unsaved.has(uuid))) {
 		return
 	}
 
-	const value: StoredVerdict = { v: verdict, at: Date.now() }
-
 	verdicts.delete(uuid)
-	verdicts.set(uuid, value)
+	verdicts.set(uuid, { v: verdict, at })
 
-	if (memoryOnly) {
+	if (stored === undefined) {
 		unsaved.add(uuid)
 	} else {
 		unsaved.delete(uuid)
-		persist(kv => kv.save(uuid, value))
+		persist(kv => kv.save(uuid, stored))
 	}
 
 	const oldest = verdicts.size > VERDICT_MAX_RECORDS ? verdicts.keys().next().value : undefined
@@ -121,7 +133,7 @@ export function subscribeFileKindVerdicts(listener: (uuids: readonly string[] | 
 }
 
 // The files holding `verdict`, at most VERDICT_MAX_RECORDS.
-export function filesWithVerdict(verdict: ContentVerdict): string[] {
+export function filesWithVerdict(verdict: FileVerdict): string[] {
 	const uuids: string[] = []
 
 	for (const [uuid, value] of verdicts) {

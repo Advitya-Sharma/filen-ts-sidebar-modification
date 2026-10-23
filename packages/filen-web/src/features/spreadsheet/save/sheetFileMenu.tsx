@@ -8,6 +8,9 @@ import {
 	DropdownMenuContent,
 	DropdownMenuItem,
 	DropdownMenuSeparator,
+	DropdownMenuSub,
+	DropdownMenuSubContent,
+	DropdownMenuSubTrigger,
 	DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -17,8 +20,11 @@ import { useIsOnline } from "@/lib/useIsOnline"
 export interface SheetFileMenuProps {
 	// A text file (its CSV is its cells) rather than a workbook (its CSV is the sheet on show).
 	text: boolean
-	// Offers Download as CSV (never for a password-protected workbook, whose cells stay sealed).
+	// Offers Download as ▸ CSV (never for a password-protected workbook, whose cells stay sealed, nor a file that may
+	// not be downloaded).
 	onDownloadCsv: (() => void) | undefined
+	// Offers Download as ▸ PDF (the sheet on show as it prints); undefined when the file may not be downloaded.
+	onDownloadPdf?: (() => void) | undefined
 	// Offers Save as .xlsx (asks first).
 	onSaveAsXlsx: (() => void) | undefined
 	// Offers the autosave setting: the file is edited here.
@@ -27,14 +33,16 @@ export interface SheetFileMenuProps {
 	onPrint?: (() => void) | undefined
 }
 
-// The spreadsheet's file actions beside the cell contents: Save as .xlsx, Download as CSV, Print, and the autosave setting
-// (the same synced setting as Settings → Advanced → Documents). Nothing to offer: not shown.
-export function SheetFileMenu({ text, onDownloadCsv, onSaveAsXlsx, autosave, onPrint }: SheetFileMenuProps) {
+// The spreadsheet's file actions beside the cell contents: Save as .xlsx, Download as ▸ PDF or CSV, Print, and the
+// autosave setting (the same synced setting as Settings → Advanced → Documents). Nothing to offer: not shown.
+export function SheetFileMenu({ text, onDownloadCsv, onDownloadPdf, onSaveAsXlsx, autosave, onPrint }: SheetFileMenuProps) {
 	const { t } = useTranslation(["preview", "settings"])
 	const settings = useOfficeSettings()
 	const online = useIsOnline()
 
-	if (onDownloadCsv === undefined && onSaveAsXlsx === undefined && onPrint === undefined && !autosave) {
+	const downloads = onDownloadCsv !== undefined || onDownloadPdf !== undefined
+
+	if (!downloads && onSaveAsXlsx === undefined && onPrint === undefined && !autosave) {
 		return null
 	}
 
@@ -66,17 +74,25 @@ export function SheetFileMenu({ text, onDownloadCsv, onSaveAsXlsx, autosave, onP
 				{onSaveAsXlsx === undefined ? null : (
 					<DropdownMenuItem onClick={onSaveAsXlsx}>{t("previewSpreadsheetSaveAsXlsx")}</DropdownMenuItem>
 				)}
-				{onDownloadCsv === undefined ? null : (
-					<DropdownMenuItem onClick={onDownloadCsv}>
-						{t(text ? "previewSheetDownloadCsv" : "previewSheetDownloadSheetCsv")}
-					</DropdownMenuItem>
-				)}
+				{downloads ? (
+					<DropdownMenuSub>
+						<DropdownMenuSubTrigger>{t("previewSheetDownloadAs")}</DropdownMenuSubTrigger>
+						<DropdownMenuSubContent data-preview-surface>
+							{onDownloadPdf === undefined ? null : (
+								<DropdownMenuItem onClick={onDownloadPdf}>{t("previewSheetDownloadPdf")}</DropdownMenuItem>
+							)}
+							{onDownloadCsv === undefined ? null : (
+								<DropdownMenuItem onClick={onDownloadCsv}>
+									{t(text ? "previewSheetDownloadCsvFormat" : "previewSheetDownloadSheetCsvFormat")}
+								</DropdownMenuItem>
+							)}
+						</DropdownMenuSubContent>
+					</DropdownMenuSub>
+				) : null}
 				{onPrint === undefined ? null : <DropdownMenuItem onClick={onPrint}>{t("previewSheetPrintMenu")}</DropdownMenuItem>}
 				{autosave ? (
 					<>
-						{onSaveAsXlsx === undefined && onDownloadCsv === undefined && onPrint === undefined ? null : (
-							<DropdownMenuSeparator />
-						)}
+						{onSaveAsXlsx === undefined && !downloads && onPrint === undefined ? null : <DropdownMenuSeparator />}
 						<DropdownMenuCheckboxItem
 							closeOnClick
 							checked={settings.autosave}

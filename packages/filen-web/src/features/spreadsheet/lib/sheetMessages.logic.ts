@@ -1,8 +1,11 @@
 import type { SheetFileKind, SheetRefusal, SheetViewOnlyReason, SheetWritability } from "@filen/office/core/sheet"
 import type { PreviewKey } from "@/lib/i18n"
 
-// A legacy workbook's note names the format the file is in: an .xls, or its template, an .xlt.
+// A view-only format's note names the format the file is in: an .xls, its template (an .xlt), or an OpenDocument
+// spreadsheet (.ods, .ots).
 function legacyKey(kind: SheetFileKind): PreviewKey {
+	if (kind === "ods" || kind === "ots") return "previewSheetReadOnlyOds"
+
 	return kind === "xlt" ? "previewSheetReadOnlyXlt" : "previewSpreadsheetReadOnlyXls"
 }
 

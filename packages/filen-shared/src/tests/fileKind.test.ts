@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { resolveFileKind, verdictChangesKind, type ContentVerdict, type FileKindSource } from "@filen/shared"
+import { resolveFileKind, verdictChangesKind, type FileKindSource, type FileVerdict } from "@filen/shared"
 
 // An app table as web's preview categories read it.
 const KINDS: Readonly<Record<string, string>> = {
@@ -21,7 +21,9 @@ const KINDS: Readonly<Record<string, string>> = {
 	oga: "audio",
 	weba: "audio",
 	gz: "archive",
-	jpg: "image"
+	jpg: "image",
+	docx: "docx",
+	dot: "docx"
 }
 
 function kindOf(extension: string): string | null {
@@ -34,7 +36,7 @@ type Row = [
 	name: string,
 	mime: string | null,
 	size: number,
-	verdict: ContentVerdict | null,
+	verdict: FileVerdict | null,
 	kind: string | null,
 	extension: string,
 	source: FileKindSource,
@@ -84,7 +86,13 @@ const ROWS: Row[] = [
 	// A known extension that means one thing wins, whatever the type says; the last extension counts.
 	["photo.JPG", "application/octet-stream", 100, null, "image", "jpg", "extension", false, false],
 	["backup.tar.gz", "application/gzip", 100, null, "archive", "gz", "extension", false, false],
-	["notes.md", "text/plain", 100, null, "markdown", "md", "extension", false, false]
+	["notes.md", "text/plain", 100, null, "markdown", "md", "extension", false, false],
+	// A .dot is a Word 97–2003 template or a Graphviz (text) file: a read of its signature decides, else a text
+	// MIME type, else the template.
+	["letter.dot", "application/msword", 30_000, null, "docx", "dot", "default", true, true],
+	["letter.dot", null, 30_000, "wordBinary", "docx", "dot", "sniff", true, false],
+	["graph.dot", "application/msword", 300, "notWordBinary", "text", "txt", "sniff", true, false],
+	["graph.dot", "text/vnd.graphviz", 300, null, "text", "txt", "mime", true, true]
 ]
 
 describe("resolveFileKind", () => {
@@ -94,6 +102,13 @@ describe("resolveFileKind", () => {
 			expect(resolveFileKind({ name, mime, size, verdict }, kindOf)).toEqual({ kind, extension, source, ambiguous, sniffable })
 		}
 	)
+
+	it("keeps a .dot's verdict only where it changes the kind", () => {
+		const graph = { name: "graph.dot", mime: "application/msword", size: 300 }
+
+		expect(verdictChangesKind(graph, "notWordBinary", kindOf)).toBe(true)
+		expect(verdictChangesKind(graph, "wordBinary", kindOf)).toBe(false)
+	})
 
 	it("says nothing is sniffable for a .ts of unknown size", () => {
 		expect(resolveFileKind({ name: "clip.ts" }, kindOf).sniffable).toBe(false)

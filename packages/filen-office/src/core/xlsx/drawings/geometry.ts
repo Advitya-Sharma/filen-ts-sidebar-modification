@@ -1,3 +1,4 @@
+import { axisEntryAt, entriesBefore, entryCount } from "../../sheet/axisRuns"
 import { AxisFlag, type SheetAxisLayout } from "../../sheet/protocol"
 import { EMU_PER_PX, type DrawingAnchor, type DrawingMarker } from "./anchor"
 
@@ -10,42 +11,27 @@ export interface SheetAxisPositions {
 	size(index: number): number
 }
 
-// Positions along one axis of a sheet layout (pixels at 100 %, 9,525 EMU each).
+// Positions along one axis of a sheet layout (pixels at 100 %, 9,525 EMU each); an entry may stand for a run.
 export function axisPositions(layout: SheetAxisLayout): SheetAxisPositions {
 	const count = layout.indices.length
-	// Running difference from the default size before each listed index.
+	const sizeOf = (k: number): number => (((layout.flags[k] ?? 0) & AxisFlag.HIDDEN) !== 0 ? 0 : (layout.sizes[k] ?? layout.defaultSize))
+	// Running difference from the default size before each entry.
 	const before = new Float64Array(count + 1)
 
-	for (let k = 0; k < count; k++) {
-		const hidden = ((layout.flags[k] ?? 0) & AxisFlag.HIDDEN) !== 0
-		const size = hidden ? 0 : (layout.sizes[k] ?? layout.defaultSize)
-
-		before[k + 1] = (before[k] ?? 0) + size - layout.defaultSize
-	}
-
-	// The listed entries before `index` (binary search over the ascending indices).
-	const listedBefore = (index: number): number => {
-		let low = 0
-		let high = count
-
-		while (low < high) {
-			const mid = (low + high) >>> 1
-
-			if ((layout.indices[mid] ?? 0) < index) low = mid + 1
-			else high = mid
-		}
-
-		return low
-	}
+	for (let k = 0; k < count; k++) before[k + 1] = (before[k] ?? 0) + (sizeOf(k) - layout.defaultSize) * entryCount(layout, k)
 
 	return {
-		start: index => Math.round((index * layout.defaultSize + (before[listedBefore(index)] ?? 0)) * EMU_PER_PX),
+		start: index => {
+			const k = entriesBefore(layout, index) - 1
+			const covered = k < 0 ? 0 : Math.min(entryCount(layout, k), index - (layout.indices[k] ?? 0))
+			const difference = k < 0 ? 0 : (before[k] ?? 0) + (sizeOf(k) - layout.defaultSize) * covered
+
+			return Math.round((index * layout.defaultSize + difference) * EMU_PER_PX)
+		},
 		size: index => {
-			const k = listedBefore(index)
+			const k = axisEntryAt(layout, index)
 
-			if (layout.indices[k] !== index) return Math.round(layout.defaultSize * EMU_PER_PX)
-
-			return ((layout.flags[k] ?? 0) & AxisFlag.HIDDEN) !== 0 ? 0 : Math.round((layout.sizes[k] ?? layout.defaultSize) * EMU_PER_PX)
+			return Math.round((k < 0 ? layout.defaultSize : sizeOf(k)) * EMU_PER_PX)
 		}
 	}
 }

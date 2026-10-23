@@ -156,6 +156,27 @@ export function languageTag(lid: string): string | undefined {
 	return hex === null ? lid : LCIDS[Number.parseInt(hex[1] ?? "", 16)]
 }
 
+let identifiers: Map<string, number> | undefined
+
+// The Windows language identifier of a w:lang value (four hex digits, or a tag this knows); undefined otherwise.
+export function languageIdentifier(lang: string): number | undefined {
+	const hex = /^(?:0x)?([0-9A-Fa-f]{4})$/.exec(lang)
+
+	if (hex !== null) return Number.parseInt(hex[1] ?? "", 16)
+
+	if (identifiers === undefined) {
+		identifiers = new Map()
+
+		for (const [lcid, tag] of Object.entries(LCIDS)) {
+			const key = tag.toLowerCase()
+
+			if (!identifiers.has(key)) identifiers.set(key, Number(lcid))
+		}
+	}
+
+	return identifiers.get(lang.toLowerCase())
+}
+
 // A BCP 47 tag Intl accepts for w:lid (ST_Lang: a language tag or a hex LCID; one it cannot read as English).
 export function dateLocale(raw: string | null): string {
 	const lid = raw === null ? undefined : languageTag(raw)

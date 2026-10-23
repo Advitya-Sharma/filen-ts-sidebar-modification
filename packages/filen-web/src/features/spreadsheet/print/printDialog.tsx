@@ -4,7 +4,14 @@ import { toast } from "sonner"
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react"
 import type { SheetCommand, SheetFileKind } from "@filen/office/core/sheet"
 import type { SheetGridModel, SheetGridState } from "@filen/office/react/sheet"
-import { layOutPrint, pageCount, renderPrintPage, type PrintJob } from "@filen/office/react/sheet/print"
+import {
+	layOutPrint,
+	pageCount,
+	PrintPageTooLarge,
+	renderPrintPage,
+	type PrintJob,
+	type PrintSheetRequest
+} from "@filen/office/react/sheet/print"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Field, FieldError, FieldLabel } from "@/components/ui/field"
@@ -21,6 +28,7 @@ import {
 	MAX_BROWSER_PAGES,
 	PAPER_KEYS,
 	formOf,
+	headerValues,
 	patchOf,
 	percentOf,
 	printRequests,
@@ -52,17 +60,6 @@ interface WorkbookSettings {
 	readonly sheets: readonly PrintSheetSettings[]
 	// Visible sheets that do not print (chart sheets), by name.
 	readonly skipped: readonly string[]
-}
-
-function headerValues(name: string): { date: string; time: string; file: string; path: string } {
-	const now = new Date()
-
-	return {
-		date: new Intl.DateTimeFormat(undefined, { dateStyle: "short" }).format(now),
-		time: new Intl.DateTimeFormat(undefined, { timeStyle: "short" }).format(now),
-		file: name,
-		path: ""
-	}
 }
 
 function PagePreview({ svg, label }: { svg: string | null; label: string }) {
@@ -106,23 +103,26 @@ export interface SheetPrintDialogProps {
 	// The choices are written into the file (a workbook being edited).
 	canSave: boolean
 	run: (command: SheetCommand) => void
+	// Saves the pages as a PDF instead of printing them (undefined: not offered).
+	onSavePdf?: ((requests: readonly PrintSheetRequest[]) => void) | undefined
 	onClose: () => void
 }
 
 // The print dialog: what prints (the active sheet, the workbook or the selection), paper, orientation, scaling,
 // gridlines and headings, with the pages as they will print. The choices are saved into the active sheet's page setup
 // when the file is edited here, then the browser prints the pages.
-export function SheetPrintDialog({ active, grid, model, kind, name, canSave, run, onClose }: SheetPrintDialogProps) {
+export function SheetPrintDialog({ active, grid, model, kind, name, canSave, run, onSavePdf, onClose }: SheetPrintDialogProps) {
 	const { t } = useTranslation(["preview", "common"])
 	const id = useId()
 	const [form, setForm] = useState<PrintForm>(() => formOf(active.setup))
 	const [workbook, setWorkbook] = useState<WorkbookSettings | null>(null)
 	const [printed, setPrinted] = useState<PrintJob | null>(null)
 	const [index, setIndex] = useState(0)
+	// The page on show as drawn, or null where it holds too many cells to draw.
 	const [preview, setPreview] = useState<{
 		readonly printed: PrintJob
 		readonly index: number
-		readonly svg: string
+		readonly svg: string | null
 	} | null>(null)
 	const [progress, setProgress] = useState<{ done: number; pages: number } | null>(null)
 	const [measure] = useState(() => (typeof document === "undefined" ? () => 0 : canvasMeasure()))
@@ -206,7 +206,9 @@ export function SheetPrintDialog({ active, grid, model, kind, name, canSave, run
 
 	const shown = Math.min(index, Math.max(0, pages - 1))
 	// The page on show, once drawn for the pages laid out now.
-	const svg = preview !== null && preview.printed === printed && preview.index === shown ? preview.svg : null
+	const current = preview !== null && preview.printed === printed && preview.index === shown ? preview : null
+	const svg = current?.svg ?? null
+	const tooLarge = current !== null && current.svg === null
 
 	useEffect(() => {
 		if (printed === null || pages === 0) {
@@ -214,20 +216,35 @@ export function SheetPrintDialog({ active, grid, model, kind, name, canSave, run
 		}
 
 		let live = true
+		// A large page is drawn in slices: a page left for another stops at the next one.
+		const signal = { aborted: false }
 
-		void renderPrintPage({ job: printed, values: headerValues(name), id: `${id}-preview` }, shown).then(
+		void renderPrintPage({ job: printed, values: headerValues(name), id: `${id}-preview`, signal }, shown).then(
 			markup => {
 				if (live && markup !== null) {
 					setPreview({ printed, index: shown, svg: markup })
 				}
 			},
 			(error: unknown) => {
+				if (error instanceof PrintPageTooLarge) {
+					if (live) {
+						setPreview({ printed, index: shown, svg: null })
+					}
+
+					return
+				}
+
+				if (signal.aborted) {
+					return
+				}
+
 				log.warn("preview", "spreadsheet print preview failed", error)
 			}
 		)
 
 		return () => {
 			live = false
+			signal.aborted = true
 		}
 	}, [printed, pages, shown, name, id])
 
@@ -263,11 +280,28 @@ export function SheetPrintDialog({ active, grid, model, kind, name, canSave, run
 				onClose()
 			},
 			(error: unknown) => {
-				log.warn("preview", "spreadsheet print failed", error)
-				toast.error(t("previewSheetPrintFailed"))
+				if (error instanceof PrintPageTooLarge) {
+					toast.error(t("previewSheetPrintPageTooLarge", { page: error.page }))
+				} else {
+					log.warn("preview", "spreadsheet print failed", error)
+					toast.error(t("previewSheetPrintFailed"))
+				}
+
 				setProgress(null)
 			}
 		)
+	}
+
+	// The same pages as a PDF, made in the worker; the dialog closes, the toast counts.
+	function savePdf(): void {
+		const requests = printRequests(form, active, workbook?.sheets ?? [active], selection)
+
+		if (requests === null || onSavePdf === undefined) {
+			return
+		}
+
+		onSavePdf(requests)
+		onClose()
 	}
 
 	const paperItems = [
@@ -507,10 +541,19 @@ export function SheetPrintDialog({ active, grid, model, kind, name, canSave, run
 							</p>
 						) : (
 							<>
-								<PagePreview
-									svg={svg}
-									label={t("previewSheetPrintPreview")}
-								/>
+								{tooLarge ? (
+									<p
+										role="status"
+										className="text-sm text-muted-foreground"
+									>
+										{t("previewSheetPrintPageTooLarge", { page: shown + 1 })}
+									</p>
+								) : (
+									<PagePreview
+										svg={svg}
+										label={t("previewSheetPrintPreview")}
+									/>
+								)}
 								<div className="flex items-center gap-1">
 									<Button
 										variant="ghost"
@@ -564,6 +607,18 @@ export function SheetPrintDialog({ active, grid, model, kind, name, canSave, run
 					>
 						{t("common:cancel")}
 					</Button>
+					{onSavePdf !== undefined ? (
+						<Button
+							type="button"
+							variant="outline"
+							disabled={busy || pages === 0 || percentInvalid}
+							onClick={() => {
+								savePdf()
+							}}
+						>
+							{t("previewSheetPrintSaveAsPdf")}
+						</Button>
+					) : null}
 					<Button
 						type="button"
 						disabled={busy || pages === 0 || percentInvalid}

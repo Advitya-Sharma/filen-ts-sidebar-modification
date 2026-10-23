@@ -38,7 +38,7 @@ import { noteFieldCopy } from "./invariants/forms"
 import { legacyCopyState } from "../forms/controls"
 import { sessionGone, sessionMade } from "../forms/sessions"
 import { sourceCellProps, sourceRowProps } from "./tables/map"
-import { conservativeProof, lockBlocks, proveBlocks, type BlockProof } from "./proof"
+import { conservativeProof, lockBlocks, proveBlocks, type BlockProof, type BlockStart } from "./proof"
 import { MarkChanges, MarkSetChanges } from "./marks"
 import { AttrChanges } from "./attrs"
 import { baseFits } from "./formatting"
@@ -507,9 +507,9 @@ export class DocxEditorSession {
 	}
 
 	// Runs Gate 1 over [from, to) of the document and locks what fails; returns the number locked. Without
-	// a proof at construction a host can call this in slices (mobile has no worker).
-	prove(proof: BlockProof, from?: number, to?: number): number {
-		const requests = proveBlocks(this.story, this.current.doc, proof, from, to)
+	// a proof at construction a host can call this in slices (mobile has no worker), `start` giving where each runs.
+	prove(proof: BlockProof, from?: number, to?: number, start?: BlockStart): number {
+		const requests = proveBlocks(this.story, this.current.doc, proof, from, to, start)
 		const tr = lockBlocks(this.current, this.story, this.builder, requests)
 
 		if (tr !== null) this.apply(tr)

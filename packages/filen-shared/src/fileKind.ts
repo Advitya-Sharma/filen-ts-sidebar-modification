@@ -11,8 +11,9 @@ export { MIN_TRANSPORT_STREAM_BYTES }
 //
 // 1. A known extension that means one thing wins.
 // 2. An extension that means two (`.ts` TypeScript or an MPEG transport stream; `.webm`, `.ogg`, `.mp4`,
-//    `.mkv` and their audio siblings) is settled by a content verdict for the file when one exists, else
-//    by a MIME type that says audio or video, else by its usual meaning. A MIME type never makes a `.ts` a
+//    `.mkv` and their audio siblings; `.dot` a Word 97–2003 template or a Graphviz/text file) is settled by a
+//    content verdict for the file when one exists, else by a MIME type that says audio or video (text, for a
+//    `.dot`), else by its usual meaning. A MIME type never makes a `.ts` a
 //    video: browsers upload TypeScript as video/mp2t too.
 // 3. No or an unknown extension: a well-known name (a Makefile is code whatever its type says), else its MIME
 //    type, else unknown.
@@ -24,6 +25,12 @@ export { MIN_TRANSPORT_STREAM_BYTES }
 // What a read of the file's content found.
 export type ContentVerdict = "transportStream" | "notTransportStream" | "video" | "audio"
 
+// What a read of a `.dot` found: a Word binary compound file ([MS-CFB] signature) or not. Kept apart from the
+// media verdicts the apps persist.
+export type DocumentVerdict = "wordBinary" | "notWordBinary"
+
+export type FileVerdict = ContentVerdict | DocumentVerdict
+
 export type FileKindSource = "extension" | "sniff" | "mime" | "name" | "default"
 
 export interface FileKindInput {
@@ -31,7 +38,7 @@ export interface FileKindInput {
 	mime?: string | null | undefined
 	// Bytes; decides whether a content read could still change the kind (`sniffable`).
 	size?: number | bigint | undefined
-	verdict?: ContentVerdict | null | undefined
+	verdict?: FileVerdict | null | undefined
 }
 
 export interface FileKind<K> {
@@ -52,6 +59,10 @@ interface Ambiguity {
 	audio?: string
 	video?: string
 	transportStream?: string
+	wordBinary?: string
+	notWordBinary?: string
+	// What a text/* MIME type makes it.
+	text?: string
 	// Whether a MIME type may settle it.
 	mimeHint: boolean
 }
@@ -69,7 +80,8 @@ const AMBIGUOUS: ReadonlyMap<string, Ambiguity> = new Map([
 	["mp4", { fallback: "mp4", audio: "m4a", video: "mp4", mimeHint: true }],
 	["m4a", { fallback: "m4a", audio: "m4a", video: "mp4", mimeHint: true }],
 	["mkv", { fallback: "mkv", audio: "mka", video: "mkv", mimeHint: true }],
-	["mka", { fallback: "mka", audio: "mka", video: "mkv", mimeHint: true }]
+	["mka", { fallback: "mka", audio: "mka", video: "mkv", mimeHint: true }],
+	["dot", { fallback: "dot", wordBinary: "dot", notWordBinary: "txt", text: "txt", mimeHint: false }]
 ])
 
 function lowerName(name: string): string {
@@ -82,8 +94,12 @@ export function isAmbiguousExtension(extension: string): boolean {
 	return AMBIGUOUS.has(extension)
 }
 
-function verdictExtension(ambiguity: Ambiguity, verdict: ContentVerdict): string | undefined {
+function verdictExtension(ambiguity: Ambiguity, verdict: FileVerdict): string | undefined {
 	switch (verdict) {
+		case "wordBinary":
+			return ambiguity.wordBinary
+		case "notWordBinary":
+			return ambiguity.notWordBinary
 		case "transportStream":
 			return ambiguity.transportStream
 		case "notTransportStream":
@@ -102,8 +118,18 @@ function isMediaType(mime: string | null | undefined): boolean {
 	return mime !== null && mime !== undefined && (AUDIO_TYPE.test(mime) || VIDEO_TYPE.test(mime))
 }
 
+const TEXT_TYPE = /^\s*text\//i
+
 function mimeExtension(ambiguity: Ambiguity, mime: string | null | undefined): string | undefined {
-	if (!ambiguity.mimeHint || mime === null || mime === undefined) {
+	if (mime === null || mime === undefined) {
+		return undefined
+	}
+
+	if (ambiguity.text !== undefined && TEXT_TYPE.test(mime)) {
+		return ambiguity.text
+	}
+
+	if (!ambiguity.mimeHint) {
 		return undefined
 	}
 
@@ -196,7 +222,7 @@ export function resolveFileKind<K>(input: FileKindInput, kindOf: (extension: str
 // still have to: worth keeping only then.
 export function verdictChangesKind<K>(
 	input: Omit<FileKindInput, "verdict">,
-	verdict: ContentVerdict,
+	verdict: FileVerdict,
 	kindOf: (extension: string) => K | null
 ): boolean {
 	const without = resolveFileKind({ ...input, verdict: null }, kindOf)

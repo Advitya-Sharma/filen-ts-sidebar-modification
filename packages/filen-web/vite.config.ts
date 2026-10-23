@@ -270,5 +270,5 @@ export default defineConfig(({ mode }) => ({
 	},
 	// The preview headers are set by responseHeaders() (plugins above), not preview.headers.
 	// Each worker is one file too, for the same reason as the page's bundle.
-	worker: { format: "es", rolldownOptions: { output: { codeSplitting: false } } }
+	worker: { format: "es", plugins: () => [officeFonts()], rolldownOptions: { output: { codeSplitting: false } } }
 }))

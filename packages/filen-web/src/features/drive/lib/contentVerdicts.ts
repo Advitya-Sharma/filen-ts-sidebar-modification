@@ -1,4 +1,4 @@
-import { verdictChangesKind, type ContentVerdict } from "@filen/shared"
+import { verdictChangesKind, type FileVerdict } from "@filen/shared"
 import type { AnyFile } from "@filen/sdk-rs"
 import type { VideoProbe } from "@filen/shared/videos"
 import { anyFileTypeFacts } from "@/features/drive/lib/item"
@@ -19,7 +19,7 @@ export interface VerdictFile {
 }
 
 // `memoryOnly`: see recordFileKindVerdict.
-export function recordContentVerdict(file: VerdictFile, verdict: ContentVerdict, options: { memoryOnly?: boolean } = {}): void {
+export function recordContentVerdict(file: VerdictFile, verdict: FileVerdict, options: { memoryOnly?: boolean } = {}): void {
 	if (verdictChangesKind(file, verdict, previewCategoryForExtension)) {
 		recordFileKindVerdict(file.uuid, verdict, options)
 	}

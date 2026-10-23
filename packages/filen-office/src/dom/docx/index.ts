@@ -42,6 +42,15 @@ export {
 	type DocxWorkerPool,
 	type DocxWorkerScope
 } from "./host"
+export {
+	inThreadDocxLegacy,
+	type DocNotConverted,
+	type DocNotConvertedKind,
+	type DocxConvertedDocument,
+	type DocxLegacy,
+	type DocxLegacyOpen,
+	type DocxLegacyRefusal
+} from "./legacy"
 export { parseHyperlinkField } from "./links"
 export * from "./protocol"
 export {

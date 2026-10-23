@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import type { SheetCommand, SheetFileKind } from "@filen/office/core/sheet"
 import type { SheetGridModel, SheetGridState } from "@filen/office/react/sheet"
+import type { PrintSheetRequest } from "@filen/office/react/sheet/print"
 import type { SheetBodyExtension } from "@/features/spreadsheet/components/sheetExtension"
 import type { PrintSheetSettings } from "@/features/spreadsheet/print/print.logic"
 import { SheetPrintDialog } from "@/features/spreadsheet/print/printDialog"
@@ -23,7 +24,8 @@ export function useSheetPrint({
 	kind,
 	name,
 	canEdit,
-	run
+	run,
+	onSavePdf
 }: {
 	grid: SheetGridState
 	model: SheetGridModel
@@ -31,6 +33,8 @@ export function useSheetPrint({
 	name: string
 	canEdit: boolean
 	run: (command: SheetCommand) => void
+	// Saves the dialog's pages as a PDF instead (undefined: not offered, nothing may be downloaded).
+	onSavePdf: ((requests: readonly PrintSheetRequest[]) => void) | undefined
 }): SheetPrint {
 	const { t } = useTranslation("preview")
 	const [opened, setOpened] = useState<{ readonly active: PrintSheetSettings; readonly count: number } | null>(null)
@@ -89,6 +93,7 @@ export function useSheetPrint({
 						name={name}
 						canSave={canEdit}
 						run={run}
+						onSavePdf={onSavePdf}
 						onClose={() => {
 							setOpened(null)
 						}}

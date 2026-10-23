@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest"
 import { DEFAULT_PAGE_SETUP, type SheetPageSetup } from "../core/sheet/print/setup"
 import { tileKey, type SheetRange } from "../core/sheet/protocol"
 import { SheetGridModel } from "../react/sheet/model"
-import { layOutPrint, pageCount, printPageAt, renderPrintPage } from "../react/sheet/print/printJob"
+import { renderPrintPage } from "../react/sheet/print/printJob"
+import { layOutPrint, pageCount, printPageAt, PrintPageTooLarge } from "../react/sheet/print/printLayout"
 import { clampRanges } from "../react/sheet/print/printPage"
 import { SvgCanvas } from "../react/sheet/print/svgCanvas"
 import { KEPT, SOLD, barChart, chartFixture } from "./sheetChartFixtures"
@@ -51,6 +52,20 @@ describe("the SVG canvas", () => {
 		expect(canvas.measureText("abc").width).toBe(18)
 		expect(canvas.markup()).toBe(
 			'<g><text x="10" y="20" fill="#000000" style="font:bold 14px &quot;A&amp;B&quot;, sans-serif" text-anchor="middle" dominant-baseline="central">&lt;1 &amp; 2&gt;</text></g>'
+		)
+	})
+
+	it("keeps a text's leading, trailing and repeated spaces, as a canvas draws them", () => {
+		const canvas = new SvgCanvas("t-", MEASURE)
+
+		canvas.fillText(" lead", 0, 0)
+		canvas.fillText("two  spaces", 0, 10)
+		canvas.fillText("one space", 0, 20)
+
+		expect(canvas.markup()).toBe(
+			'<g><text x="0" y="0" xml:space="preserve" fill="#000000" style="font:10px sans-serif"> lead</text>' +
+				'<text x="0" y="10" xml:space="preserve" fill="#000000" style="font:10px sans-serif">two  spaces</text>' +
+				'<text x="0" y="20" fill="#000000" style="font:10px sans-serif">one space</text></g>'
 		)
 	})
 
@@ -423,4 +438,80 @@ describe("what a sheet's print settings change on paper", () => {
 		// One in the header band, one over the cells.
 		expect(page.match(/<image href="blob:/g)).toHaveLength(2)
 	})
+})
+
+describe("a page with many cells", () => {
+	const column = (index: number): string =>
+		(index >= 26 ? column(Math.floor(index / 26) - 1) : "") + String.fromCharCode(65 + (index % 26))
+
+	function dense(rows: number, cols: number, extra = ""): Uint8Array {
+		const parts: string[] = []
+
+		for (let row = 1; row <= rows; row++) {
+			parts.push(`<row r="${String(row)}">`)
+
+			for (let col = 0; col < cols; col++) parts.push(`<c r="${column(col)}${String(row)}"><v>${String(row * 1000 + col)}</v></c>`)
+
+			parts.push("</row>")
+		}
+
+		return buildFixture({ sheets: [{ name: "Data", body: `<sheetData>${parts.join("")}</sheetData>${extra}` }] })
+	}
+
+	const BIG: SheetPageSetup = { ...DEFAULT_PAGE_SETUP, paper: { width: 14_400, height: 14_400 }, customPaper: true, scale: 10 }
+
+	async function bigJob(bytes: Uint8Array, rows: number, cols: number) {
+		const model = await openModel(bytes)
+		const ranges = [{ startRow: 0, startCol: 0, endRow: rows - 1, endCol: cols - 1 }]
+		const job = await layOutPrint(model, [{ sheet: 0, name: "Data", setup: BIG, ranges, used: ranges[0] ?? null }], MEASURE)
+
+		return { model, job }
+	}
+
+	it("draws it in slices, every cell's text once and each slice below the last", async () => {
+		const { job } = await bigJob(dense(1_000, 120), 1_000, 120)
+
+		expect(pageCount(job)).toBe(1)
+
+		const page = (await renderPrintPage({ job, values: VALUES, id: "big" }, 0)) ?? ""
+		const texts = [...page.matchAll(/<text [^>]*>(\d+)<\/text>/g)].map(match => Number(match[1]))
+
+		expect(texts).toHaveLength(120_000)
+		expect(new Set(texts).size).toBe(120_000)
+
+		const offsets = [...page.matchAll(/<g transform="translate\(0 ([\d.]+)\)">/g)].map(match => Number(match[1]))
+
+		expect(offsets.length).toBeGreaterThan(10)
+		expect(offsets).toEqual([...offsets].sort((a, b) => a - b))
+		job.dispose()
+	}, 120_000)
+
+	it("cuts slices only between rows no merged cell crosses, drawing each block once", async () => {
+		const merges = Array.from({ length: 30 }, (_, k) => `<mergeCell ref="A${String(k * 30 + 2)}:B${String(k * 30 + 25)}"/>`).join("")
+		const { job } = await bigJob(dense(1_000, 120, `<mergeCells count="30">${merges}</mergeCells>`), 1_000, 120)
+		const page = (await renderPrintPage({ job, values: VALUES, id: "merged" }, 0)) ?? ""
+
+		// Each block's anchor (A2, A32, ...) drawn once, its covered cells' values not at all.
+		for (let k = 0; k < 30; k++) expect(page.split(`>${String((k * 30 + 2) * 1000)}</text>`)).toHaveLength(2)
+		expect(page).not.toContain(`>${String(3 * 1000)}</text>`)
+		job.dispose()
+	}, 120_000)
+
+	it("gives the page up between slices once cancelled", async () => {
+		const { job } = await bigJob(dense(1_000, 120), 1_000, 120)
+		const signal = { aborted: false }
+		const drawing = renderPrintPage({ job, values: VALUES, id: "gone", signal }, 0)
+
+		signal.aborted = true
+		await expect(drawing).rejects.toMatchObject({ name: "AbortError" })
+		job.dispose()
+	}, 120_000)
+
+	it("refuses a page holding more cells than any real sheet prints on one, without drawing it", async () => {
+		const { job } = await bigJob(dense(1_100, 2_000), 1_100, 2_000)
+
+		expect(pageCount(job)).toBe(1)
+		await expect(renderPrintPage({ job, values: VALUES, id: "huge" }, 0)).rejects.toBeInstanceOf(PrintPageTooLarge)
+		job.dispose()
+	}, 300_000)
 })

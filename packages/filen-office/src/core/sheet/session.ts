@@ -117,6 +117,17 @@ export interface SheetSessionDocument {
 	close(): void
 }
 
+declare module "./protocol" {
+	interface SheetQueryMap {
+		// Tiles (tile row and column pairs) as a print draws them, with the looks from `known` on: nothing is held
+		// for the client or counted as sent (SheetSession.printTiles).
+		"print.tiles": {
+			request: { readonly sheet: SheetId; readonly coordinates: Uint32Array; readonly known: number }
+			result: { readonly tiles: readonly SheetTile[]; readonly styles: SheetStyleAppend }
+		}
+	}
+}
+
 // --- Render styles ---
 
 function styleKey(style: SheetRenderStyle): string {
@@ -844,6 +855,32 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 		)
 	}
 
+	// Tiles as a print or an export draws them: built now, never held as the client's (no change patches them, no
+	// release is owed) and no look counted as sent, so the client's own tiles and styles are untouched. With the
+	// looks from `known` on (every look the tiles name is below the table's length). Runs in the session's queue.
+	printTiles(
+		sheet: SheetId,
+		coordinates: Uint32Array,
+		known: number
+	): { readonly tiles: readonly SheetTile[]; readonly styles: SheetStyleAppend } {
+		const tiles: SheetTile[] = []
+
+		if (!this.gone(sheet)) {
+			for (let i = 0; i + 1 < coordinates.length; i += 2) {
+				const tileRow = coordinates[i] ?? 0
+				const tileCol = coordinates[i + 1] ?? 0
+
+				if (tileRow >= SHEET_MAX_ROWS / TILE_ROWS || tileCol >= SHEET_MAX_COLS / TILE_COLS) continue
+
+				tiles.push(this.buildTile(sheet, tileRow, tileCol))
+			}
+		}
+
+		const from = Math.min(Math.max(0, Math.floor(known)), this.styles.styles.length)
+
+		return { tiles, styles: { from, styles: this.styles.styles.slice(from) } }
+	}
+
 	private buildTile(sheet: SheetId, tileRow: number, tileCol: number): SheetTile {
 		const builder = new TileBuilder(sheet, tileRow, tileCol, this.styles)
 
@@ -1337,6 +1374,14 @@ export function sessionFeature<D extends SheetSessionDocument>(session: SheetSes
 		id: "session",
 		queries: {
 			commandState: { run: (_context, request) => session.commandState(request) },
+			"print.tiles": {
+				run: async (context, request) => {
+					if (context.doc.sheets().some(summary => summary.id === request.sheet) && !context.doc.isReady(request.sheet))
+						await context.doc.ready(request.sheet, context.slicing, context.signal)
+
+					return session.printTiles(request.sheet, request.coordinates, request.known)
+				}
+			},
 			// A cell of a sheet still being parsed (a preview shows its first rows only) is read once it is.
 			cell: {
 				run: async (context, request) => {

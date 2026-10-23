@@ -29,6 +29,16 @@ export type SheetOpener = (
 	track: (session: SheetSessionApi) => void
 ) => Promise<SheetOpenResult>
 
+// Work the worker does beside a session, named by the page (a print's PDF): it reads the session where it runs, so
+// what it reads never crosses to the page.
+export interface SheetWorkerJobContext {
+	readonly session: SheetSessionApi
+	readonly signal: SheetAbortSignal
+	progress(value: unknown): void
+}
+
+export type SheetWorkerJob = (args: unknown, context: SheetWorkerJobContext) => Promise<unknown>
+
 interface Open {
 	session: SheetSessionApi | null
 	locked: SheetLockedFile | null
@@ -45,7 +55,7 @@ function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error)
 }
 
-export function serveSheetWorker(scope: SheetWorkerScope, opener: SheetOpener): void {
+export function serveSheetWorker(scope: SheetWorkerScope, opener: SheetOpener, jobs: Readonly<Record<string, SheetWorkerJob>> = {}): void {
 	const opens = new Map<number, Open>()
 	const post = (message: FromSheetWorker, transfer: readonly ArrayBuffer[] = []): void => {
 		scope.post(message, transfer)
@@ -64,6 +74,14 @@ export function serveSheetWorker(scope: SheetWorkerScope, opener: SheetOpener): 
 			get aborted() {
 				return own.aborted || open.closed
 			}
+		}
+	}
+	// An answer, or the error that it could not be sent (a value that does not clone): the page never waits forever.
+	const answer = (s: number, id: number, value: unknown): void => {
+		try {
+			post({ t: "result", s, id, value }, transferables(value))
+		} catch (error) {
+			post({ t: "result", s, id, error: messageOf(error) })
 		}
 	}
 	const call = async (open: Open, id: number, method: SheetWorkerMethod, args: readonly unknown[]): Promise<unknown> => {
@@ -122,7 +140,13 @@ export function serveSheetWorker(scope: SheetWorkerScope, opener: SheetOpener): 
 			case "open": {
 				if (opens.has(s)) return
 
-				const entry: Open = { session: null, locked: null, opening: { aborted: false }, aborts: new Map(), closed: false }
+				const entry: Open = {
+					session: null,
+					locked: null,
+					opening: { aborted: false },
+					aborts: new Map(),
+					closed: false
+				}
 
 				opens.set(s, entry)
 				void opener(bytesSource(message.bytes), { ...message.options, signal: entry.opening }, event(s), session => {
@@ -225,9 +249,41 @@ export function serveSheetWorker(scope: SheetWorkerScope, opener: SheetOpener): 
 				}
 
 				void call(open, message.id, message.method, message.args).then(
-					value => post({ t: "result", s, id: message.id, value }, transferables(value)),
+					value => answer(s, message.id, value),
 					(error: unknown) => post({ t: "result", s, id: message.id, error: messageOf(error) })
 				)
+				break
+			}
+			case "job": {
+				const open = opens.get(s)
+				const job = Object.hasOwn(jobs, message.name) ? jobs[message.name] : undefined
+				const session = open?.session ?? null
+
+				if (open === undefined || session === null || job === undefined) {
+					post({
+						t: "result",
+						s,
+						id: message.id,
+						error: open === undefined ? "The workbook is closed" : `Unknown job ${message.name}`
+					})
+
+					return
+				}
+
+				const signal = signalOf(open, message.id)
+
+				void job(message.args, {
+					session,
+					signal,
+					progress: value => {
+						if (!signal.aborted) post({ t: "progress", s, id: message.id, value })
+					}
+				})
+					.finally(() => open.aborts.delete(message.id))
+					.then(
+						value => answer(s, message.id, value),
+						(error: unknown) => post({ t: "result", s, id: message.id, error: messageOf(error) })
+					)
 				break
 			}
 			case "notice": {

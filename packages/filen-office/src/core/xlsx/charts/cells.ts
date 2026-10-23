@@ -3,7 +3,7 @@ import { FormulaError } from "../../sheet/cf/formula/values"
 import { SHEET_MAX_COLS, type SheetId } from "../../sheet/protocol"
 import type { XlsxDocument } from "../edit/document"
 import type { SheetStore } from "../model/store"
-import { ColFlag, RowFlag, type XlsxSheetModel } from "../model/types"
+import { ColFlag, RowFlag, rowRunAt, type XlsxSheetModel } from "../model/types"
 import { usedRange } from "../write/cells"
 import type { ChartCell, ChartCells, ChartSheetCells } from "./cache"
 import type { ChartNameLookup } from "./refs"
@@ -66,7 +66,7 @@ function sheetCells(document: XlsxDocument, sheet: SheetId): ChartSheetCells | n
 }
 
 export interface HiddenAxes {
-	readonly rows: ReadonlySet<number>
+	readonly rows: { has(row: number): boolean }
 	readonly cols: ReadonlySet<number>
 }
 
@@ -84,7 +84,13 @@ export function hiddenAxes(model: XlsxSheetModel): HiddenAxes {
 		if ((range.flags & ColFlag.HIDDEN) !== 0)
 			for (let col = range.first; col <= Math.min(range.last, SHEET_MAX_COLS - 1); col++) cols.add(col)
 
-	return { rows, cols }
+	// Rows the store does not hold, in runs (an OpenDocument source's): looked up, not listed.
+	const runs = model.rowRuns
+
+	return {
+		rows: runs === undefined ? rows : { has: row => rows.has(row) || ((rowRunAt(runs, row)?.flags ?? 0) & RowFlag.HIDDEN) !== 0 },
+		cols
+	}
 }
 
 // What a sheet's hidden rows and columns are, as one number: equal while they stay the same.
@@ -99,6 +105,12 @@ export function hiddenSignature(model: XlsxSheetModel): number {
 				hash = Math.imul(hash ^ (block.firstRow + (block.rows[i] ?? 0)), 0x01000193)
 				count++
 			}
+
+	for (const run of model.rowRuns ?? [])
+		if ((run.flags & RowFlag.HIDDEN) !== 0) {
+			hash = Math.imul(Math.imul(hash ^ run.first, 0x01000193) ^ run.last, 0x01000193)
+			count++
+		}
 
 	hash = Math.imul(hash ^ 0x5bd1e995, 0x01000193)
 

@@ -255,6 +255,18 @@ export async function openDocxPackage(source: ByteSource, options: DocxPackageOp
 	}
 }
 
+// Opens a word-processing package whose parts are already at hand (OpcPackage.fromParts: a document translated
+// from another format). Damage reads as "invalidPackage", as for an opened zip.
+export async function openDocxParts(opc: OpcPackage, slicing?: Slicing): Promise<DocxOpenResult> {
+	try {
+		return await openWordprocessing(opc, slicing)
+	} catch (error) {
+		if (error instanceof OpcError || error instanceof XmlError) return failure("invalidPackage", error.message)
+
+		throw error
+	}
+}
+
 async function openWordprocessing(opc: OpcPackage, slicing: Slicing | undefined): Promise<DocxOpenResult> {
 	const [contentTypes, packageRelationships] = await Promise.all([opc.contentTypes(), opc.relationships("")])
 	const main = packageRelationships.all.find(

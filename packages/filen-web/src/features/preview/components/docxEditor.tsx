@@ -55,6 +55,7 @@ import {
 	docxEditingHost,
 	takeProtectedDocument,
 	writeDocx,
+	type DocxEditingBackend,
 	type DocxSaveSnapshot,
 	type DocxTakenSession
 } from "@/features/preview/lib/docxEditing"
@@ -83,6 +84,8 @@ import { useDocxAuthorGate } from "@/features/preview/components/docxAuthorGate"
 import { DocxCommentPopover } from "@/features/preview/components/docxCommentPopover"
 import { DocxContextCommands } from "@/features/preview/components/docxContextMenu"
 import { DocxEditToolbar } from "@/features/preview/components/docxEditToolbar"
+import { DocxFileMenu } from "@/features/preview/components/docxFileMenu"
+import { useDocxPdfExport } from "@/features/preview/hooks/useDocxPdfExport"
 import type { PasswordIntegrity } from "@/features/preview/components/docxToolbar"
 import { DocxEquationPopover } from "@/features/preview/components/docxEquationPopover"
 import { DocxFieldChip } from "@/features/preview/components/docxFieldChip"
@@ -146,8 +149,15 @@ interface Opened {
 
 // `writeUnlocked`: the document's password to modify was given (docxWriteProtection.tsx). `encryption`: it was
 // opened with its password, and saves are sealed with its key.
-function openEditing(bytes: Uint8Array, mode: DocxMarkupMode, writeUnlocked = false, encryption?: DocxSealer): Opened {
-	const editing = docxEditingHost(writeUnlocked, encryption)
+// `backend`: the proof and writer of a document saved in another format (an RTF document).
+function openEditing(
+	bytes: Uint8Array,
+	mode: DocxMarkupMode,
+	writeUnlocked = false,
+	encryption?: DocxSealer,
+	backend?: DocxEditingBackend
+): Opened {
+	const editing = docxEditingHost(writeUnlocked, encryption, backend)
 
 	return {
 		editing,
@@ -356,6 +366,10 @@ export interface DocxEditViewProps {
 	encryptionIntegrity?: PasswordIntegrity | undefined
 	// The editor opened on `bytes` (each time it opens).
 	onEditorOpened?: (() => void) | undefined
+	// A password-protected file as stored: a PDF of it asks for, checks and keeps its password.
+	encryptedFile?: Uint8Array | undefined
+	// The document is saved in another format (an RTF document: rtfEditing.ts): its proof and writer.
+	backend?: DocxEditingBackend | undefined
 }
 
 export type DocxProtectedEditViewProps = Omit<DocxEditViewProps, "bytes" | "encryption" | "encryptionIntegrity"> & {
@@ -438,11 +452,13 @@ export function DocxEditView({
 	viewer,
 	encryption,
 	encryptionIntegrity,
-	onEditorOpened
+	onEditorOpened,
+	encryptedFile,
+	backend
 }: DocxEditViewProps) {
 	const { t } = useTranslation("preview")
 	const [markupMode, setMarkupMode] = useState<DocxMarkupMode>(DEFAULT_MARKUP_MODE)
-	const [opened, setOpened] = useState(() => openEditing(bytes, DEFAULT_MARKUP_MODE, false, encryption))
+	const [opened, setOpened] = useState(() => openEditing(bytes, DEFAULT_MARKUP_MODE, false, encryption, backend))
 	const document = useDocxDocument(opened.source)
 	const [ready, setReady] = useState<Ready | null>(null)
 	const current = ready?.opened === opened ? ready : null
@@ -529,6 +545,12 @@ export function DocxEditView({
 	// The editor's layout is what the pages show; the menu's mode follows it.
 	const pagesView = editor === undefined ? markupInfo(markupMode).view : editorMarkupView(editor.view)
 	const shownMode = shownMarkup(markupMode, pagesView)
+	// Download as ▸ PDF: the document with its unsaved edits in the Final view (markup left out, the toast says so).
+	const pdf = useDocxPdfExport({
+		fileName: alt,
+		source: () => ({ kind: "editor", live: signal => opened.editing.pdfSource(signal), markup: reviewing && shownMode !== "none" }),
+		encryptedFile
+	})
 	const bodyActive = editor !== undefined && editor.activeStory === editor.body.session.story.story.index
 	const spellingMarks = useSyncExternalStore(
 		spelling === undefined ? subscribeNothing : listener => spelling.subscribe(listener),
@@ -865,7 +887,7 @@ export function DocxEditView({
 	const changeMarkup = (mode: DocxMarkupMode): void => {
 		if (editor === undefined) {
 			if (markupInfo(mode).view !== markupInfo(markupMode).view) {
-				setOpened(openEditing(bytes, mode, writeUnlocked, encryption))
+				setOpened(openEditing(bytes, mode, writeUnlocked, encryption, backend))
 				setPress(null)
 			}
 		} else {
@@ -885,7 +907,7 @@ export function DocxEditView({
 		setWriteUnlocked(true)
 
 		if (writeProtection?.password !== undefined) {
-			setOpened(openEditing(bytes, markupMode, true, encryption))
+			setOpened(openEditing(bytes, markupMode, true, encryption, backend))
 			setPress(null)
 		}
 	}
@@ -1210,6 +1232,7 @@ export function DocxEditView({
 			className="flex size-full flex-col"
 		>
 			<DocxEditToolbar
+				fileMenu={pdf.onDownloadPdf === undefined ? undefined : <DocxFileMenu onDownloadPdf={pdf.onDownloadPdf} />}
 				snapshot={toolbarSnapshot}
 				readOnly={readOnly}
 				apple={APPLE}
@@ -1578,6 +1601,7 @@ export function DocxEditView({
 				</ContextMenuContent>
 			</ContextMenu>
 			{authorDialog}
+			{pdf.prompt}
 			{image.dialogs}
 			{editor === undefined ? null : (
 				<DocxPageSetupDialog

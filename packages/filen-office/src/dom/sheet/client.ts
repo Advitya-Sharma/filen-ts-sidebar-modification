@@ -7,13 +7,15 @@ import type {
 	SheetSessionApi,
 	SheetWorkbookInfo
 } from "../../core/sheet/protocol"
-import type {
-	FromSheetWorker,
-	SheetWorkerMethod,
-	SheetWorkerNotice,
-	SheetWorkerOpenOptions,
-	SheetWorkerUnlocked,
-	ToSheetWorker
+import {
+	SHEET_PASSWORD_JOB,
+	type FromSheetWorker,
+	type SheetPasswordVerdict,
+	type SheetWorkerMethod,
+	type SheetWorkerNotice,
+	type SheetWorkerOpenOptions,
+	type SheetWorkerUnlocked,
+	type ToSheetWorker
 } from "./messages"
 
 // The page's side of a sheet worker: a SheetHost whose sessions run in the worker. The file's bytes are
@@ -29,6 +31,24 @@ export interface SheetWorkerLike {
 interface Pending {
 	readonly resolve: (value: unknown) => void
 	readonly reject: (error: Error) => void
+	readonly progress?: (value: unknown) => void
+}
+
+// A worker session's jobs (serveSheetWorker's `jobs`): run in the worker beside the session, reporting progress,
+// aborted by the signal (the job's promise then rejects with what the worker's job threw).
+export interface SheetJobRunner {
+	job(
+		name: string,
+		args: unknown,
+		options?: { readonly signal?: SheetAbortSignal; readonly onProgress?: (value: unknown) => void }
+	): Promise<unknown>
+}
+
+// The job runner of a session a worker host opened (or a copy of one), else null.
+export function sheetJobs(session: SheetSessionApi): SheetJobRunner | null {
+	const job: unknown = (session as Partial<SheetJobRunner>).job
+
+	return typeof job === "function" ? { job: job as SheetJobRunner["job"] } : null
 }
 
 interface Open {
@@ -40,6 +60,12 @@ interface Open {
 }
 
 const FAILED = "The sheet worker stopped"
+
+// A call or job answered by the page's side because its session was closed (or its host disposed) first: the user
+// left, nothing failed.
+export class SheetSessionClosedError extends Error {
+	override readonly name = "SheetSessionClosedError"
+}
 
 export function sheetWorkerHost(worker: SheetWorkerLike): SheetHost {
 	const opens = new Map<number, Open>()
@@ -100,6 +126,9 @@ export function sheetWorkerHost(worker: SheetWorkerLike): SheetHost {
 			case "event":
 				if (!open.closed) open.onEvent(message.event)
 				break
+			case "progress":
+				open.calls.get(message.id)?.progress?.(message.value)
+				break
 			case "result": {
 				const pending = open.calls.get(message.id)
 
@@ -113,12 +142,12 @@ export function sheetWorkerHost(worker: SheetWorkerLike): SheetHost {
 	})
 	worker.addEventListener("error", event => fail(event.message ?? FAILED))
 
-	const session = (s: number): SheetSessionApi => {
+	const session = (s: number): SheetSessionApi & SheetJobRunner => {
 		const call = <T>(method: SheetWorkerMethod, args: readonly unknown[], signal?: SheetAbortSignal): Promise<T> => {
 			const open = opens.get(s)
 
 			if (failed !== null) return Promise.reject(new Error(failed))
-			if (open === undefined || open.closed) return Promise.reject(new Error("The session is closed"))
+			if (open === undefined || open.closed) return Promise.reject(new SheetSessionClosedError("The session is closed"))
 
 			const id = nextCall++
 
@@ -154,6 +183,25 @@ export function sheetWorkerHost(worker: SheetWorkerLike): SheetHost {
 					message: error instanceof Error ? error.message : String(error)
 				})),
 			export: (format, options) => call("export", [format, options]),
+			job: (name, args, options = {}) => {
+				const open = opens.get(s)
+
+				if (failed !== null) return Promise.reject(new Error(failed))
+				if (open === undefined || open.closed) return Promise.reject(new SheetSessionClosedError("The session is closed"))
+
+				const id = nextCall++
+				const signal = options.signal
+
+				return new Promise<unknown>((resolve, reject) => {
+					open.calls.set(id, { resolve, reject, ...(options.onProgress !== undefined && { progress: options.onProgress }) })
+					send({ t: "job", s, id, name, args })
+
+					if (signal !== undefined) {
+						if (signal.aborted) send({ t: "abort", s, id })
+						else signal.addEventListener?.("abort", () => send({ t: "abort", s, id }))
+					}
+				})
+			},
 			markSaved: version => call("markSaved", [version]),
 			close: () => {
 				const open = opens.get(s)
@@ -163,7 +211,7 @@ export function sheetWorkerHost(worker: SheetWorkerLike): SheetHost {
 				notice("close")
 				open.closed = true
 
-				for (const pending of open.calls.values()) pending.reject(new Error("The session is closed"))
+				for (const pending of open.calls.values()) pending.reject(new SheetSessionClosedError("The session is closed"))
 
 				opens.delete(s)
 			}
@@ -248,7 +296,7 @@ export function sheetWorkerHost(worker: SheetWorkerLike): SheetHost {
 
 				open.closed = true
 
-				for (const pending of open.calls.values()) pending.reject(new Error("The host was disposed"))
+				for (const pending of open.calls.values()) pending.reject(new SheetSessionClosedError("The host was disposed"))
 
 				open.calls.clear()
 				settle(open)
@@ -258,4 +306,23 @@ export function sheetWorkerHost(worker: SheetWorkerLike): SheetHost {
 			worker.terminate?.()
 		}
 	}
+}
+
+// Checks a protected workbook's password in the session's worker against `bytes`, the file as stored (a copy is
+// sent). "failed" for a session that does not run in a worker.
+export async function checkSheetPassword(
+	session: SheetSessionApi,
+	bytes: Uint8Array,
+	password: string,
+	signal?: SheetAbortSignal
+): Promise<SheetPasswordVerdict> {
+	const jobs = sheetJobs(session)
+
+	if (jobs === null) return "failed"
+
+	return (await jobs.job(
+		SHEET_PASSWORD_JOB,
+		{ bytes: bytes.slice(), password },
+		signal === undefined ? {} : { signal }
+	)) as SheetPasswordVerdict
 }

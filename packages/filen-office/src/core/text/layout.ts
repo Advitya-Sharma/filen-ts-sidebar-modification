@@ -146,6 +146,11 @@ export class PreparedParagraph {
 	tabAlignment = new Uint8Array(4)
 	tabLeader = new Uint8Array(4)
 
+	// Text items from `ready` on are measured for an older text and measured again as layout first reaches them:
+	// `refresh(item)` brings them up to date to past `item` and moves `ready` on. prepare() measures every item.
+	ready = Infinity
+	refresh: ((item: number) => void) | null = null
+
 	// Releases buffers far larger than a paragraph of `count` items needs (after a huge one).
 	fit(count: number): void {
 		if (!shrinks(this.start.length, count)) return
@@ -337,6 +342,8 @@ export class ParagraphLayouter {
 		p.rtl = options.rtl
 		p.markStyle = paragraph.markStyle
 		p.source = options.source ?? 0
+		p.ready = Infinity
+		p.refresh = null
 		this.copyTables(paragraph, p)
 
 		if (this.breaks.length < n + 1 || shrinks(this.breaks.length, n + 1))
@@ -490,45 +497,114 @@ export class ParagraphLayouter {
 			i = j
 		}
 
-		if (pending > 0) {
-			cache.flush()
-
-			for (let k = 0; k < pending; k++) {
-				const item = this.pendingItems[k] ?? 0
-				const s = p.style[item] ?? 0
-				const font = (p.flags[item] ?? 0) & ITEM_SMALL ? (styles.smallFontKey[s] ?? 0) : (styles.fontKey[s] ?? 0)
-				const start = p.start[item] ?? 0
-				const contentEnd = p.contentEnd[item] ?? 0
-				const ticket = this.pendingTickets[k] ?? -1
-
-				// Queued widths come back by queue position; strings queued twice or summed per character
-				// are requested again (now cached).
-				if (ticket >= 0) p.width[item] = cache.result(ticket)
-				else if (ticket === -1)
-					p.width[item] =
-						(styles.caps[s] ?? 0) === Caps.NONE
-							? cache.request(font, text, start, contentEnd)
-							: requestUpper(cache, font, text, start, contentEnd)
-
-				if (Number.isNaN(p.hang[item] ?? 0)) p.hang[item] = cache.request(font, text, contentEnd - 1, contentEnd)
-
-				// Should the cache still miss, measure directly: a NaN width would poison every line.
-				if (Number.isNaN(p.width[item] ?? 0)) p.width[item] = this.rawWidth(p, item, start, contentEnd)
-				if (Number.isNaN(p.hang[item] ?? 0)) p.hang[item] = this.rawWidth(p, item, contentEnd - 1, contentEnd)
-			}
-		}
+		if (pending > 0) this.resolvePending(p, pending)
 
 		for (let item = 0; item < p.count; item++) {
 			if (p.kind[item] !== ItemKind.TEXT) continue
 
-			const s = p.style[item] ?? 0
-			const scale = styles.scaleX[s] ?? 1
+			const scale = this.scaleWidth(p, item)
 
-			p.width[item] = advanceOf(p.width[item] ?? 0, styles.letterSpacing[s] ?? 0, p.clusters[item] ?? 0) * scale
 			p.hang[item] = (p.hang[item] ?? 0) * scale
 		}
 
 		return p
+	}
+
+	// Measures text items of `p` again (items[0, count)) whose characters changed but not their segmentation: a
+	// page number shown in characters of the same kind. Widths, clusters and spaces come out as prepare() gives
+	// them for the new text; hanging punctuation is unchanged.
+	remeasure(p: PreparedParagraph, items: ArrayLike<number>, count: number): void {
+		const styles = this.styles
+		const cache = styles.cache
+		const text = p.text
+		let pending = 0
+
+		for (let k = 0; k < count; k++) {
+			const item = items[k] ?? 0
+			const start = p.start[item] ?? 0
+			const contentEnd = p.contentEnd[item] ?? 0
+			const style = p.style[item] ?? 0
+			let clusters = 0
+			let inner = 0
+
+			for (let at = start; at < contentEnd;) {
+				const unit = text.charCodeAt(at)
+
+				if (unit === 0x20 || unit === 0xa0) inner++
+
+				clusters++
+				at = clusterEnd(text, at, contentEnd, null)
+			}
+
+			p.clusters[item] = clusters
+			p.innerSpaces[item] = inner
+
+			const font = ((p.flags[item] ?? 0) & ITEM_SMALL) !== 0 ? (styles.smallFontKey[style] ?? 0) : (styles.fontKey[style] ?? 0)
+			const raw =
+				(styles.caps[style] ?? Caps.NONE) === Caps.NONE
+					? cache.request(font, text, start, contentEnd)
+					: requestUpper(cache, font, text, start, contentEnd)
+
+			p.width[item] = raw
+
+			if (Number.isNaN(raw)) {
+				if (pending === this.pendingItems.length) {
+					this.pendingItems = resizeInt(this.pendingItems, pending * 2)
+					this.pendingTickets = resizeInt(this.pendingTickets, pending * 2)
+				}
+
+				this.pendingTickets[pending] = cache.ticket
+				this.pendingItems[pending++] = item
+			}
+		}
+
+		if (pending > 0) this.resolvePending(p, pending)
+
+		for (let k = 0; k < count; k++) this.scaleWidth(p, items[k] ?? 0)
+	}
+
+	// Widths prepare() or remeasure() queued (pendingItems[0, pending)), once the cache has measured them.
+	private resolvePending(p: PreparedParagraph, pending: number): void {
+		const styles = this.styles
+		const cache = styles.cache
+		const text = p.text
+
+		cache.flush()
+
+		for (let k = 0; k < pending; k++) {
+			const item = this.pendingItems[k] ?? 0
+			const s = p.style[item] ?? 0
+			const font = (p.flags[item] ?? 0) & ITEM_SMALL ? (styles.smallFontKey[s] ?? 0) : (styles.fontKey[s] ?? 0)
+			const start = p.start[item] ?? 0
+			const contentEnd = p.contentEnd[item] ?? 0
+			const ticket = this.pendingTickets[k] ?? -1
+
+			// Queued widths come back by queue position; strings queued twice or summed per character
+			// are requested again (now cached).
+			if (ticket >= 0) p.width[item] = cache.result(ticket)
+			else if (ticket === -1)
+				p.width[item] =
+					(styles.caps[s] ?? 0) === Caps.NONE
+						? cache.request(font, text, start, contentEnd)
+						: requestUpper(cache, font, text, start, contentEnd)
+
+			if (Number.isNaN(p.hang[item] ?? 0)) p.hang[item] = cache.request(font, text, contentEnd - 1, contentEnd)
+
+			// Should the cache still miss, measure directly: a NaN width would poison every line.
+			if (Number.isNaN(p.width[item] ?? 0)) p.width[item] = this.rawWidth(p, item, start, contentEnd)
+			if (Number.isNaN(p.hang[item] ?? 0)) p.hang[item] = this.rawWidth(p, item, contentEnd - 1, contentEnd)
+		}
+	}
+
+	// A text item's measured width with its style's letter spacing and horizontal scale; returns the scale.
+	private scaleWidth(p: PreparedParagraph, item: number): number {
+		const styles = this.styles
+		const s = p.style[item] ?? 0
+		const scale = styles.scaleX[s] ?? 1
+
+		p.width[item] = advanceOf(p.width[item] ?? 0, styles.letterSpacing[s] ?? 0, p.clusters[item] ?? 0) * scale
+
+		return scale
 	}
 
 	// Lays out rows of `p` from `cursor` starting at `top`, appending to `out`, until the paragraph ends,
@@ -791,10 +867,17 @@ export class ParagraphLayouter {
 			if (fill !== Fill.WRAP) break
 		}
 
-		// A paragraph without items still has its mark's line.
+		// A paragraph without items still has its mark's line: in the first gap beside floats, however narrow, and
+		// below them where they leave none (as LibreOffice places it).
 		if (this.segCount === 0 && (p.count === 0 || cursor.item >= p.count)) {
-			this.segStart[0] = lineStart
-			this.segEnd[0] = lineEnd
+			let s = 0
+
+			while (s < intervalCount && (this.intervals[2 * s + 1] ?? 0) - (this.intervals[2 * s] ?? 0) <= EPSILON) s++
+
+			if (intervalCount >= 0 && s === intervalCount) return
+
+			this.segStart[0] = intervalCount < 0 ? lineStart : (this.intervals[2 * s] ?? 0)
+			this.segEnd[0] = intervalCount < 0 ? lineEnd : (this.intervals[2 * s + 1] ?? 0)
 			this.segFrom[0] = 0
 			this.segTo[0] = 0
 			this.segFill[0] = Fill.END
@@ -831,6 +914,8 @@ export class ParagraphLayouter {
 		this.tabPending = false
 
 		while (item < p.count) {
+			if (item >= p.ready) p.refresh?.(item)
+
 			const kind = p.kind[item] ?? ItemKind.TEXT
 			const style = p.style[item] ?? 0
 

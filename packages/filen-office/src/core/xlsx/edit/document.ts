@@ -86,6 +86,7 @@ import {
 	FormulaKind,
 	RowFlag,
 	SLOT_BLOCK,
+	rowRunAt,
 	type XlsxDefinedName,
 	type XlsxFont,
 	type XlsxProtectionHash,
@@ -93,6 +94,7 @@ import {
 	type XlsxSheetModel,
 	type XlsxSheetView
 } from "../model/types"
+import { withRuns, type AxisRun } from "../../sheet/axisRuns"
 import { XlsxReadError, decodeXstring, parseRange, type XlsxWorkbook } from "../read/index"
 import { saveXlsx, seedImpliedStyles } from "../write/index"
 import type { XlsxClip } from "./clipboard"
@@ -468,7 +470,8 @@ export class XlsxDocument {
 		this.workbook = workbook
 		this.kind = options.kind
 		this.date1904 = workbook.date1904
-		this.dateBase = workbook.strict && !workbook.date1904 ? ISO_1900 : workbook.date1904
+		// Strict SpreadsheetML and OpenDocument count 1900 dates without Excel's 1900-02-29.
+		this.dateBase = (workbook.strict || workbook.format === "ods") && !workbook.date1904 ? ISO_1900 : workbook.date1904
 		this.encryption = options.encryption
 		this.writeUnlocked = options.writeUnlocked === true
 		this.ownSettings = options.settings ?? {}
@@ -502,7 +505,9 @@ export class XlsxDocument {
 		return {
 			date1904: this.dateBase,
 			palette: this.styles.palette,
-			...(locale !== undefined && { locale: { ...NUMFMT_EN_US, decimal: locale.decimal, group: locale.group } })
+			...(locale !== undefined && { locale: { ...NUMFMT_EN_US, decimal: locale.decimal, group: locale.group } }),
+			...(this.workbook.localeFor !== undefined && { localeFor: this.workbook.localeFor, lcidSeparators: true }),
+			...(this.workbook.standardPrecision !== undefined && { standardPrecision: this.workbook.standardPrecision })
 		}
 	}
 
@@ -534,6 +539,8 @@ export class XlsxDocument {
 
 				for (let k = 0; k < formulas.length; k++) if ((formulas[k] ?? -1) >= 0 && block.kinds[k] === CellKind.EMPTY) return true
 			}
+
+			if ((entry.model?.recalculate?.size ?? 0) > 0) return true
 		}
 
 		return false
@@ -670,7 +677,8 @@ export class XlsxDocument {
 	// when that cannot be done (UTF-16, stored oddly, not reading): the parse is waited for.
 	async preview(sheet: SheetId): Promise<boolean> {
 		const entry = this.entry(sheet)
-		const part = entry === undefined || entry.model !== null ? undefined : this.workbook.parts.get(entry.part)
+		const part =
+			entry === undefined || entry.model !== null || this.workbook.format !== "xlsx" ? undefined : this.workbook.parts.get(entry.part)
 		const zipEntry = part?.source ?? null
 
 		if (entry === undefined || part === undefined || zipEntry === null) return false
@@ -804,7 +812,8 @@ export class XlsxDocument {
 	// What is known at open: legacy formats, signatures and the author's sharing settings make it view-only; anything
 	// else waits for the proof.
 	initialWritability(): SheetWritability {
-		if (LEGACY_KINDS.has(this.kind)) return { state: "viewOnly", reason: "legacyFormat" }
+		// An OpenDocument spreadsheet is shown, not written: it saves through no writer of its format yet.
+		if (LEGACY_KINDS.has(this.kind) || this.workbook.format === "ods") return { state: "viewOnly", reason: "legacyFormat" }
 		if (this.workbook.signatures > 0) return { state: "viewOnly", reason: "signed" }
 
 		const sharing = this.fileSharing()
@@ -841,12 +850,16 @@ export class XlsxDocument {
 
 	// --- Showing cells ---
 
-	// The format a cell without one of its own starts from: its row's (a row formatted as a whole), else its
-	// column's, else the default.
+	// The format a cell without one of its own starts from: its run's (a source's style-only block), else its row's (a
+	// row formatted as a whole), else its column's, else the default.
 	startingStyle(model: XlsxSheetModel, row: number, col: number): number {
 		const store = model.store as SheetStore
 		const block = store.blocks[store.blockOf(row)]
 		const index = block === undefined ? -1 : block.rowIndex(row)
+
+		const run = model.styleRuns?.styleAt(row, col) ?? -1
+
+		if (run >= 0) return run
 
 		if (block !== undefined && index >= 0 && ((block.rowFlags[index] ?? 0) & RowFlag.CUSTOM_FORMAT) !== 0) {
 			const style = block.rowStyles[index] ?? -1
@@ -1064,10 +1077,12 @@ export class XlsxDocument {
 			shown.flags |= CellFlag.FORMULA
 			shown.input = localizedInput(`=${this.shownFormulaText(model, formula, row, col)}`, this.ownSettings.locale)
 
-			// A dynamic array calculates here; a legacy array formula or data table keeps its stored result.
+			// A dynamic array calculates here; a legacy array formula or data table keeps its stored result, as does a
+			// formula the engine holds (a name or function it lacks).
 			if (
 				formulaKind === FormulaKind.DATA_TABLE ||
-				(formulaKind === FormulaKind.ARRAY && !this.isDynamicArray(model.store.formulas.formula(formula).cellMetadata))
+				(formulaKind === FormulaKind.ARRAY && !this.isDynamicArray(model.store.formulas.formula(formula).cellMetadata)) ||
+				this.alone.get(model.id)?.has(cellKeyOf(row, col)) === true
 			)
 				shown.flags |= CellFlag.CACHED
 
@@ -1075,6 +1090,15 @@ export class XlsxDocument {
 				const result = this.shownResults.get(model.id)?.get(cellKeyOf(row, col))
 
 				if (result !== undefined) this.showResult(format, result)
+
+				return shown
+			}
+
+			const recalculated =
+				model.recalculate?.has(cellKeyOf(row, col)) === true ? this.shownResults.get(model.id)?.get(cellKeyOf(row, col)) : undefined
+
+			if (recalculated !== undefined) {
+				this.showResult(format, recalculated)
 
 				return shown
 			}
@@ -1158,6 +1182,9 @@ export class XlsxDocument {
 			input = null
 		}
 
+		if (model.protection !== null && this.styles.protection(xf)?.hideAll === true)
+			return { text: "", input: null, flags: flags | CellFlag.FORMULA_HIDDEN }
+
 		return { text: shown.text, input: input === shown.text ? null : input, flags }
 	}
 
@@ -1182,6 +1209,10 @@ export class XlsxDocument {
 			if ((flags & CellFlag.FORMULA) !== 0 && this.styles.formulaHidden(xf)) {
 				flags |= CellFlag.FORMULA_HIDDEN
 				input = null
+			}
+
+			if (this.styles.protection(xf)?.hideAll === true) {
+				return { text: "", input: null, style: this.render(xf, -1), flags: flags | CellFlag.FORMULA_HIDDEN, xf }
 			}
 		}
 
@@ -1213,6 +1244,8 @@ export class XlsxDocument {
 				let flags = shown.flags
 				let input = shown.input
 
+				let hidden = false
+
 				if (protectedSheet) {
 					if (this.styles.locked(xf)) flags |= CellFlag.LOCKED
 
@@ -1220,6 +1253,14 @@ export class XlsxDocument {
 						flags |= CellFlag.FORMULA_HIDDEN
 						input = null
 					}
+
+					hidden = this.styles.protection(xf)?.hideAll === true
+				}
+
+				if (hidden) {
+					sink.add(row, col, "", null, this.render(xf, -1), flags | CellFlag.FORMULA_HIDDEN)
+
+					return
 				}
 
 				let text = shown.text
@@ -1254,6 +1295,20 @@ export class XlsxDocument {
 				}
 
 				if (repeats) sink.repeat(entry, shown.repeatOffset, shown.repeatChar)
+			}
+		)
+
+		// Empty cells formatted in runs the store does not hold: their look, no text.
+		model.styleRuns?.forEach(
+			{ startRow: firstRow, startCol: firstCol, endRow: firstRow + TILE_ROWS - 1, endCol: firstCol + TILE_COLS - 1 },
+			(startRow, startCol, endRow, endCol, xf) => {
+				const style = this.render(xf, -1)
+				const flags = protectedSheet && this.styles.locked(xf) ? CellFlag.LOCKED : 0
+
+				for (let row = startRow; row <= endRow; row++) {
+					for (let col = startCol; col <= endCol; col++)
+						if (store.locate(row, col) < 0) sink.add(row, col, "", null, style, flags)
+				}
 			}
 		)
 	}
@@ -1303,14 +1358,32 @@ export class XlsxDocument {
 			}
 		}
 
-		const defaultCol = defaultColPx(format, this.digitPx)
+		// Rows the store does not hold (an OpenDocument sheet's runs of hidden or resized rows): an entry each.
+		const rowRuns: AxisRun[] = []
+
+		for (const run of model.rowRuns ?? []) {
+			const size = Number.isNaN(run.heightPt) ? defaultRow : rowHeightToPx(run.heightPt)
+			let flags = 0
+
+			if ((run.flags & RowFlag.HIDDEN) !== 0) flags |= AxisFlag.HIDDEN
+			if ((run.flags & RowFlag.CUSTOM_HEIGHT) !== 0) flags |= AxisFlag.CUSTOM
+			if ((run.flags & RowFlag.COLLAPSED) !== 0) flags |= AxisFlag.COLLAPSED
+
+			flags |= ((run.flags & RowFlag.OUTLINE_MASK) >> RowFlag.OUTLINE_SHIFT) << AxisFlag.OUTLINE_SHIFT
+
+			if (flags === 0 && size === defaultRow) continue
+
+			rowRuns.push({ first: run.first, count: run.last - run.first + 1, size, style: 0, flags })
+		}
+
+		const defaultCol = format.defaultColPx ?? defaultColPx(format, this.digitPx)
 		const colIndices: number[] = []
 		const colSizes: number[] = []
 		const colStyles: number[] = []
 		const colFlags: number[] = []
 
 		for (const range of model.cols) {
-			const size = Number.isNaN(range.width) ? defaultCol : colWidthToPx(range.width, this.digitPx)
+			const size = range.px ?? (Number.isNaN(range.width) ? defaultCol : colWidthToPx(range.width, this.digitPx))
 			let flags = 0
 
 			if ((range.flags & ColFlag.HIDDEN) !== 0) flags |= AxisFlag.HIDDEN
@@ -1337,8 +1410,9 @@ export class XlsxDocument {
 			}
 		}
 
-		let rowCount = store.rowExtent
-		let colCount = store.colExtent
+		const lastRun = model.rowRuns?.[model.rowRuns.length - 1]
+		let rowCount = Math.max(store.rowExtent, model.styleRuns?.rowExtent ?? 0, lastRun === undefined ? 0 : lastRun.last + 1)
+		let colCount = Math.max(store.colExtent, model.styleRuns?.colExtent ?? 0)
 		const merges = model.merges
 
 		for (let i = 0; i + 3 < merges.length; i += 4) {
@@ -1359,7 +1433,7 @@ export class XlsxDocument {
 			sheet,
 			rowCount: Math.min(rowCount, SHEET_MAX_ROWS),
 			colCount: Math.min(colCount, SHEET_MAX_COLS),
-			rows: axisLayout(defaultRow, rowIndices, rowSizes, rowStyles, rowFlags),
+			rows: withRuns(defaultRow, rowIndices, rowSizes, rowStyles, rowFlags, rowRuns),
 			cols: axisLayout(defaultCol, colIndices, colSizes, colStyles, colFlags),
 			merges: merges.slice(),
 			pane: frozen === null ? null : layoutPane(view, frozen),
@@ -2106,7 +2180,7 @@ export class XlsxDocument {
 		const unknown = new Set<string>()
 
 		candidates.forEach((candidate, index) => {
-			if (refused.has(index)) unknown.add(candidate.named.name.toUpperCase())
+			if (refused.has(index) || hugeArea(candidate.named.formula)) unknown.add(candidate.named.name.toUpperCase())
 		})
 
 		// A name reading one the engine lacks is lacking too: until none is added.
@@ -2163,7 +2237,11 @@ export class XlsxDocument {
 						if ((block.formulas?.[k] ?? -1) >= 0) {
 							if (cell.fallback !== undefined || cell.content instanceof HeldResult || cell.spill !== undefined)
 								formulas.push(cell)
-							if (block.kinds[k] === CellKind.EMPTY) missing.push({ sheet: index, row, col })
+							if (
+								block.kinds[k] === CellKind.EMPTY ||
+								(model.recalculate?.has(cellKeyOf(row, col)) === true && !(cell.content instanceof HeldResult))
+							)
+								missing.push({ sheet: index, row, col })
 						}
 					}
 
@@ -2240,8 +2318,9 @@ export class XlsxDocument {
 		const store = model.store as SheetStore
 		const block = store.blocks[store.blockOf(row)]
 		const index = block?.rowIndex(row) ?? -1
+		const flags = block !== undefined && index >= 0 ? (block.rowFlags[index] ?? 0) : (rowRunAt(model.rowRuns, row)?.flags ?? 0)
 
-		if (block === undefined || index < 0 || ((block.rowFlags[index] ?? 0) & RowFlag.HIDDEN) === 0) return 0
+		if ((flags & RowFlag.HIDDEN) === 0) return 0
 
 		return this.filteredRow?.(sheet, row) === true ? 2 : 1
 	}
@@ -2627,6 +2706,7 @@ export class XlsxDocument {
 		readonly signal?: SheetAbortSignal
 	}): Promise<Exclude<SheetSaveResult, { ok: true }> | { ok: true; bytes: Uint8Array; changedParts: readonly string[] }> {
 		if (this.closed) return { ok: false, reason: "closed", message: "The session is closed" }
+		if (this.workbook.format === "ods") return { ok: false, reason: "gate", message: "An OpenDocument spreadsheet is not saved here" }
 
 		const encryption = this.encryption
 
@@ -2771,6 +2851,29 @@ function shiftedKey(key: number, edit: AxisEdit & { readonly band?: CellBand }):
 	const next = edit.type === "insert" ? index + edit.count : index - edit.count
 
 	return edit.axis === "rows" ? cellKeyOf(next, col) : cellKeyOf(row, next)
+}
+
+// Cells past which a name that is one area alone is not given to the engine, which reads a name's area whole when it
+// builds (a print area of entire rows would take gigabytes): what reads such a name keeps its result.
+const MAX_NAME_AREA = 4_000_000
+const AREA = /^(?:(?:'(?:[^']|'')+'|[^'!:]+)!)?\$?([A-Z]{1,3})\$?(\d{1,7}):\$?([A-Z]{1,3})\$?(\d{1,7})$/
+
+function hugeArea(formula: string): boolean {
+	const match = AREA.exec(formula.trim())
+
+	if (match === null) return false
+
+	const column = (letters: string): number => {
+		let index = 0
+
+		for (const letter of letters) index = index * 26 + (letter.charCodeAt(0) - 64)
+
+		return index
+	}
+	const columns = Math.abs(column(match[3] ?? "A") - column(match[1] ?? "A")) + 1
+	const rows = Math.abs(Number(match[4]) - Number(match[2])) + 1
+
+	return columns * rows > MAX_NAME_AREA
 }
 
 function axisLayout(defaultSize: number, indices: number[], sizes: number[], styles: number[], flags: number[]): SheetAxisLayout {

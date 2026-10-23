@@ -70,6 +70,8 @@ export interface CellPainters {
 	readonly measurer: TextMeasurer
 	readonly borders: BorderPainter
 	readonly patterns: PatternCache
+	// Told which cell the text drawn next belongs to, and (-1, -1) once it is drawn (a tagged PDF's table cells).
+	readonly textCell?: (row: number, col: number) => void
 }
 
 // Look-ups one frame repeats: a row's or column's own style, whether a row's style wins.
@@ -863,6 +865,20 @@ function lineHeight(px: number): number {
 // Draws a cell's text in `box`, clipped to left..right (its run-on) and the box's height.
 // `laid`: the text's one line as the gridline pass laid it out (it runs on, so it neither wraps nor rotates).
 function drawText(
+	painters: CellPainters,
+	scene: CellScene,
+	content: CellText,
+	cellBox: Box,
+	cellLeft: number,
+	right: number,
+	laid?: TextLine
+): void {
+	painters.textCell?.(content.row, content.col)
+	drawCellText(painters, scene, content, cellBox, cellLeft, right, laid)
+	painters.textCell?.(-1, -1)
+}
+
+function drawCellText(
 	painters: CellPainters,
 	scene: CellScene,
 	content: CellText,

@@ -7,6 +7,7 @@ import { refState } from "../../xlsx/refs/state"
 import { attr, qualify, rootTag, spliceAttributes } from "../../xlsx/write/markup"
 import { formatNumber } from "../../xlsx/write/text"
 import { imageFormat, imageHandling } from "../../drawingml/picture"
+import { chartSheetChart, type ChartSheetChart } from "../../xlsx/charts/sheets"
 import { MAX_METAFILE_BYTES, convertMetafile } from "../../metafile/index"
 import { visibleNotes } from "../../xlsx/comments/feature"
 import { annotationStore } from "../../xlsx/comments/store"
@@ -15,6 +16,7 @@ import { decodeUtf8, encodeUtf8, parseXml } from "../../xml/index"
 import { sectionMarkup } from "../cf/sections"
 import { defineSheetFeature, type SheetChangeSink, type SheetHandled } from "../registry"
 import { AxisFlag, type SheetAxisLayout, type SheetId, type SheetRange } from "../protocol"
+import { withRuns, type AxisRun } from "../axisRuns"
 import { sliceClock, type Slicing } from "../../slicing"
 import { paperSizeKnown } from "./paper"
 import { readPageSetup, type SheetPageSetup, type SheetPrintMargins } from "./setup"
@@ -45,6 +47,8 @@ export interface SheetPrintSetupResult {
 	// What prints without a print area: the cells with a value or a formula, or whose format draws a fill or a border;
 	// null when nothing does.
 	readonly used: SheetRange | null
+	// A chartsheet's chart, printed on a page of its own (no cells).
+	readonly chart?: ChartSheetChart
 }
 
 // The rows' sizes for a print: the heights the file stores, in pixels kept fractional (a 15.5 pt row is 20.67 px; the
@@ -80,7 +84,7 @@ declare module "../protocol" {
 		"print.rows": { request: { readonly sheet: SheetId }; result: SheetPrintRows | null }
 		"print.settings": {
 			request: { readonly sheet: SheetId }
-			// null for a sheet that is not a worksheet (a chart sheet), or that is gone.
+			// null for a sheet that does not print (a dialog or macro sheet without cells here), or that is gone.
 			result: SheetPrintSetupResult | null
 		}
 	}
@@ -119,6 +123,42 @@ export function sheetPageSetup(document: XlsxDocument, model: XlsxSheetModel): S
 		{ printArea: nameFormula(workbook, model.id, PRINT_AREA), printTitles: nameFormula(workbook, model.id, PRINT_TITLES) },
 		model.fitToPage
 	)
+}
+
+// A chartsheet's page (ECMA-376 Part 1 §18.3.1.12 chartsheet: pageMargins, pageSetup as CT_CsPageSetup, headerFooter)
+// and its chart. Excel prints a chart sheet's chart on a page of its own, at the size the sheet gives it; its page
+// setup offers paper, orientation and margins, no scaling (Microsoft Support, "Print a chart").
+async function chartsheetSettings(document: XlsxDocument, sheet: SheetId, part: string): Promise<SheetPrintSetupResult | null> {
+	const chart = await chartSheetChart(document, sheet)
+
+	if (chart === null) return null
+
+	const markup = { pageSetup: "", pageMargins: "", headerFooter: "" }
+
+	try {
+		const bytes = part === "" ? null : await document.workbook.parts.read(part)
+
+		if (bytes !== null && bytes !== undefined) {
+			const xml = parseXml(bytes)
+			const root = xml.documentElement()
+
+			for (let child = xml.firstChildElement(root); child >= 0; child = xml.nextSiblingElement(child)) {
+				const name = xml.localName(child)
+
+				if (name === "pageSetup" || name === "pageMargins" || name === "headerFooter") markup[name] = decodeUtf8(xml.raw(child))
+			}
+		}
+	} catch {
+		// A chartsheet whose part does not read prints with the defaults.
+	}
+
+	const setup = readPageSetup(
+		{ ...markup, printOptions: "", rowBreaks: "", colBreaks: "", sheetPr: "" },
+		{ printArea: null, printTitles: null },
+		false
+	)
+
+	return { setup, used: null, chart }
 }
 
 // Whether each cell format draws on paper: a fill, or a border line.
@@ -581,7 +621,7 @@ async function printRows(
 
 	const held = built.get(sheet)
 
-	if (held?.version === version) return held.rows
+	if (held?.version === version) return ownedRows(held.rows)
 
 	const model = await document.ready(sheet)
 	const store = model.store as SheetStore
@@ -621,17 +661,45 @@ async function printRows(
 		}
 	}
 
-	const rows: SheetPrintRows = {
-		defaultSize,
-		indices: indices.slice(0, n),
-		sizes: sizes.slice(0, n),
-		styles: new Uint32Array(n),
-		flags: flags.slice(0, n)
+	// Rows the store does not hold (an OpenDocument sheet's runs): an entry each.
+	const runs: AxisRun[] = []
+
+	for (const run of model.rowRuns ?? []) {
+		const size = Number.isNaN(run.heightPt) ? defaultSize : run.heightPt * PX_PER_POINT
+		const hidden = (run.flags & RowFlag.HIDDEN) !== 0
+
+		if (hidden || size !== defaultSize)
+			runs.push({ first: run.first, count: run.last - run.first + 1, size, style: 0, flags: hidden ? AxisFlag.HIDDEN : 0 })
 	}
+
+	const rows: SheetPrintRows =
+		runs.length === 0
+			? { defaultSize, indices: indices.slice(0, n), sizes: sizes.slice(0, n), styles: new Uint32Array(n), flags: flags.slice(0, n) }
+			: withRuns(
+					defaultSize,
+					[...indices.subarray(0, n)],
+					[...sizes.subarray(0, n)],
+					new Array<number>(n).fill(0),
+					[...flags.subarray(0, n)],
+					runs
+				)
 
 	built.set(sheet, { version, rows })
 
-	return rows
+	return ownedRows(rows)
+}
+
+// An answer of its own: a worker transfers every answer's buffers (protocol.ts), which would leave the kept rows
+// detached for the next print.
+function ownedRows(rows: SheetPrintRows): SheetPrintRows {
+	return {
+		...rows,
+		indices: rows.indices.slice(),
+		sizes: rows.sizes.slice(),
+		styles: rows.styles.slice(),
+		flags: rows.flags.slice(),
+		...(rows.counts !== undefined && { counts: rows.counts.slice() })
+	}
 }
 
 export const xlsxPrintFeature = defineSheetFeature<XlsxDocument>({
@@ -644,6 +712,7 @@ export const xlsxPrintFeature = defineSheetFeature<XlsxDocument>({
 			run: async (context, request) => {
 				const entry = context.doc.entry(request.sheet)
 
+				if (entry?.kind === "chartsheet") return chartsheetSettings(context.doc, request.sheet, entry.part)
 				if (entry === undefined || entry.kind !== "worksheet") return null
 
 				const model = await context.doc.ready(request.sheet, context.slicing)

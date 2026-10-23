@@ -70,6 +70,8 @@ export const previewSheetPrint = {
 	previewSheetPrintGridlines: "Gridlines",
 	/** Print dialog — checkbox: print row numbers and column letters */
 	previewSheetPrintHeadings: "Row and column headings",
+	/** Print dialog — button downloading the pages as they would print as a PDF file instead of printing them */
+	previewSheetPrintSaveAsPdf: "Save as PDF",
 	/** Print dialog — the button that prints */
 	previewSheetPrintButton: "Print",
 	/** Print dialog — accessible label of the page preview */
@@ -88,10 +90,12 @@ export const previewSheetPrint = {
 	previewSheetPrintProgress: "Preparing page {{done}} of {{pages}}…",
 	/** Print dialog — the print is cut short at the page limit; {{pages}} is the number that prints */
 	previewSheetPrintTooMany: "Only the first {{pages}} pages print. Set a print area or scale to print fewer.",
-	/** Print dialog — chart sheets are not printed; {{names}} lists the sheet names */
-	previewSheetPrintSkipped: "Chart sheets don't print here: {{names}}",
+	/** Print dialog — sheets without cells or a chart (dialog and macro sheets) are not printed; {{names}} lists the sheet names */
+	previewSheetPrintSkipped: "These sheets don't print here: {{names}}",
 	/** Print dialog — the settings are not saved into the file (read-only, or a CSV or TSV file) */
 	previewSheetPrintNotSaved: "These settings apply to this print only.",
+	/** Print dialog preview and toast — one page holds more cells than a page can be drawn with; {{page}} is its number */
+	previewSheetPrintPageTooLarge: "Page {{page}} holds too many cells to print. Set a print area, a larger scale or a smaller paper size.",
 	/** Toast — the pages could not be prepared */
 	previewSheetPrintFailed: "This spreadsheet couldn't be printed."
 }

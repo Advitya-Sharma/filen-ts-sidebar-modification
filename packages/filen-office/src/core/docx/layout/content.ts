@@ -784,7 +784,7 @@ export class ContentBuilder {
 
 			kinds.push(kind)
 			// Inside another field a MACROBUTTON shows nothing (MS-OI29500 §17.16.5.34).
-			this.fieldDisplays.push(modes.length === 0 ? macroButtonText(instruction) : undefined)
+			this.fieldDisplays.push(modes.length === 0 && field >= 0 ? part.macroButtonDisplay(field, view) : undefined)
 			this.resultStarts.push(-1)
 			this.fieldValues.push(
 				kind === FieldKind.CHECKBOX || kind === FieldKind.DROPDOWN

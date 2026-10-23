@@ -9,6 +9,7 @@ import type { DriveItem } from "@/features/drive/lib/item"
 import type { SpreadsheetSnapshot } from "@/features/spreadsheet/save/sheetSave.logic"
 import { WORKBOOK_PASSWORD, encryptedWorkbook } from "@/tests/encryptedWorkbookFixtures"
 import { preview } from "@/locales/en/preview"
+import { PreviewDownloadableProvider } from "@/features/preview/lib/accessMode"
 
 // Saving on the spreadsheet viewer, over real sessions on this thread (an in-thread host stands in for each
 // worker): idle autosave asks the overlay, Save as .xlsx carries a text file's edits into the copy it uploads and
@@ -242,7 +243,9 @@ describe("saving on the spreadsheet viewer", () => {
 
 		await screen.findByRole("textbox", { name: preview.previewSpreadsheetCellContents })
 		await openFileMenu()
-		fireEvent.click(await screen.findByRole("menuitem", { name: preview.previewSheetDownloadSheetCsv }))
+		fireEvent.click(await screen.findByRole("menuitem", { name: preview.previewSheetDownloadAs }))
+		expect(await screen.findByRole("menuitem", { name: preview.previewSheetDownloadPdf })).toBeTruthy()
+		fireEvent.click(await screen.findByRole("menuitem", { name: preview.previewSheetDownloadSheetCsvFormat }))
 
 		await waitFor(() => {
 			expect(hooks.downloads).toHaveLength(1)
@@ -257,6 +260,27 @@ describe("saving on the spreadsheet viewer", () => {
 		expect(new TextDecoder().decode(bytes.slice(3))).toBe("Item,Cost\r\nRent,1200\r\n")
 		// No .xlsx offers Save as .xlsx.
 		expect(screen.queryByRole("menuitem", { name: preview.previewSpreadsheetSaveAsXlsx })).toBeNull()
+	})
+
+	it("offers no download (PDF or CSV) of a file that may not be downloaded", async () => {
+		hooks.bytes = await budget()
+
+		render(
+			<PreviewDownloadableProvider downloadable={false}>
+				<SheetViewer
+					item={file("b.xlsx")}
+					documentKey="k-nodownload"
+					alt="b.xlsx"
+					editable
+					saveRef={{ current: null }}
+				/>
+			</PreviewDownloadableProvider>
+		)
+
+		await screen.findByRole("textbox", { name: preview.previewSpreadsheetCellContents })
+		await openFileMenu()
+		await screen.findByRole("menuitem", { name: preview.previewSheetPrintMenu })
+		expect(screen.queryByRole("menuitem", { name: preview.previewSheetDownloadAs })).toBeNull()
 	})
 
 	it("keeps a password-protected workbook's cells sealed: no CSV is offered", async () => {
@@ -276,7 +300,7 @@ describe("saving on the spreadsheet viewer", () => {
 		await screen.findByRole("button", { name: preview.previewDocxPasswordProtected }, { timeout: 20_000 })
 		await openFileMenu()
 		await screen.findByRole("menuitemcheckbox", { name: preview.previewSheetAutosave })
-		expect(screen.queryByRole("menuitem", { name: preview.previewSheetDownloadSheetCsv })).toBeNull()
+		expect(screen.queryByRole("menuitem", { name: preview.previewSheetDownloadSheetCsvFormat })).toBeNull()
 		expect(WORKBOOK_PASSWORD).not.toBe("")
 	}, 30_000)
 

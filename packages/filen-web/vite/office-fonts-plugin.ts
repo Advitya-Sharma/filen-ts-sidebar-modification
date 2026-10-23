@@ -15,6 +15,8 @@ export const OFFICE_FONTS_BASE = "/office/fonts/"
 
 const VIRTUAL_ID = "virtual:office-fonts"
 const RESOLVED_ID = `\0${VIRTUAL_ID}`
+const PDF_VIRTUAL_ID = "virtual:office-pdf-fonts"
+const PDF_RESOLVED_ID = `\0${PDF_VIRTUAL_ID}`
 
 // A face's URL in a build: its manifest path with the first 8 hex digits of its SHA-256 before the extension.
 function hashedPath(face: Face): string {
@@ -25,7 +27,8 @@ function hashedPath(face: Face): string {
 
 const FONTS_DIR = dirname(createRequire(import.meta.url).resolve("@filen/office/assets/fonts/manifest.json"))
 const MANIFEST = join(FONTS_DIR, "manifest.json")
-const MIME: Record<string, string> = { ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8" }
+// The .ttf.gz faces are sent as stored (no Content-Encoding): the worker decompresses them itself.
+const MIME: Record<string, string> = { ".woff2": "font/woff2", ".gz": "application/gzip", ".txt": "text/plain; charset=utf-8" }
 
 interface Face {
 	file: string
@@ -37,44 +40,68 @@ function record(value: unknown): Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? Object.fromEntries(Object.entries(value)) : {}
 }
 
-// Every face and each family's licence file, as paths under the fonts directory.
-function readManifest(): { faces: Face[]; licences: string[] } {
-	const families = record(JSON.parse(readFileSync(MANIFEST, "utf8")))["families"]
+function faceOf(value: unknown, owner: string): Face {
+	const { file, bytes, sha256 } = record(value)
+
+	if (typeof file !== "string" || typeof bytes !== "number" || typeof sha256 !== "string") {
+		throw new Error(`${MANIFEST}: a face of ${owner} is malformed`)
+	}
+
+	return { file, bytes, sha256 }
+}
+
+// Every face (web fonts, and the PDF faces apart) and each family's licence file, as paths under the fonts
+// directory.
+function readManifest(): { faces: Face[]; pdfFaces: Face[]; licences: string[] } {
+	const manifest = record(JSON.parse(readFileSync(MANIFEST, "utf8")))
+	const families = manifest["families"]
+	const fallbacks = manifest["fallbacks"]
 	const faces: Face[] = []
+	const pdfFaces: Face[] = []
 	const licences = new Set<string>()
 
 	if (!Array.isArray(families) || families.length === 0) {
 		throw new Error(`${MANIFEST} lists no families`)
 	}
 
-	for (const family of families.map(record)) {
-		const licence = family["licenseFile"]
-		const familyFaces = family["faces"]
+	const groups = [
+		{ list: families, web: true },
+		{ list: Array.isArray(fallbacks) ? fallbacks : [], web: false }
+	]
 
-		if (typeof licence !== "string" || !Array.isArray(familyFaces) || familyFaces.length === 0) {
-			throw new Error(`${MANIFEST}: family ${String(family["id"])} is malformed`)
-		}
+	for (const { list, web } of groups) {
+		for (const family of list.map(record)) {
+			const licence = family["licenseFile"]
+			const familyFaces = family["faces"]
+			const pdf = family["pdf"]
+			const owner = String(family["id"])
 
-		for (const face of familyFaces.map(record)) {
-			const { file, bytes, sha256 } = face
-
-			if (typeof file !== "string" || typeof bytes !== "number" || typeof sha256 !== "string") {
-				throw new Error(`${MANIFEST}: a face of ${String(family["id"])} is malformed`)
+			if (typeof licence !== "string" || !Array.isArray(familyFaces) || familyFaces.length === 0) {
+				throw new Error(`${MANIFEST}: family ${owner} is malformed`)
 			}
 
-			faces.push({ file, bytes, sha256 })
-		}
+			// A family's "faces" are web fonts; a fallback's are PDF faces, as is every family's "pdf" list.
+			for (const face of familyFaces) {
+				;(web ? faces : pdfFaces).push(faceOf(face, owner))
+			}
 
-		licences.add(licence)
+			if (Array.isArray(pdf)) {
+				for (const face of pdf) {
+					pdfFaces.push(faceOf(face, owner))
+				}
+			}
+
+			licences.add(licence)
+		}
 	}
 
-	return { faces, licences: [...licences] }
+	return { faces, pdfFaces, licences: [...licences] }
 }
 
 export function officeFonts(): Plugin {
-	const { faces, licences } = readManifest()
+	const { faces, pdfFaces, licences } = readManifest()
 	// Exactly the manifest's files, so the dev middleware needs no path containment of its own.
-	const served = new Set([...faces.map(face => face.file), ...licences])
+	const served = new Set([...faces.map(face => face.file), ...pdfFaces.map(face => face.file), ...licences])
 	const outDir = OFFICE_FONTS_BASE.slice(1)
 	let build = false
 
@@ -84,16 +111,17 @@ export function officeFonts(): Plugin {
 			build = config.command === "build"
 		},
 		resolveId(id) {
-			return id === VIRTUAL_ID ? RESOLVED_ID : null
+			return id === VIRTUAL_ID ? RESOLVED_ID : id === PDF_VIRTUAL_ID ? PDF_RESOLVED_ID : null
 		},
 		load(id) {
-			if (id !== RESOLVED_ID) {
+			if (id !== RESOLVED_ID && id !== PDF_RESOLVED_ID) {
 				return null
 			}
 
-			const urls = Object.fromEntries(faces.map(face => [face.file, build ? `/${hashedPath(face)}` : OFFICE_FONTS_BASE + face.file]))
+			const list = id === RESOLVED_ID ? faces : pdfFaces
+			const urls = Object.fromEntries(list.map(face => [face.file, build ? `/${hashedPath(face)}` : OFFICE_FONTS_BASE + face.file]))
 
-			return `export const OFFICE_FONT_URLS = Object.freeze(${JSON.stringify(urls)})\n`
+			return `export const ${id === RESOLVED_ID ? "OFFICE_FONT_URLS" : "OFFICE_PDF_FONT_URLS"} = Object.freeze(${JSON.stringify(urls)})\n`
 		},
 		// The preview serves the build's copies from dist/ instead, under the preview header set.
 		configureServer(server) {
@@ -125,7 +153,7 @@ export function officeFonts(): Plugin {
 			})
 		},
 		generateBundle() {
-			for (const face of faces) {
+			for (const face of [...faces, ...pdfFaces]) {
 				const source = readFileSync(join(FONTS_DIR, face.file))
 				const sha256 = createHash("sha256").update(source).digest("hex")
 

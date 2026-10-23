@@ -3,6 +3,7 @@ import type { Dir, File, UuidStr } from "@filen/sdk-rs"
 import { narrowItem, type DriveItem } from "@/features/drive/lib/item"
 import {
 	unprobedTransportStream,
+	unsniffedTemplate,
 	previewType,
 	canPreview,
 	needsImageTransform,
@@ -187,6 +188,32 @@ describe("previewType — extension category map", () => {
 
 	it.each(["docm", "dotx", "dotm", "DOTM"])("%s -> docx (macro-enabled documents and templates)", ext => {
 		expect(previewType(fileNamed(`letter.${ext}`))).toBe("docx")
+	})
+
+	it.each(["odt", "ott", "ODT"])("%s -> docx (OpenDocument text, view-only)", ext => {
+		expect(previewType(fileNamed(`letter.${ext}`))).toBe("docx")
+	})
+
+	it.each(["doc", "dot", "DOC"])("%s -> docx (Word 97–2003, from its conversion, view-only)", ext => {
+		expect(previewType(fileNamed(`letter.${ext}`))).toBe("docx")
+	})
+
+	it.each(["rtf", "RTF"])("%s -> docx (RTF, read and written in its worker)", ext => {
+		expect(previewType(fileNamed(`letter.${ext}`))).toBe("docx")
+	})
+
+	it("reads a .dot as a Word template until its content says it is text (a Graphviz graph)", () => {
+		const graph = fileNamed("graph.dot", { mime: "application/msword" })
+
+		expect(previewType(graph)).toBe("docx")
+		expect(unsniffedTemplate(graph)).toBe(true)
+
+		recordFileKindVerdict(graph.data.uuid, "notWordBinary")
+
+		expect(previewType(graph)).toBe("text")
+		expect(unsniffedTemplate(graph)).toBe(false)
+		// A text MIME type says so without a read.
+		expect(previewType(fileNamed("flow.dot", { mime: "text/vnd.graphviz" }))).toBe("text")
 	})
 
 	it("reads a Word type by its MIME type only without a known extension (the extension first)", () => {

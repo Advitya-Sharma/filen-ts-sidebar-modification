@@ -1,7 +1,15 @@
 import { findUnsavableBlocks, type DocxEditorSession } from "@filen/office/core/docx/edit"
 import { DocxSaveError, prepareDocxSave, writerProof } from "@filen/office/core/docx/write"
 import { fetchFontAssets, windowServices, type DocxUnlockedDocument } from "@filen/office/dom/docx"
-import { docxSealer, inThreadEditingHost, isSealedOfficeFile, type DocxEditingHost, type DocxSealer } from "@filen/office/dom/docx/editing"
+import {
+	docxSealer,
+	inThreadEditingHost,
+	isSealedOfficeFile,
+	type DocxEditingHost,
+	type DocxEditingOptions,
+	type DocxEditingWriter,
+	type DocxSealer
+} from "@filen/office/dom/docx/editing"
 import { docxZipWorker } from "@filen/office/dom/docx/save"
 import { plainText } from "@filen/office/react/docx/editor"
 import { DOCX_FONT_URLS } from "@/features/preview/lib/docxEngine"
@@ -40,12 +48,19 @@ const zipper = docxZipWorker(() => {
 	}
 })
 
+// What a document of another format edits through (an RTF document, rtfEditing.ts): its Gate 1 and its writer.
+export interface DocxEditingBackend {
+	readonly proof: NonNullable<DocxEditingOptions["proof"]>
+	readonly writer: DocxEditingWriter
+}
+
 // `writeUnlocked`: the document's password to modify was given (docxWriteProtection.tsx). `encryption`: it was
 // opened with its password (docxViewer.tsx): every save is sealed with its key after the zip and checked.
-export function docxEditingHost(writeUnlocked = false, encryption?: DocxSealer): DocxEditingHost {
+// `backend`: the proof and writer of a document saved in another format (default: the docx writer's).
+export function docxEditingHost(writeUnlocked = false, encryption?: DocxSealer, backend?: DocxEditingBackend): DocxEditingHost {
 	return inThreadEditingHost(options => windowServices(window, fetchFontAssets(options.fontUrls ?? DOCX_FONT_URLS)), {
-		proof: writerProof,
-		writer: { prepare: prepareDocxSave, zipper },
+		proof: backend?.proof ?? writerProof,
+		writer: backend?.writer ?? { prepare: prepareDocxSave, zipper },
 		writeUnlocked,
 		...(encryption === undefined ? {} : { encryption })
 	})

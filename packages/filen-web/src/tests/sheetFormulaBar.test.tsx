@@ -59,16 +59,14 @@ function file(name: string): DriveItem {
 
 const NUMBERS = [["Amount"], [1], [2]]
 
-async function book(
-	sheets: readonly { readonly name: string; readonly rows: readonly (readonly (string | number)[])[] }[]
-): Promise<Uint8Array> {
+type BookCell = string | number | { readonly formula: string; readonly formulaResult: number; readonly formulaType?: "array" }
+
+async function book(sheets: readonly { readonly name: string; readonly rows: readonly (readonly BookCell[])[] }[]): Promise<Uint8Array> {
 	return await writeXlsx({ sheets: sheets.map(sheet => ({ name: sheet.name, rows: sheet.rows.map(row => [...row]) })) })
 }
 
 async function openViewer(
-	sheets: readonly { readonly name: string; readonly rows: readonly (readonly (string | number)[])[] }[] = [
-		{ name: "Data", rows: NUMBERS }
-	]
+	sheets: readonly { readonly name: string; readonly rows: readonly (readonly BookCell[])[] }[] = [{ name: "Data", rows: NUMBERS }]
 ): Promise<HTMLElement> {
 	bytes.current = await book(sheets)
 
@@ -195,5 +193,16 @@ describe("entries in the browser's locale", () => {
 			},
 			{ timeout: 5000 }
 		)
+		// Opening the viewer and the three moves wait up to a second each, the entry's round trip up to five.
+	}, 15_000)
+})
+
+describe("a result the app does not calculate", () => {
+	it("marks the cell as showing the result saved in the file", async () => {
+		await openViewer([{ name: "Data", rows: [["Amount"], [1], [{ formula: "A2*7", formulaResult: 7, formulaType: "array" }]] }])
+		await goTo("A2")
+		expect(screen.queryByRole("img", { name: preview.previewSheetCachedResult })).toBeNull()
+		await goTo("A3")
+		await screen.findByRole("img", { name: preview.previewSheetCachedResult })
 	})
 })

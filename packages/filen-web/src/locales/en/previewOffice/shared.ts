@@ -65,5 +65,17 @@ export const previewOfficeShared = {
 	/** Office editors — standard colour name */
 	previewOfficeColorDarkBlue: "Dark blue",
 	/** Office editors — standard colour name */
-	previewOfficeColorPurple: "Purple"
+	previewOfficeColorPurple: "Purple",
+	/** Office editors — Download as PDF of a password-protected file: title of the prompt asking the file's password first */
+	previewOfficePdfPasswordTitle: "Protect the PDF",
+	/** Office editors — that prompt's body: the PDF gets the file's own password */
+	previewOfficePdfPasswordBody: "The PDF is protected with the document's password. Enter it to continue.",
+	/** Office editors — that prompt's field label */
+	previewOfficePdfPasswordLabel: "Document password",
+	/** Office editors — that prompt's submit button */
+	previewOfficePdfPasswordSubmit: "Download PDF",
+	/** Office editors — that prompt, while the password is checked */
+	previewOfficePdfPasswordChecking: "Checking password…",
+	/** Office editors — that prompt, under the field after a wrong password */
+	previewOfficePdfPasswordWrong: "That is not the document's password"
 }

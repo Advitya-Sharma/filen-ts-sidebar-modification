@@ -117,6 +117,7 @@ export function SheetViewer({
 					modifyLocked={state.modifyLocked}
 					layerKey={layerKeyFor(stableUuidOf(item), documentKey)}
 					onAutosave={onAutosave}
+					encryptedFile={state.handle.info.encrypted === undefined ? undefined : state.bytes}
 					onSaveAsXlsx={
 						savesAsXlsx(state.kind) && canSaveCopy === true
 							? async () => {

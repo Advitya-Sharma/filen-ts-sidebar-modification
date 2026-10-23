@@ -74,8 +74,11 @@ async function typeInto(page: Page, dialog: Locator, ref: string, text: string):
 	await page.keyboard.press("Enter")
 }
 
-async function fileMenu(page: Page, dialog: Locator, item: string): Promise<void> {
+async function fileMenu(page: Page, dialog: Locator, item: string, submenu?: string): Promise<void> {
 	await dialog.getByRole("button", { name: preview.previewSheetFileMenu, exact: true }).click()
+
+	if (submenu !== undefined) await page.getByRole("menuitem", { name: submenu, exact: true }).click()
+
 	await page.getByRole("menuitem", { name: item, exact: true }).click()
 }
 
@@ -229,7 +232,7 @@ test("a CSV saves as an .xlsx copy holding its unsaved edits, and a sheet downlo
 		// The sheet on show as Excel's "CSV UTF-8".
 		const downloading = page.waitForEvent("download")
 
-		await fileMenu(page, dialog, preview.previewSheetDownloadSheetCsv)
+		await fileMenu(page, dialog, preview.previewSheetDownloadSheetCsvFormat, preview.previewSheetDownloadAs)
 
 		const download = await downloading
 		const path = await download.path()
@@ -283,7 +286,8 @@ test("a password-protected workbook's saves store only its sealed package, and i
 		// No CSV of a protected workbook; autosave is offered as for any workbook.
 		await dialog.getByRole("button", { name: preview.previewSheetFileMenu, exact: true }).click()
 		await expect(page.getByRole("menuitemcheckbox", { name: preview.previewSheetAutosave })).toBeVisible()
-		await expect(page.getByRole("menuitem", { name: preview.previewSheetDownloadSheetCsv })).toHaveCount(0)
+		await page.getByRole("menuitem", { name: preview.previewSheetDownloadAs, exact: true }).click()
+		await expect(page.getByRole("menuitem", { name: preview.previewSheetDownloadSheetCsvFormat })).toHaveCount(0)
 		await page.keyboard.press("Escape")
 
 		// What the drive now holds: a compound file (the sealed package), holding neither the cell nor the password.

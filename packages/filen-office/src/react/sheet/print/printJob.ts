@@ -1,28 +1,46 @@
 import {
-	CellFlag,
 	tileKey,
+	type SheetAbortSignal,
 	type SheetId,
 	type SheetLayout,
-	type SheetRange,
 	type SheetRenderStyle,
 	type SheetTile
 } from "../../../core/sheet/protocol"
-import { parseHeaderFooter, type HeaderFooterValues } from "../../../core/sheet/print/headerFooter"
+// The query names these modules declare (print.tiles): types only, nothing of theirs runs from here.
+import type {} from "../../../core/sheet/session"
+import type { HeaderFooterValues } from "../../../core/sheet/print/headerFooter"
 import type { PrintPage } from "../../../core/sheet/print/paginate"
-import type { SheetPageSetup } from "../../../core/sheet/print/setup"
 import type { SheetHeaderImage, SheetPrintNote } from "../../../core/sheet/print/xlsx"
-import { columnName } from "../../../core/sheet/refs/cellRef"
 import type { SheetDrawingObject } from "../../../core/xlsx/drawings/feature"
 import { mediaContentType } from "../../../core/xlsx/drawings/mediaTypes"
 import type { SheetDrawingData } from "../../../core/xlsx/drawings/render"
-import { DocxMediaCache } from "../../docx/media"
 import { drawingImages, imageMime, inlineImageUrls, paintDrawing } from "../../docx/paint/drawing"
 import { anchorBox, type SheetBox } from "../drawings/geometry"
 import { SheetGridModel } from "../model"
 import type { SheetGridTheme } from "../theme"
-import { framePage, pageTiles, pageView, printPageSvg, printSheet, type BandPictures, type PrintedSheet } from "./printPage"
-import { noteBox, printRanges, wholeAxes } from "./printRanges"
-import { escapeSvgText } from "./svgCanvas"
+import {
+	LIST_FONT_PT,
+	LIST_LINE_PT,
+	NOTE_FONT,
+	NOTE_FONT_PX,
+	NOTE_LINE_PX,
+	blackAndWhite,
+	chartPlacement,
+	MAX_PAGE_CELLS,
+	pageCount,
+	printPageAt,
+	PrintPageTooLarge,
+	printedTile,
+	wrap,
+	type NotesPage,
+	type PrintChart,
+	type PrintJob,
+	type PrintJobSheet
+} from "./printLayout"
+import { framePage, paintPrintedCells, pageTiles, pageView, placedPage, PRINT_THEME, printPageSvg, type BandPictures } from "./printPage"
+import { planSlices, slicePage, SliceTiles, sliceView, smallPage, surveyPage, type TileFetch } from "./printSlices"
+import { noteBox, wholeAxes } from "./printRanges"
+import { escapeSvgText, SvgCanvas } from "./svgCanvas"
 
 // A print as a list of pages over the grid model's session: each sheet cut into pages (and the pages listing its
 // notes, when it prints them at the end), then each page drawn as SVG once the tiles it shows are held, with the
@@ -34,232 +52,6 @@ import { escapeSvgText } from "./svgCanvas"
 // eviction releases them like any other (a release of our own could race a fetch of the grid's for the same tile).
 // Styles the answer brings reach the model the same way. A page itself is drawn from a model of its own holding the
 // tiles as printed (errors as the sheet prints them, black and white), which never releases anything.
-
-export interface PrintSheetRequest {
-	readonly sheet: SheetId
-	readonly name: string
-	readonly setup: SheetPageSetup
-	// What prints: the selection's ranges, else the print area's, else the used range (null: nothing).
-	readonly ranges: readonly SheetRange[]
-	readonly used: SheetRange | null
-}
-
-// A page listing notes: each note's cell and its text, in lines as they fit the page.
-export interface NotesPage {
-	readonly lines: readonly { readonly text: string; readonly bold: boolean }[]
-}
-
-export interface PrintJobSheet extends PrintedSheet {
-	readonly notesAtEnd: readonly NotesPage[]
-	// Notes shown all the time, drawn where they stand (cellComments asDisplayed).
-	readonly shownNotes: readonly SheetPrintNote[]
-	readonly objects: readonly SheetDrawingObject[]
-	readonly headerImages: readonly SheetHeaderImage[]
-}
-
-export interface PrintJob {
-	readonly model: SheetGridModel
-	readonly sheets: readonly PrintJobSheet[]
-	// The print was laid out up to its page cap and more pages would follow.
-	readonly more: boolean
-	readonly measure: (font: string, text: string) => number
-	// Pictures as object URLs for the print's lifetime.
-	readonly media: DocxMediaCache | null
-	// Drawn objects, once per object.
-	readonly drawn: Map<string, Promise<string | null>>
-	dispose(): void
-}
-
-const NOTE_FONT_PX = 12
-const NOTE_FONT = `${String(NOTE_FONT_PX)}px Tahoma, Arial, sans-serif`
-const NOTE_LINE_PX = 15
-const LIST_FONT_PT = 10
-const LIST_LINE_PT = 14
-
-// `text` broken into lines `width` wide at spaces (a long word between characters); line breaks kept.
-function wrap(text: string, width: number, measure: (text: string) => number): string[] {
-	const out: string[] = []
-
-	for (const paragraph of text.split(/\r?\n|\r/u)) {
-		let line = ""
-
-		for (const word of paragraph.match(/\S+\s*|\s+/gu) ?? [""]) {
-			if (line !== "" && measure(line + word.trimEnd()) > width) {
-				out.push(line.trimEnd())
-				line = ""
-			}
-
-			if (measure(word.trimEnd()) <= width || line !== "") {
-				line += word
-
-				continue
-			}
-
-			for (const char of word) {
-				if (line !== "" && measure(line + char) > width) {
-					out.push(line)
-					line = ""
-				}
-
-				line += char
-			}
-		}
-
-		out.push(line.trimEnd())
-	}
-
-	return out
-}
-
-// The notes listed after a sheet, as Excel prints them: a "Cell:" line and a "Note:" line each, a blank line between.
-function notesPages(notes: readonly SheetPrintNote[], printed: PrintedSheet, measure: (font: string, text: string) => number): NotesPage[] {
-	if (notes.length === 0) return []
-
-	const { area } = printed.pagination
-	const font = `${String(LIST_FONT_PT)}pt Calibri, Carlito, Arial, sans-serif`
-	const perPage = Math.max(1, Math.floor(area.height / LIST_LINE_PT))
-	const lines: { text: string; bold: boolean }[] = []
-
-	for (const note of notes) {
-		if (lines.length > 0) lines.push({ text: "", bold: false })
-
-		lines.push({ text: `Cell: ${columnName(note.col)}${String(note.row + 1)}`, bold: true })
-
-		const body = note.author === "" || note.text.startsWith(note.author) ? note.text : `${note.author}: ${note.text}`
-
-		// Measured in px: the list's points are 4/3 as many px.
-		for (const text of wrap(`Note: ${body}`, (area.width * 4) / 3, piece => measure(font, piece))) lines.push({ text, bold: false })
-	}
-
-	const pages: NotesPage[] = []
-
-	for (let k = 0; k < lines.length; k += perPage) pages.push({ lines: lines.slice(k, k + perPage) })
-
-	return pages
-}
-
-// Whether any header or footer text of the sheet shows a picture (&G).
-function picturesUsed(setup: SheetPageSetup): boolean {
-	const { odd, even, first } = setup.headerFooter
-
-	return [odd.header, odd.footer, even.header, even.footer, first.header, first.footer].some(text =>
-		Object.values(parseHeaderFooter(text)).some((runs: readonly { kind: string; field?: string }[]) =>
-			runs.some(run => run.kind === "field" && run.field === "picture")
-		)
-	)
-}
-
-// `maxPages`: the sheets' pages laid out at most, all sheets together (what a browser can print), so a huge range
-// is not cut into pages nothing shows; the job says when more would follow.
-export async function layOutPrint(
-	model: SheetGridModel,
-	sheets: readonly PrintSheetRequest[],
-	measure: (font: string, text: string) => number = (_font, text) => text.length * 7,
-	maxPages?: number
-): Promise<PrintJob> {
-	const out: PrintJobSheet[] = []
-	let left = maxPages ?? Number.POSITIVE_INFINITY
-	let more = false
-	const xlsx = model.kind !== "csv" && model.kind !== "tsv" && model.kind !== "tab"
-	let media: DocxMediaCache | null = null
-
-	for (const request of sheets) {
-		// The session's own layout: it carries what features read beside the sheet (drawings) as they now are.
-		const layout = await model.session.layout(request.sheet)
-		const { setup } = request
-		// Draft quality prints no graphics.
-		const objects = setup.draft ? [] : (layout.extensions?.drawings?.objects.filter(object => !object.hidden) ?? [])
-		const notes = xlsx && setup.cellComments !== "none" ? await model.session.query("print.notes", { sheet: request.sheet }) : []
-		const shownNotes = setup.cellComments === "asDisplayed" ? notes.filter(note => note.shown) : []
-		const ranges = printRanges(request.ranges, request.used, objects, shownNotes, layout)
-		const headerImages =
-			xlsx && !setup.draft && picturesUsed(setup) ? await model.session.query("print.headerImages", { sheet: request.sheet }) : []
-		const notesAtEnd = setup.cellComments === "atEnd" ? notes : []
-
-		if (ranges.length === 0 && notesAtEnd.length === 0) continue
-
-		if (left <= 0) {
-			more = true
-
-			break
-		}
-
-		const exact = xlsx ? await model.session.query("print.rows", { sheet: request.sheet }) : null
-		const printed = printSheet(request.sheet, request.name, layout, setup, ranges, Number.isFinite(left) ? left : undefined, exact)
-
-		left -= printed.pagination.pages.length
-		more ||= printed.pagination.more
-
-		if (objects.length > 0 || headerImages.length > 0)
-			media ??= new DocxMediaCache({ media: partName => model.session.query("drawing.media", { partName }) })
-
-		out.push({
-			...printed,
-			notesAtEnd: notesPages(notesAtEnd, printed, measure),
-			shownNotes,
-			objects,
-			headerImages
-		})
-	}
-
-	const drawn = new Map<string, Promise<string | null>>()
-
-	return {
-		model,
-		sheets: out,
-		more,
-		measure,
-		media,
-		drawn,
-		dispose: () => {
-			media?.dispose()
-			drawn.clear()
-		}
-	}
-}
-
-function sheetPages(sheet: PrintJobSheet): number {
-	return sheet.pagination.pages.length + sheet.notesAtEnd.length
-}
-
-export function pageCount(job: PrintJob): number {
-	return job.sheets.reduce((total, sheet) => total + sheetPages(sheet), 0)
-}
-
-// The nth page of a print (0-based) with its sheet, its number (&P) and whether it is its sheet's first: a page of
-// cells, or one listing notes.
-export function printPageAt(
-	job: PrintJob,
-	index: number
-): {
-	readonly sheet: PrintJobSheet
-	readonly page: PrintPage | null
-	readonly notes: NotesPage | null
-	readonly number: number
-	readonly first: boolean
-} | null {
-	let before = 0
-	let number = 0
-
-	for (const sheet of job.sheets) {
-		const pages = sheet.pagination.pages
-		const count = sheetPages(sheet)
-		const start = sheet.setup.firstPageNumber ?? number + 1
-
-		if (index < before + count) {
-			const at = index - before
-			const page = at < pages.length ? (pages[at] ?? null) : null
-			const notes = at >= pages.length ? (sheet.notesAtEnd[at - pages.length] ?? null) : null
-
-			return { sheet, page, notes, number: start + at, first: at === 0 }
-		}
-
-		before += count
-		number = start + count - 1
-	}
-
-	return null
-}
 
 // --- Tiles and the page's own model ---
 
@@ -289,57 +81,6 @@ async function holdTiles(model: SheetGridModel, sheet: SheetId, coordinates: rea
 		out.push(model.tiles.peek(key) ?? tile)
 
 		if (!model.tiles.has(key)) model.tiles.put(tile)
-	}
-
-	return out
-}
-
-const ERROR_TEXTS: Readonly<Record<SheetPageSetup["errors"], string | null>> = { displayed: null, blank: "", dash: "--", NA: "#N/A" }
-
-// A tile with its error values as the sheet prints them (pageSetup errors, §18.18.60).
-export function printedTile(tile: SheetTile, errors: SheetPageSetup["errors"]): SheetTile {
-	const replacement = ERROR_TEXTS[errors]
-
-	if (replacement === null) return tile
-
-	let texts: Int32Array | null = null
-	let strings: string[] | null = null
-	let index = -1
-
-	for (let entry = 0; entry < tile.count; entry++) {
-		if (((tile.flags[entry] ?? 0) & CellFlag.ERROR) === 0) continue
-
-		texts ??= tile.texts.slice()
-
-		if (replacement === "") {
-			texts[entry] = -1
-
-			continue
-		}
-
-		if (strings === null) {
-			strings = [...tile.strings, replacement]
-			index = strings.length - 1
-		}
-
-		texts[entry] = index
-	}
-
-	return texts === null ? tile : { ...tile, texts, strings: strings ?? tile.strings }
-}
-
-// A look as the sheet prints it in black and white: no fills, automatic (black) text and lines.
-export function blackAndWhite(style: SheetRenderStyle): SheetRenderStyle {
-	const out: { -readonly [K in keyof SheetRenderStyle]: SheetRenderStyle[K] } = { ...style }
-
-	delete out.fill
-	delete out.pattern
-	delete out.color
-
-	for (const edge of ["top", "right", "bottom", "left", "diagonalUp", "diagonalDown"] as const) {
-		const line = style[edge]
-
-		if (line !== undefined) out[edge] = { ...line, color: 0 }
 	}
 
 	return out
@@ -586,6 +327,35 @@ function headerPictureMarkup(job: PrintJob, sheet: PrintJobSheet, index: number,
 	return made
 }
 
+// A chartsheet's page: its chart drawn by the charts feature at its size.
+async function chartPageMarkup(job: PrintJob, sheet: PrintJobSheet, chart: PrintChart): Promise<string> {
+	const key = `${String(sheet.sheet)}:chartsheet:${chart.part}`
+	let made = job.drawn.get(key)
+
+	if (made === undefined) {
+		made = (async () => {
+			try {
+				const rendered = await job.model.session.query("chart.render", {
+					part: chart.part,
+					width: chart.width,
+					height: chart.height
+				})
+				const at = chartPlacement(sheet, chart)
+
+				return rendered.kind === "drawing" ? await drawingMarkup(job, rendered.drawing, at.width, at.height) : null
+			} catch {
+				return null
+			}
+		})()
+		job.drawn.set(key, made)
+	}
+
+	const markup = await made
+	const at = chartPlacement(sheet, chart)
+
+	return markup === null ? "" : `<g transform="translate(${String(at.x)} ${String(at.y)})">${markup}</g>`
+}
+
 function notesPageMarkup(sheet: PrintJobSheet, notes: NotesPage): string {
 	const { area } = sheet.pagination
 
@@ -604,6 +374,68 @@ export interface PrintRenderOptions {
 	// Keeps the SVGs' ids apart from any other print's in the document.
 	readonly id: string
 	readonly theme?: SheetGridTheme
+	// Checked between the slices of a large page: the page is given up (an AbortError) once it is set.
+	readonly signal?: SheetAbortSignal
+}
+
+// Cells one slice of a large page draws on the page's thread in one turn (printSlices.ts).
+const SVG_SLICE_CELLS = 4_096
+
+// A macrotask: input and the page's own work run between two slices.
+function turn(): Promise<void> {
+	return new Promise(resolve => setTimeout(resolve, 0))
+}
+
+// The render styles each print's large pages have brought, so each asks for the new ones only.
+const knownStyles = new WeakMap<PrintJob, number>()
+
+// A large page's cells drawn slice by slice (printSlices.ts): tiles through print.tiles, which holds nothing for the
+// grid; the styles they bring reach the grid model as holdTiles's do.
+async function slicedCells(options: PrintRenderOptions, sheet: PrintJobSheet, page: PrintPage, index: number, id: string): Promise<string> {
+	const { job } = options
+	const model = job.model
+	const aborted = (): void => {
+		if (options.signal?.aborted === true) throw Object.assign(new Error("The print was aborted"), { name: "AbortError" })
+	}
+	const between = async (): Promise<void> => {
+		aborted()
+		await turn()
+		aborted()
+	}
+	const fetch: TileFetch = async coordinates => {
+		const known = knownStyles.get(job) ?? 0
+		const answer = await model.session.query("print.tiles", { sheet: sheet.sheet, coordinates, known })
+
+		if (answer.styles.styles.length > 0) {
+			model.apply({ state: model.getSnapshot().state, patches: [], invalidated: [], layouts: [], styles: answer.styles })
+			knownStyles.set(job, Math.max(known, answer.styles.from + answer.styles.styles.length))
+		}
+
+		return answer.tiles
+	}
+	const survey = await surveyPage(page, fetch, MAX_PAGE_CELLS, between)
+
+	if (survey === null) throw new PrintPageTooLarge(index + 1)
+
+	const tiles = new SliceTiles(page, fetch, between)
+	let markup = ""
+
+	for (const [k, span] of planSlices(page, survey, sheet.layout.merges, SVG_SLICE_CELLS).entries()) {
+		await between()
+
+		const slice = slicePage(page, span, k === 0)
+		const { view, top } = sliceView(sheet, page, slice, k === 0)
+		const held = await tiles.take(slice)
+		const sliceModel = pageModel(model, sheet, held)
+		const canvas = new SvgCanvas(`${id}-${String(k)}-`, job.measure)
+
+		paintPrintedCells(canvas, sliceModel, sheet, slice, options.theme ?? PRINT_THEME, undefined, view)
+		sliceModel.dispose()
+		tiles.drop(slice)
+		markup += top === 0 ? canvas.markup() : `<g transform="translate(0 ${String(top)})">${canvas.markup()}</g>`
+	}
+
+	return markup
 }
 
 // The nth page as SVG markup, or null past the last.
@@ -628,11 +460,22 @@ export async function renderPrintPage(options: PrintRenderOptions, index: number
 		...(options.theme !== undefined && { theme: options.theme })
 	}
 
+	if (found.sheet.chart !== null)
+		return framePage({ ...common, model: job.model }, await chartPageMarkup(job, found.sheet, found.sheet.chart))
+
 	if (found.page === null)
 		return framePage({ ...common, model: job.model }, found.notes === null ? "" : notesPageMarkup(found.sheet, found.notes))
 
 	const over = await overMarkup(job, found.sheet, found.page, id)
-	const tiles = await holdTiles(job.model, found.sheet.sheet, pageTiles(found.page))
+	const coordinates = pageTiles(found.page)
+
+	if (!smallPage(coordinates)) {
+		const cells = await slicedCells(options, found.sheet, found.page, index, id)
+
+		return placedPage({ ...common, model: job.model, page: found.page, over }, pageView(found.sheet, found.page), cells)
+	}
+
+	const tiles = await holdTiles(job.model, found.sheet.sheet, coordinates)
 	// Drawn in the turn the tiles landed: no frame of the grid evicts them first.
 	const model = pageModel(job.model, found.sheet, tiles)
 	const svg = printPageSvg({ ...common, model, page: found.page, measure: job.measure, over })

@@ -1,10 +1,10 @@
 import { Deflate, deflateSync } from "fflate"
 import { encodeUtf8 } from "../xml/utf8"
 import { crc32 } from "./crc32"
-import { sliceClock, type Slicing } from "../slicing"
+import { sliceClock, type SliceClock, type Slicing } from "../slicing"
 import { ZipError } from "./errors"
 import type { ByteSink, ByteSource } from "./io"
-import type { PartBytes } from "./pieces"
+import type { ByteChunks, PartBytes } from "./pieces"
 import {
 	CENTRAL_SIGNATURE,
 	EOCD_SIGNATURE,
@@ -37,6 +37,21 @@ export type ZipPlanItem =
 			// The CRC-32 the content must have (see PartChange.crc32).
 			readonly crc32?: number
 	  }
+
+// A run of content already raw-deflated, spliced into an entry's stream as is: non-final blocks ending on a byte
+// boundary (a sync flush), from a fresh stream (no back-reference before its start). `crc` and `size` are those
+// of the bytes it inflates to.
+export interface DeflatedPiece {
+	readonly deflated: Uint8Array
+	readonly crc: number
+	readonly size: number
+}
+
+// Pieces of which some are already deflated: a compressed entry takes them through pieces(), the others
+// through chunks() (raw throughout).
+export interface DeflatedChunks extends ByteChunks {
+	pieces(): AsyncIterable<Uint8Array | DeflatedPiece>
+}
 
 export interface ZipPlan {
 	readonly items: readonly ZipPlanItem[]
@@ -293,6 +308,10 @@ async function* once(bytes: Uint8Array): AsyncIterable<Uint8Array> {
 	yield bytes
 }
 
+async function* many(parts: readonly Uint8Array[]): AsyncIterable<Uint8Array> {
+	yield* parts
+}
+
 // fflate's streaming deflate over pieces.
 async function deflateStream(chunks: AsyncIterable<Uint8Array>, level: WriteZipOptions["level"]): Promise<Uint8Array> {
 	const parts: Uint8Array[] = []
@@ -321,6 +340,185 @@ function joinChunks(parts: readonly Uint8Array[]): Uint8Array {
 	}
 
 	return out
+}
+
+function hasDeflated(bytes: ByteChunks): bytes is DeflatedChunks {
+	return typeof (bytes as Partial<DeflatedChunks>).pieces === "function"
+}
+
+const CRC_POLY = 0xedb88320
+
+// a(x)·b(x) mod the CRC polynomial, bit-reflected (zlib's multmodp).
+function multModP(a: number, b: number): number {
+	let m = 0x80000000
+	let p = 0
+
+	for (;;) {
+		if ((a & m) !== 0) {
+			p ^= b
+
+			if ((a & (m - 1)) === 0) break
+		}
+
+		m >>>= 1
+		b = b & 1 ? (b >>> 1) ^ CRC_POLY : b >>> 1
+	}
+
+	return p >>> 0
+}
+
+// x^(2^k) mod the CRC polynomial.
+const X2N = (() => {
+	const table = new Uint32Array(32)
+	let p = 0x40000000
+
+	table[0] = p
+
+	for (let k = 1; k < 32; k++) table[k] = p = multModP(p, p)
+
+	return table
+})()
+
+// The CRC of a + b from crc(a), crc(b) and b's length (zlib's crc32_combine).
+function crc32Combine(first: number, second: number, length: number): number {
+	// x^(8·length): length in bits, k from 3.
+	let p = 0x80000000
+	let k = 3
+
+	for (let n = length; n > 0; n = Math.floor(n / 2), k++) {
+		if (n % 2 === 1) p = multModP(X2N[k & 31] ?? 0, p)
+	}
+
+	return (multModP(p, first) ^ second) >>> 0
+}
+
+// An empty final block (fixed Huffman): closes a stream that ends on a sync flush.
+const FINAL_EMPTY_BLOCK = new Uint8Array([0x03, 0x00])
+
+// The sync flush that follows an empty final fixed-Huffman block's bits (BFINAL 1, BTYPE 01, end-of-block code
+// 0000000; RFC 1951 3.2.3, 3.2.6) when they start at bit `at` of `last`'s first byte, whose lower bits end the
+// data: that block rewritten as an empty non-final stored block (header 000, byte-aligned, LEN 0, NLEN FFFF).
+// At level 0 the stream ends in an empty final stored block instead, byte-aligned: only BFINAL is cleared.
+function syncTrailer(last: Uint8Array): Uint8Array | undefined {
+	const first = last[0] ?? 0
+	let at: number
+
+	if (last.length === 5 && first === 1 && last[1] === 0 && last[2] === 0 && last[3] === 0xff && last[4] === 0xff) {
+		return new Uint8Array([0, 0, 0, 0xff, 0xff])
+	}
+
+	if (last.length === 3 && last[1] === 1 && last[2] === 0 && first >= 0x80) at = 7
+	else if (last.length === 2 && last[1] === 0 && first >= 2) {
+		const high = 31 - Math.clz32(first)
+
+		if ((first & (1 << (high - 1))) === 0) return undefined
+
+		at = high - 1
+	} else return undefined
+
+	const data = first & ((1 << at) - 1)
+
+	return at + 3 > 8 ? new Uint8Array([data, 0, 0, 0, 0xff, 0xff]) : new Uint8Array([data, 0, 0, 0xff, 0xff])
+}
+
+// A raw deflate stream that ends with a sync flush (non-final, byte-aligned), so other deflated content can follow
+// it in one stream. fflate's flush(true) misplaces the stored block when the last byte is partly written: the
+// data is flushed unsynced, the stream ended, and its empty final block rewritten (syncTrailer).
+export class SyncDeflate {
+	private readonly parts: Uint8Array[] = []
+	private size = 0
+	private readonly stream: Deflate
+
+	constructor(level: NonNullable<WriteZipOptions["level"]>) {
+		this.stream = new Deflate({ level }, chunk => {
+			this.parts.push(chunk)
+			this.size += chunk.length
+		})
+	}
+
+	push(chunk: Uint8Array): void {
+		this.stream.push(chunk)
+	}
+
+	// The stream's pieces and their total length, ending in the sync flush (or a final block when `final`).
+	end(final: boolean): { readonly parts: Uint8Array[]; readonly size: number } {
+		if (final) {
+			this.stream.push(new Uint8Array(0), true)
+
+			return { parts: this.parts, size: this.size }
+		}
+
+		this.stream.flush(false)
+
+		const count = this.parts.length
+
+		this.stream.push(new Uint8Array(0), true)
+
+		const last = this.parts.pop()
+		const trailer = last !== undefined && this.parts.length === count ? syncTrailer(last) : undefined
+
+		if (last === undefined || trailer === undefined) throw new ZipError("unsupported", "Deflate stream did not end as expected")
+
+		this.parts.push(trailer)
+		this.size += trailer.length - last.length
+
+		return { parts: this.parts, size: this.size }
+	}
+}
+
+// One raw deflate stream over pieces some of which are already deflated: each run of raw pieces is deflated by
+// a fresh stream ending in a sync flush (back-references cannot reach across a spliced piece), the deflated ones
+// spliced in between, CRCs combined.
+async function deflateMixed(
+	bytes: DeflatedChunks,
+	level: WriteZipOptions["level"],
+	clock: SliceClock | undefined
+): Promise<{ readonly parts: readonly Uint8Array[]; readonly size: number; readonly crc: number }> {
+	const parts: Uint8Array[] = []
+	let stream: SyncDeflate | undefined = undefined
+	let crc = 0
+	let fed = 0
+	const close = (final: boolean): void => {
+		if (stream !== undefined) parts.push(...stream.end(final).parts)
+
+		stream = undefined
+	}
+
+	for await (const piece of bytes.pieces()) {
+		if (piece instanceof Uint8Array) {
+			for (let at = 0; at < piece.length; at += DEFLATE_SLICE) {
+				const slice = piece.subarray(at, Math.min(piece.length, at + DEFLATE_SLICE))
+
+				crc = crc32(slice, crc)
+				stream ??= new SyncDeflate(level ?? 6)
+				stream.push(slice)
+
+				if (clock?.due === true) await clock.pause()
+			}
+
+			fed += piece.length
+
+			continue
+		}
+
+		if (piece.size === 0) continue
+
+		close(false)
+		crc = crc32Combine(crc, piece.crc, piece.size)
+		fed += piece.size
+		parts.push(piece.deflated)
+	}
+
+	if (fed !== bytes.length) throw new ZipError("corrupt", `Entry content is ${fed} bytes, not ${bytes.length}`)
+
+	if (stream !== undefined) close(true)
+	else parts.push(FINAL_EMPTY_BLOCK)
+
+	let size = 0
+
+	for (const part of parts) size += part.length
+
+	return { parts, size, crc }
 }
 
 // Bytes checksummed between looks at the slice clock.
@@ -400,6 +598,14 @@ async function dataOf(item: Extract<ZipPlanItem, { kind: "data" }>, options: Wri
 		}
 
 		return { crc, size: bytes.length, data: () => bytes.chunks(), fed: () => crc }
+	}
+
+	if (hasDeflated(bytes)) {
+		const mixed = await deflateMixed(bytes, options.level, clock)
+
+		crc = mixed.crc
+
+		return { crc, size: mixed.size, data: () => many(mixed.parts), fed: () => crc }
 	}
 
 	const checked = async function* (): AsyncIterable<Uint8Array> {

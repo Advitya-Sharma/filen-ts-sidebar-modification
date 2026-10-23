@@ -1,6 +1,6 @@
-import type { SheetRange, SheetSummary } from "@filen/office/core/sheet"
+import type { SheetFileKind, SheetRange, SheetSummary } from "@filen/office/core/sheet"
 import { COMMON_PAPER_SIZES, paperPoints, type SheetPageSetup, type SheetPrintPatch } from "@filen/office/core/sheet/print"
-import type { PrintSheetRequest } from "@filen/office/react/sheet/print"
+import type { PrintChart, PrintSheetRequest, SheetPdfRequest } from "@filen/office/react/sheet/print"
 import type { PreviewKey } from "@/lib/i18n"
 
 // The print dialog's choices and what they print: the sheets and ranges, each sheet's setup with the dialog's choices
@@ -132,6 +132,8 @@ export interface PrintSheetSettings {
 	readonly sheet: SheetSummary
 	readonly setup: SheetPageSetup
 	readonly used: SheetRange | null
+	// A chartsheet's chart: it prints on a page of its own.
+	readonly chart?: PrintChart
 }
 
 // The sheets and ranges a print takes: the active sheet (its print area unless ignored, else its used range), every
@@ -153,12 +155,20 @@ export function printRequests(
 		name: settings.sheet.name,
 		setup,
 		used: settings.used,
-		ranges: setup.printArea !== null && !form.ignorePrintArea ? setup.printArea : settings.used === null ? [] : [settings.used]
+		ranges: setup.printArea !== null && !form.ignorePrintArea ? setup.printArea : settings.used === null ? [] : [settings.used],
+		...(settings.chart !== undefined && { chart: settings.chart })
 	})
 
 	if (form.scope === "selection") {
 		return [
-			{ sheet: active.sheet.id, name: active.sheet.name, setup: { ...own, printArea: null }, used: active.used, ranges: selection }
+			{
+				sheet: active.sheet.id,
+				name: active.sheet.name,
+				setup: { ...own, printArea: null },
+				used: active.used,
+				ranges: selection,
+				...(active.chart !== undefined && { chart: active.chart })
+			}
 		]
 	}
 
@@ -167,4 +177,39 @@ export function printRequests(
 	return sheets
 		.filter(settings => settings.sheet.state === "visible")
 		.map(settings => (settings.sheet.id === active.sheet.id ? request(settings, own) : request(settings, settings.setup)))
+}
+
+// What &D, &T, &F and &Z print: today's date and time as the app formats them, the file's name (no path here).
+export function headerValues(name: string, now: Date = new Date()): { date: string; time: string; file: string; path: string } {
+	return {
+		date: new Intl.DateTimeFormat(undefined, { dateStyle: "short" }).format(now),
+		time: new Intl.DateTimeFormat(undefined, { timeStyle: "short" }).format(now),
+		file: name,
+		path: ""
+	}
+}
+
+// A print as the PDF export takes it: the print's sheets and ranges, the header and footer values, the document's
+// title (the file's name without its extension) and language, and what the grid shows of the workbook.
+export function pdfRequest(
+	sheets: readonly PrintSheetRequest[],
+	file: { readonly name: string; readonly title: string; readonly lang: string },
+	workbook: {
+		readonly kind: SheetFileKind
+		readonly sheets: readonly SheetSummary[]
+		readonly date1904: boolean
+		readonly showFormulas: boolean
+	},
+	now?: Date
+): SheetPdfRequest {
+	return {
+		sheets,
+		values: headerValues(file.name, now),
+		title: file.title,
+		lang: file.lang,
+		kind: workbook.kind,
+		summaries: workbook.sheets,
+		date1904: workbook.date1904,
+		showFormulas: workbook.showFormulas
+	}
 }

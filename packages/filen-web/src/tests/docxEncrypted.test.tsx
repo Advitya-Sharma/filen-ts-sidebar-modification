@@ -8,6 +8,7 @@ import type { ByteSource } from "@filen/office/core/opc"
 import {
 	heldSource,
 	type DocxDocumentUnlock,
+	type DocxLegacyOpen,
 	type DocxListener,
 	type DocxLockedDocument,
 	type DocxOpenOptions,
@@ -30,10 +31,11 @@ function render(ui: ReactElement) {
 	return renderUi(ui, { wrapper: queryClientWrapper(createTestQueryClient()) })
 }
 
-const { host, files, protectOpen } = vi.hoisted(() => ({
+const { host, files, protectOpen, legacyOpen } = vi.hoisted(() => ({
 	host: { source: null as ByteSource | null, closed: 0 },
 	files: { bytes: new Uint8Array(0) },
-	protectOpen: vi.fn<(source: ByteSource, options?: DocxProtectionOptions) => Promise<DocxProtectedOpen>>()
+	protectOpen: vi.fn<(source: ByteSource, options?: DocxProtectionOptions) => Promise<DocxProtectedOpen>>(),
+	legacyOpen: vi.fn<(source: ByteSource, options?: DocxProtectionOptions) => Promise<DocxLegacyOpen>>()
 }))
 
 const ZIP = new Uint8Array([0x50, 0x4b, 3, 4, 9, 9, 9, 9])
@@ -59,6 +61,7 @@ vi.mock("@/features/preview/lib/docxEngine", () => ({
 	prewarmDocxWorker: () => undefined,
 	DOCX_FONT_URLS: {},
 	docxProtection: { open: protectOpen },
+	docxLegacy: { open: legacyOpen },
 	docxHost: (source: ByteSource, _listener: DocxListener, _options?: DocxOpenOptions) => {
 		host.source = source
 
@@ -141,6 +144,7 @@ beforeEach(() => {
 	host.closed = 0
 	files.bytes = CFB
 	protectOpen.mockReset()
+	legacyOpen.mockReset()
 })
 
 afterEach(() => {
@@ -323,13 +327,14 @@ describe("DocxViewer, password-protected documents", () => {
 		expect(screen.queryByRole("dialog")).toBeNull()
 	})
 
-	it("opens a file the probe finds not encrypted as it is (the engine says what it is)", async () => {
+	it("converts a compound file the probe finds not encrypted as a Word 97–2003 document", async () => {
 		protectOpen.mockResolvedValue({ kind: "plain" })
+		legacyOpen.mockResolvedValue({ kind: "refused", refusal: { reason: "legacyVersion", nFib: 0x65 } })
 		render(viewer())
 
-		await waitFor(() => {
-			expect(host.source?.size).toBe(CFB.length)
-		})
+		expect(await screen.findByText("This document uses an older Word format that can't be opened here.")).toBeTruthy()
+		expect(legacyOpen.mock.calls[0]?.[0].size).toBe(CFB.length)
+		expect(host.source).toBeNull()
 	})
 
 	it("releases a key unlocked as the preview closed", async () => {

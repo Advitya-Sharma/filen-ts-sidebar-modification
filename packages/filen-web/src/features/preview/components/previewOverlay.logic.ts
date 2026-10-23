@@ -4,6 +4,7 @@
 
 import { type ItemActionId } from "@/features/drive/components/itemMenu.logic"
 import { hasClosest } from "@/lib/domTarget"
+import type { DriveVariant } from "@/features/drive/lib/preferences"
 
 // The header item-menu never offers Download — the header already has its own dedicated download
 // button right next to the menu's own trigger (previewOverlay.tsx).
@@ -94,4 +95,10 @@ export function slotPinSource<T>(
 	}
 
 	return pinned.awaitingVerdict && pinned.verdict !== current.verdict ? pinned.item : null
+}
+
+// Whether the preview offers the file's own bytes (its Download, and what viewers make of it: a PDF, a CSV): never a
+// file its share does not let be downloaded, never one in the trash.
+export function previewDownloadable(downloadable: boolean, variant: DriveVariant): boolean {
+	return downloadable && variant !== "trash"
 }

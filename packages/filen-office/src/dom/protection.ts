@@ -1,4 +1,5 @@
 import {
+	legacyVerifierText,
 	MAX_PROTECTION_SALT_BYTES,
 	MAX_PROTECTION_SPIN_COUNT,
 	protectionHashInputs,
@@ -146,6 +147,43 @@ export async function hashProtectionPassword(password: string, options: OfficeCr
 			saltValue: encodeBase64(salt),
 			spinCount: NEW_PROTECTION_SPIN_COUNT
 		}
+	} finally {
+		found.fill(0)
+	}
+}
+
+// Word's parameters for a document protection hash: SHA-1 (cryptAlgorithmSid 4), a 16-byte salt, 100,000 spins.
+export const LEGACY_PROTECTION_SPIN_COUNT = 100_000
+const LEGACY_PROTECTION_SALT_BYTES = 16
+
+export interface LegacyProtectionHash {
+	// base64Binary, as w:documentProtection's transitional w:hash and w:salt carry them.
+	readonly hash: string
+	readonly salt: string
+	readonly spinCount: number
+}
+
+// The transitional w:documentProtection hash of a Word binary document's protection key (Dop lKeyProtDoc, the
+// 32-bit legacy verifier of the password, [MS-OFFCRYPTO] §2.3.7.4): H0 = H(salt + UTF-16LE of the verifier as the
+// upper-case hex of its little-endian bytes), spun as §2.4.2.4 says. The verifier is the input Word hashes for that
+// attribute set (ECMA-376 1st ed. Part 4 §2.15.1.28), so the document asks for the same password as the original.
+export async function hashLegacyProtectionKey(verifier: number, options: OfficeCryptoOptions = {}): Promise<LegacyProtectionHash> {
+	const salt = randomBytes(LEGACY_PROTECTION_SALT_BYTES)
+	const encoded = utf16LE(legacyVerifierText(verifier >>> 0))
+	const first = new Uint8Array(salt.length + encoded.length)
+
+	first.set(salt)
+	first.set(encoded, salt.length)
+	encoded.fill(0)
+
+	const found = await spin(
+		{ algorithm: "SHA-1", hash: "", salt: "", spinCount: LEGACY_PROTECTION_SPIN_COUNT, input: "legacy" },
+		first,
+		turnsOf(options)
+	)
+
+	try {
+		return { hash: encodeBase64(found), salt: encodeBase64(salt), spinCount: LEGACY_PROTECTION_SPIN_COUNT }
 	} finally {
 		found.fill(0)
 	}

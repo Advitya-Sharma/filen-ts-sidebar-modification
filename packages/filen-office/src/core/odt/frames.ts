@@ -1,0 +1,732 @@
+import { parseLength, parsePercent, type OdfProperties } from "../odf/index"
+import { customGeometry, enhancedPath, Evaluator, GeometryError, pointsPath, svgPath, type SubPath } from "./geometry"
+import type { Translator } from "./translator"
+import { emu, esc } from "./wml"
+
+// Frames and shapes (Part 3 §10) as DrawingML in w:drawing: images as pictures, text boxes and shapes as
+// WordprocessingML shapes (wps:wsp) with their text in w:txbxContent, custom geometry evaluated to custGeom.
+// Charts, formulas and other embedded objects show their replacement image, or a placeholder box.
+
+// With optimal wrapping (style:wrap="dynamic"), LibreOffice flows text beside a frame only into a gap at least
+// this wide (2 cm; measured over UNO: 1.99 cm stays empty, 2.01 cm takes text). Parallel wrapping fills any gap.
+export const MIN_WRAP_WIDTH = (2 / 2.54) * 72
+
+// The DrawingML preset for an ODF shape type that has no enhanced path.
+const PRESETS: Readonly<Record<string, string>> = {
+	rectangle: "rect",
+	ellipse: "ellipse",
+	"round-rectangle": "roundRect",
+	"isosceles-triangle": "triangle",
+	"right-triangle": "rtTriangle",
+	parallelogram: "parallelogram",
+	trapezoid: "trapezoid",
+	diamond: "diamond",
+	hexagon: "hexagon",
+	octagon: "octagon",
+	pentagon: "pentagon",
+	star5: "star5",
+	"right-arrow": "rightArrow",
+	"left-arrow": "leftArrow",
+	"up-arrow": "upArrow",
+	"down-arrow": "downArrow",
+	cloud: "cloud",
+	heart: "heart",
+	smiley: "smileyFace",
+	ring: "donut",
+	cross: "plus",
+	frame: "frame"
+}
+
+export interface MediaReference {
+	// Path inside the ODF package, and the part it is linked as.
+	readonly source: string
+	readonly part: string
+}
+
+interface Placement {
+	readonly anchorType: string
+	readonly x: number
+	readonly y: number
+	readonly width: number
+	readonly height: number
+	readonly autoHeight: boolean
+	readonly graphic: OdfProperties
+	readonly name: string
+	readonly description: string
+	readonly zIndex: number
+	readonly rotation: number
+}
+
+function colorOf(value: string | undefined): string | undefined {
+	return value !== undefined && /^#[0-9a-fA-F]{6}$/.test(value) ? value.slice(1).toUpperCase() : undefined
+}
+
+// The first bytes of a stream say what it is: what the viewer draws, or why not.
+export function imageKind(head: Uint8Array): "png" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "wmf" | "emf" | "tiff" | "svm" | "unknown" {
+	const b = (k: number): number => head[k] ?? -1
+
+	if (b(0) === 0x89 && b(1) === 0x50 && b(2) === 0x4e && b(3) === 0x47) return "png"
+	if (b(0) === 0xff && b(1) === 0xd8) return "jpeg"
+	if (b(0) === 0x47 && b(1) === 0x49 && b(2) === 0x46) return "gif"
+	if (b(0) === 0x42 && b(1) === 0x4d) return "bmp"
+	if (b(0) === 0x52 && b(1) === 0x49 && b(2) === 0x46 && b(3) === 0x46 && b(8) === 0x57 && b(9) === 0x45) return "webp"
+	if ((b(0) === 0x49 && b(1) === 0x49 && b(2) === 0x2a) || (b(0) === 0x4d && b(1) === 0x4d && b(3) === 0x2a)) return "tiff"
+	if (b(0) === 0xd7 && b(1) === 0xcd && b(2) === 0xc6 && b(3) === 0x9a) return "wmf"
+	if ((b(0) === 1 || b(0) === 2) && b(1) === 0 && b(2) === 9 && b(3) === 0) return "wmf"
+	if (b(0) === 1 && b(1) === 0 && b(2) === 0 && b(3) === 0 && b(40) === 0x20 && b(41) === 0x45 && b(42) === 0x4d && b(43) === 0x46)
+		return "emf"
+	if (b(0) === 0x56 && b(1) === 0x43 && b(2) === 0x4c && b(3) === 0x4d && b(4) === 0x54 && b(5) === 0x46) return "svm"
+
+	const text = String.fromCharCode(...head.subarray(0, Math.min(head.length, 256)))
+
+	if (/<svg[\s>]/i.test(text)) return "svg"
+
+	return "unknown"
+}
+
+const EXTENSIONS: Readonly<Record<string, string>> = {
+	png: "png",
+	jpeg: "jpeg",
+	gif: "gif",
+	bmp: "bmp",
+	webp: "webp",
+	svg: "svg",
+	wmf: "wmf",
+	emf: "emf",
+	tiff: "tiff"
+}
+
+export class Frames {
+	private readonly translator: Translator
+	// Package streams' kinds, sniffed before translating (see translate.ts).
+	readonly kinds = new Map<string, ReturnType<typeof imageKind>>()
+	readonly media: MediaReference[] = []
+	private readonly mediaParts = new Map<string, string>()
+
+	constructor(translator: Translator) {
+		this.translator = translator
+	}
+
+	// A frame or shape as runs. `context`: where it was found ("page": a direct child of office:text).
+	translate(node: number, context: "paragraph" | "page"): string {
+		const translator = this.translator
+		const name = translator.name(node)
+
+		try {
+			switch (name) {
+				case "draw:frame":
+					return this.frame(node, context)
+				case "draw:a":
+				case "draw:g": {
+					if (name === "draw:g") translator.lossy("shapeApproximated")
+
+					let out = ""
+
+					translator.enter()
+
+					for (
+						let child = translator.document.firstChildElement(node);
+						child >= 0;
+						child = translator.document.nextSiblingElement(child)
+					) {
+						out += this.translate(child, context)
+					}
+
+					translator.leave()
+
+					return out
+				}
+				default:
+					if (name.startsWith("draw:") || name.startsWith("dr3d:")) return this.shape(node, name, context)
+
+					return ""
+			}
+		} catch (error) {
+			if (!(error instanceof GeometryError)) throw error
+
+			translator.lossy("shapeApproximated")
+
+			return ""
+		}
+	}
+
+	private placement(node: number, attributes: Map<string, string>, context: "paragraph" | "page"): Placement {
+		const translator = this.translator
+		const graphic = translator.resolver.resolve("graphic", attributes.get("draw:style-name"), translator.scope).properties("graphic")
+		const anchorType = attributes.get("text:anchor-type") ?? (context === "page" ? "page" : "paragraph")
+		const height = parseLength(attributes.get("svg:height"))
+		const minHeight = parseLength(attributes.get("fo:min-height"))
+		const transform = attributes.get("draw:transform")
+		let rotation = 0
+		let x = parseLength(attributes.get("svg:x")) ?? 0
+		let y = parseLength(attributes.get("svg:y")) ?? 0
+
+		if (transform !== undefined) {
+			const rotate = /rotate\s*\(\s*(-?[\d.eE+-]+)\s*\)/.exec(transform)
+			const translate = /translate\s*\(\s*([^\s,)]+)[\s,]+([^\s,)]+)\s*\)/.exec(transform)
+
+			if (rotate !== null) rotation = (-Number(rotate[1]) * 180) / Math.PI
+			if (translate !== null) {
+				x = parseLength(translate[1]) ?? x
+				y = parseLength(translate[2]) ?? y
+			}
+		}
+
+		if (anchorType === "frame") translator.lossy("frameAnchor")
+		// Kept on its anchor's page (the translation's flow-with-text setting), not inside the page's text area.
+		if (anchorType !== "as-char" && anchorType !== "page" && graphic.attributes.get("style:flow-with-text") === "true")
+			translator.lossy("frameAnchor")
+		if (anchorType === "page" && Number(attributes.get("text:anchor-page-number") ?? "1") > 1) translator.lossy("frameAnchor")
+
+		let description = ""
+
+		for (let child = translator.document.firstChildElement(node); child >= 0; child = translator.document.nextSiblingElement(child)) {
+			const childName = translator.name(child)
+
+			if (childName === "svg:title" || childName === "svg:desc")
+				description = description === "" ? translator.document.textContent(child) : description
+		}
+
+		return {
+			anchorType,
+			x,
+			y,
+			width: Math.max(0, parseLength(attributes.get("svg:width")) ?? parseLength(attributes.get("fo:min-width")) ?? 0),
+			height: Math.max(0, height ?? minHeight ?? 0),
+			autoHeight: height === undefined,
+			graphic,
+			name: attributes.get("draw:name") ?? "",
+			description,
+			zIndex: Number(attributes.get("draw:z-index") ?? "0") || 0,
+			rotation: Number.isFinite(rotation) ? rotation : 0
+		}
+	}
+
+	// The w:drawing for a graphic in its placement, as a run.
+	private drawing(placement: Placement, graphic: string): string {
+		const translator = this.translator
+		const id = translator.id()
+		const cx = emu(placement.width)
+		const cy = emu(placement.height)
+		const docPr = `<wp:docPr id="${id}" name="${esc(placement.name || `Frame ${id}`)}"${placement.description === "" ? "" : ` descr="${esc(placement.description)}"`}/>`
+		const properties = placement.graphic.attributes
+		const margin = (side: string): number => Math.max(0, emu(parseLength(properties.get(`fo:margin-${side}`)) ?? 0))
+
+		if (placement.anchorType === "as-char") {
+			return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/>${docPr}${graphic}</wp:inline></w:drawing></w:r>`
+		}
+
+		const wrapMode = properties.get("style:wrap") ?? "none"
+		const background = properties.get("style:run-through") === "background"
+		const horizontal = this.horizontal(placement)
+		const vertical = this.vertical(placement)
+		const wrap = this.wrap(placement, wrapMode)
+
+		return `<w:r><w:drawing><wp:anchor distT="${margin("top")}" distB="${margin("bottom")}" distL="${margin("left")}" distR="${margin("right")}" simplePos="0" relativeHeight="${Math.max(0, placement.zIndex) + 2}" behindDoc="${wrapMode === "run-through" && background ? 1 : 0}" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/>${horizontal}${vertical}<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>${wrap}${docPr}${graphic}</wp:anchor></w:drawing></w:r>`
+	}
+
+	private horizontal(placement: Placement): string {
+		const properties = placement.graphic.attributes
+		const relation = properties.get("style:horizontal-rel") ?? (placement.anchorType === "page" ? "page" : "paragraph")
+		const position = properties.get("style:horizontal-pos") ?? "from-left"
+		const from =
+			relation === "page"
+				? "page"
+				: relation === "page-content" || relation === "page-start-margin"
+					? relation === "page-start-margin"
+						? "leftMargin"
+						: "margin"
+					: relation === "page-end-margin"
+						? "rightMargin"
+						: relation === "char"
+							? "character"
+							: "column"
+		const align =
+			position === "left" || position === "right" || position === "center"
+				? position
+				: position === "inside" || position === "outside"
+					? position
+					: undefined
+
+		return `<wp:positionH relativeFrom="${from}">${align === undefined ? `<wp:posOffset>${emu(placement.x)}</wp:posOffset>` : `<wp:align>${align}</wp:align>`}</wp:positionH>`
+	}
+
+	private vertical(placement: Placement): string {
+		const properties = placement.graphic.attributes
+		const relation = properties.get("style:vertical-rel") ?? (placement.anchorType === "page" ? "page" : "paragraph")
+		const position = properties.get("style:vertical-pos") ?? "from-top"
+		const from =
+			relation === "page"
+				? "page"
+				: relation === "page-content"
+					? "margin"
+					: relation === "char" || relation === "line" || relation === "baseline" || relation === "text"
+						? "line"
+						: "paragraph"
+		const align = position === "top" ? "top" : position === "middle" ? "center" : position === "bottom" ? "bottom" : undefined
+
+		return `<wp:positionV relativeFrom="${from}">${align === undefined ? `<wp:posOffset>${emu(placement.y)}</wp:posOffset>` : `<wp:align>${align}</wp:align>`}</wp:positionV>`
+	}
+
+	// The wrap element. Optimal wrapping ("dynamic", and "biggest") uses only the wider side, and only when it
+	// is at least MIN_WRAP_WIDTH wide.
+	private wrap(placement: Placement, mode: string): string {
+		if (mode === "none") return "<wp:wrapTopAndBottom/>"
+		if (mode === "run-through") return "<wp:wrapNone/>"
+
+		const optimal = mode === "dynamic" || mode === "biggest"
+		let left = mode === "parallel" || optimal || mode === "left"
+		let right = mode === "parallel" || optimal || mode === "right"
+		const gaps = optimal ? this.gaps(placement) : undefined
+
+		if (gaps !== undefined) {
+			if (gaps.left >= gaps.right) right = false
+			else left = false
+
+			if (Math.max(gaps.left, gaps.right) < MIN_WRAP_WIDTH - 1e-6) left = right = false
+		}
+
+		if (!left && !right) return "<wp:wrapTopAndBottom/>"
+
+		const side = left && right ? "bothSides" : left ? "left" : "right"
+		const tag = placement.graphic.attributes.get("style:wrap-contour") === "true" ? "wrapTight" : "wrapSquare"
+
+		return tag === "wrapTight"
+			? `<wp:wrapTight wrapText="${side}"><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21600"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapTight>`
+			: `<wp:wrapSquare wrapText="${side}"/>`
+	}
+
+	// Room left and right of the frame in the column, when its horizontal position is known statically.
+	private gaps(placement: Placement): { readonly left: number; readonly right: number } | undefined {
+		const properties = placement.graphic.attributes
+		const relation = properties.get("style:horizontal-rel") ?? (placement.anchorType === "page" ? "page" : "paragraph")
+		const position = properties.get("style:horizontal-pos") ?? "from-left"
+		const width = this.translator.width
+		const margins = (parseLength(properties.get("fo:margin-left")) ?? 0) + (parseLength(properties.get("fo:margin-right")) ?? 0)
+		let left: number
+
+		if (relation !== "paragraph" && relation !== "paragraph-content" && relation !== "page-content" && relation !== "page")
+			return undefined
+
+		switch (position) {
+			case "left":
+				left = 0
+				break
+			case "right":
+				left = width - placement.width
+				break
+			case "center":
+				left = (width - placement.width) / 2
+				break
+			case "from-left":
+				left = relation === "page" ? placement.x - this.translator.pages.marginLeft : placement.x
+				break
+			default:
+				return undefined
+		}
+
+		return {
+			left: left - (parseLength(properties.get("fo:margin-left")) ?? 0),
+			right: width - left - placement.width - (margins - (parseLength(properties.get("fo:margin-left")) ?? 0))
+		}
+	}
+
+	private frame(node: number, context: "paragraph" | "page"): string {
+		const translator = this.translator
+		const document = translator.document
+		const attributes = translator.attributes(node)
+		const placement = this.placement(node, attributes, context)
+		let textBox = -1
+		let image: string | undefined
+		let object: string | undefined
+		let unsupported = false
+
+		for (let child = document.firstChildElement(node); child >= 0; child = document.nextSiblingElement(child)) {
+			const name = translator.name(child)
+			const href = translator.attributes(child).get("xlink:href")
+
+			if (name === "draw:text-box" && textBox < 0) {
+				textBox = child
+			} else if (name === "draw:image" && image === undefined) {
+				const path = href === undefined ? undefined : packagePath(href)
+				const kind = path === undefined ? undefined : this.kinds.get(path)
+
+				if (path !== undefined && kind !== undefined && kind !== "svm" && kind !== "unknown") image = path
+				else unsupported = true
+			} else if (
+				(name === "draw:object" || name === "draw:object-ole" || name === "draw:plugin" || name === "draw:applet") &&
+				object === undefined
+			) {
+				object = href === undefined ? name : objectKind(translator, href, name)
+			}
+		}
+
+		if (object !== undefined) {
+			translator.lossy("embeddedObject")
+			translator.objectKinds.set(object, (translator.objectKinds.get(object) ?? 0) + 1)
+		}
+
+		if (textBox >= 0) {
+			const boxAttributes = translator.attributes(textBox)
+
+			if (boxAttributes.has("draw:chain-next-name")) translator.lossy("chainedTextBox")
+
+			const minHeight = parseLength(boxAttributes.get("fo:min-height"))
+			const box =
+				minHeight !== undefined && placement.autoHeight
+					? { ...placement, height: Math.max(placement.height, minHeight) }
+					: placement
+
+			return this.drawing(box, this.shapeGraphic(box, '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>', textBox, true))
+		}
+
+		if (image !== undefined) return this.drawing(placement, this.picture(placement, image))
+
+		if (unsupported) translator.lossy(object === undefined ? "unsupportedImage" : "embeddedObject")
+
+		// A placeholder: a box the size of the frame.
+		return this.drawing(
+			placement,
+			this.shapeGraphic(placement, '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>', -1, false, "placeholder")
+		)
+	}
+
+	private picture(placement: Placement, source: string): string {
+		const translator = this.translator
+		const properties = placement.graphic.attributes
+		let part = this.mediaParts.get(source)
+
+		if (part === undefined) {
+			const kind = this.kinds.get(source) ?? "png"
+
+			part = `media/image${this.mediaParts.size + 1}.${EXTENSIONS[kind] ?? "png"}`
+			this.mediaParts.set(source, part)
+			this.media.push({ source, part: `word/${part}` })
+		}
+
+		const rId = translator.relationship("image", part, false)
+		const mirror = properties.get("style:mirror") ?? "none"
+		const flipH = mirror.includes("horizontal") ? ' flipH="1"' : ""
+		const flipV = mirror.includes("vertical") ? ' flipV="1"' : ""
+
+		if (
+			cropped(properties.get("fo:clip")) ||
+			ADJUSTMENTS.some(name => (parsePercent(properties.get(name)) ?? 0) !== 0) ||
+			(parsePercent(properties.get("draw:gamma")) ?? 100) !== 100 ||
+			(properties.get("draw:color-mode") ?? "standard") !== "standard"
+		) {
+			translator.lossy("imageAdjustment")
+		}
+
+		// draw:image-opacity (ODF 1.3 Part 3) is DrawingML's alpha modulation (a:alphaModFix, ECMA-376 Part 1
+		// §20.1.8.6), in thousandths of a percent.
+		const opacity = parsePercent(properties.get("draw:image-opacity"))
+		const alpha = opacity !== undefined && opacity >= 0 && opacity < 100 ? `<a:alphaModFix amt="${Math.round(opacity * 1000)}"/>` : ""
+
+		const id = translator.id()
+
+		return `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${id}" name="${esc(placement.name || `Image ${id}`)}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${rId}"${alpha === "" ? "/>" : `>${alpha}</a:blip>`}<a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm${flipH}${flipV}><a:off x="0" y="0"/><a:ext cx="${emu(placement.width)}" cy="${emu(placement.height)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>${this.line(placement.graphic)}</pic:spPr></pic:pic></a:graphicData></a:graphic>`
+	}
+
+	// A wps:wsp: geometry, fill and line from the graphic style, text from `textNode`'s blocks.
+	// `look`: "placeholder" draws a grey box (an object not shown), "text" no outline or fill (Fontwork's text).
+	private shapeGraphic(
+		placement: Placement,
+		geometry: string,
+		textNode: number,
+		frame: boolean,
+		look: "placeholder" | "text" | "own" = "own"
+	): string {
+		const translator = this.translator
+		const properties = placement.graphic.attributes
+		const id = translator.id()
+		const rotation = placement.rotation === 0 ? "" : ` rot="${Math.round(placement.rotation * 60000)}"`
+		const fill =
+			look === "placeholder"
+				? '<a:solidFill><a:srgbClr val="F2F2F2"/></a:solidFill>'
+				: look === "text"
+					? "<a:noFill/>"
+					: this.fill(properties, frame)
+		const line =
+			look === "placeholder"
+				? '<a:ln w="6350"><a:solidFill><a:srgbClr val="A6A6A6"/></a:solidFill></a:ln>'
+				: look === "text"
+					? "<a:ln><a:noFill/></a:ln>"
+					: frame
+						? this.frameLine(placement.graphic)
+						: this.line(placement.graphic)
+		const padding = (side: string): number => emu(parseLength(properties.get(`fo:padding-${side}`)) ?? 0)
+		let text = ""
+		const body = `<wps:bodyPr rot="0" vert="horz" wrap="square" lIns="${padding("left")}" tIns="${padding("top")}" rIns="${padding("right")}" bIns="${padding("bottom")}" anchor="${this.textAnchor(properties)}" anchorCtr="0">${placement.autoHeight && frame ? "<a:spAutoFit/>" : "<a:noAutofit/>"}</wps:bodyPr>`
+
+		if (textNode >= 0) {
+			const inner = Math.max(
+				1,
+				placement.width -
+					(parseLength(properties.get("fo:padding-left")) ?? 0) -
+					(parseLength(properties.get("fo:padding-right")) ?? 0)
+			)
+			const markup = translator.story(textNode, inner)
+
+			text = `<wps:txbx><w:txbxContent>${markup}</w:txbxContent></wps:txbx>`
+		}
+
+		return `<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvPr id="${id}" name="${esc(placement.name || `Shape ${id}`)}"/><wps:cNvSpPr${textNode >= 0 && frame ? ' txBox="1"' : ""}/><wps:spPr><a:xfrm${rotation}><a:off x="0" y="0"/><a:ext cx="${emu(placement.width)}" cy="${emu(placement.height)}"/></a:xfrm>${geometry}${fill}${line}</wps:spPr>${text}${body}</wps:wsp></a:graphicData></a:graphic>`
+	}
+
+	private textAnchor(properties: ReadonlyMap<string, string>): string {
+		const vertical = properties.get("draw:textarea-vertical-align") ?? properties.get("style:vertical-pos-text")
+
+		return vertical === "middle" ? "ctr" : vertical === "bottom" ? "b" : "t"
+	}
+
+	// A frame's fill: its background colour (fo:background-color, or draw:fill with draw:fill-color).
+	private fill(properties: ReadonlyMap<string, string>, frame: boolean): string {
+		const fillKind = properties.get("draw:fill")
+		const background = colorOf(properties.get("fo:background-color"))
+		const fillColor = colorOf(properties.get("draw:fill-color"))
+		const opacity = properties.get("draw:opacity")
+		const alpha = opacity === undefined ? "" : `<a:alpha val="${Math.round(Number(opacity.replace("%", "")) * 1000)}"/>`
+
+		if (fillKind === "none") return "<a:noFill/>"
+		if (fillKind === "solid" || (fillKind === undefined && !frame))
+			return `<a:solidFill><a:srgbClr val="${fillColor ?? background ?? "729FCF"}">${alpha}</a:srgbClr></a:solidFill>`
+		if (fillKind === "gradient" || fillKind === "hatch" || fillKind === "bitmap") {
+			this.translator.lossy("shapeApproximated")
+
+			return `<a:solidFill><a:srgbClr val="${fillColor ?? background ?? "729FCF"}"/></a:solidFill>`
+		}
+
+		return background === undefined ? "<a:noFill/>" : `<a:solidFill><a:srgbClr val="${background}"/></a:solidFill>`
+	}
+
+	// A drawing shape's outline (draw:stroke, svg:stroke-*).
+	private line(graphic: OdfProperties): string {
+		const properties = graphic.attributes
+		const stroke = properties.get("draw:stroke")
+
+		if (stroke === "none" || stroke === undefined) return stroke === "none" ? "<a:ln><a:noFill/></a:ln>" : ""
+
+		const width = parseLength(properties.get("svg:stroke-width")) ?? 0
+		const color = colorOf(properties.get("svg:stroke-color")) ?? "3465A4"
+		const dash = stroke === "dash" ? '<a:prstDash val="dash"/>' : ""
+
+		return `<a:ln w="${Math.max(3175, emu(width))}"><a:solidFill><a:srgbClr val="${color}"/></a:solidFill>${dash}</a:ln>`
+	}
+
+	// A text frame's border (fo:border); drawn as the shape outline when all sides agree.
+	private frameLine(graphic: OdfProperties): string {
+		const value = graphic.attributes.get("fo:border-top")
+
+		if (value === undefined || value === "none") return "<a:ln><a:noFill/></a:ln>"
+
+		const parts = value.trim().split(/\s+/)
+		const width = parts.map(part => parseLength(part)).find(item => item !== undefined) ?? 0.75
+		const color = colorOf(parts.find(part => part.startsWith("#"))) ?? "000000"
+
+		return `<a:ln w="${emu(width)}"><a:solidFill><a:srgbClr val="${color}"/></a:solidFill></a:ln>`
+	}
+
+	private shape(node: number, name: string, context: "paragraph" | "page"): string {
+		const translator = this.translator
+		const document = translator.document
+		const attributes = translator.attributes(node)
+		let placement = this.placement(node, attributes, context)
+		let geometry = '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+		let paths: SubPath[] | undefined
+		let viewBox = viewBoxOf(attributes.get("svg:viewBox"), placement)
+		let mirrorX = false
+		let mirrorY = false
+		let textPath = false
+
+		switch (name) {
+			case "draw:custom-shape": {
+				let enhanced = -1
+
+				for (let child = document.firstChildElement(node); child >= 0; child = document.nextSiblingElement(child)) {
+					if (translator.name(child) === "draw:enhanced-geometry") enhanced = child
+				}
+
+				if (enhanced < 0) break
+
+				const geometryAttributes = translator.attributes(enhanced)
+				const path = geometryAttributes.get("draw:enhanced-path")
+
+				// Fontwork: the path is what the text follows, not a drawn outline. The text shows plainly.
+				if (geometryAttributes.get("draw:text-path") === "true") {
+					translator.lossy("textEffect")
+					textPath = true
+
+					break
+				}
+
+				viewBox = viewBoxOf(geometryAttributes.get("svg:viewBox"), placement)
+				mirrorX = geometryAttributes.get("draw:mirror-horizontal") === "true"
+				mirrorY = geometryAttributes.get("draw:mirror-vertical") === "true"
+
+				if (path !== undefined) {
+					const equations = new Map<string, string>()
+
+					for (let child = document.firstChildElement(enhanced); child >= 0; child = document.nextSiblingElement(child)) {
+						if (translator.name(child) !== "draw:equation") continue
+
+						const equation = translator.attributes(child)
+						const equationName = equation.get("draw:name")
+						const formula = equation.get("draw:formula")
+
+						if (equationName !== undefined && formula !== undefined) equations.set(equationName, formula)
+					}
+
+					const modifiers = (geometryAttributes.get("draw:modifiers") ?? "")
+						.trim()
+						.split(/\s+/)
+						.filter(item => item !== "")
+						.map(item => Number(item) || 0)
+					const evaluator = new Evaluator({
+						left: viewBox.left,
+						top: viewBox.top,
+						width: viewBox.width,
+						height: viewBox.height,
+						logWidth: placement.width * (2540 / 72),
+						logHeight: placement.height * (2540 / 72),
+						modifiers,
+						equations
+					})
+
+					paths = enhancedPath(path, evaluator)
+				} else {
+					const preset = PRESETS[geometryAttributes.get("draw:type") ?? ""]
+
+					if (preset === undefined) translator.lossy("shapeApproximated")
+
+					geometry = `<a:prstGeom prst="${preset ?? "rect"}"><a:avLst/></a:prstGeom>`
+				}
+
+				break
+			}
+			case "draw:rect":
+				if (parseLength(attributes.get("draw:corner-radius")) !== undefined)
+					geometry = '<a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom>'
+				break
+			case "draw:ellipse":
+			case "draw:circle":
+				geometry = '<a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>'
+
+				if ((attributes.get("draw:kind") ?? "full") !== "full") translator.lossy("shapeApproximated")
+
+				break
+			case "draw:line":
+			case "draw:connector":
+			case "draw:measure": {
+				if (name !== "draw:line") translator.lossy("shapeApproximated")
+
+				const x1 = parseLength(attributes.get("svg:x1")) ?? 0
+				const y1 = parseLength(attributes.get("svg:y1")) ?? 0
+				const x2 = parseLength(attributes.get("svg:x2")) ?? 0
+				const y2 = parseLength(attributes.get("svg:y2")) ?? 0
+
+				placement = { ...placement, x: Math.min(x1, x2), y: Math.min(y1, y2), width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) }
+				viewBox = {
+					left: Math.min(x1, x2),
+					top: Math.min(y1, y2),
+					width: Math.max(Math.abs(x2 - x1), 1e-6),
+					height: Math.max(Math.abs(y2 - y1), 1e-6)
+				}
+				paths = [
+					{
+						segments: [
+							{ kind: "M", x: x1, y: y1 },
+							{ kind: "L", x: x2, y: y2 }
+						],
+						fill: false,
+						stroke: true
+					}
+				]
+				break
+			}
+			case "draw:polyline":
+			case "draw:polygon":
+				paths = pointsPath(attributes.get("draw:points") ?? "", name === "draw:polygon")
+				break
+			case "draw:path":
+				paths = svgPath(attributes.get("svg:d") ?? "")
+				break
+			default:
+				translator.lossy("shapeApproximated")
+		}
+
+		if (paths !== undefined) geometry = customGeometry({ ...viewBox, paths }, mirrorX, mirrorY)
+
+		// Text inside the shape (text:p, text:list children).
+		const hasText = (() => {
+			for (let child = document.firstChildElement(node); child >= 0; child = document.nextSiblingElement(child)) {
+				const childName = translator.name(child)
+
+				if (childName === "text:p" || childName === "text:h" || childName === "text:list") return true
+			}
+
+			return false
+		})()
+
+		return this.drawing(placement, this.shapeGraphic(placement, geometry, hasText ? node : -1, false, textPath ? "text" : "own"))
+	}
+}
+
+const ADJUSTMENTS = ["draw:luminance", "draw:contrast", "draw:red", "draw:green", "draw:blue"]
+
+// Whether fo:clip crops: rect(top, right, bottom, left) with any side not zero (LibreOffice writes a zero
+// rectangle on every picture). A value that does not parse counts as a crop.
+function cropped(clip: string | undefined): boolean {
+	if (clip === undefined || clip === "auto") return false
+
+	const sides = /^rect\((.*)\)$/u
+		.exec(clip.trim())?.[1]
+		?.trim()
+		.split(/\s*,\s*|\s+/u)
+
+	if (sides?.length !== 4) return true
+
+	return sides.some(side => side !== "auto" && parseLength(side) !== 0)
+}
+
+function viewBoxOf(value: string | undefined, placement: Placement): { left: number; top: number; width: number; height: number } {
+	const numbers = (value ?? "")
+		.trim()
+		.split(/[\s,]+/)
+		.map(Number)
+
+	if (numbers.length === 4 && numbers.every(Number.isFinite) && (numbers[2] ?? 0) > 0 && (numbers[3] ?? 0) > 0) {
+		return { left: numbers[0] ?? 0, top: numbers[1] ?? 0, width: numbers[2] ?? 1, height: numbers[3] ?? 1 }
+	}
+
+	return { left: 0, top: 0, width: Math.max(placement.width, 1e-6), height: Math.max(placement.height, 1e-6) }
+}
+
+// A package-internal href ("./Pictures/a.png", "Pictures/a.png") as a stream path; undefined for external links.
+export function packagePath(href: string): string | undefined {
+	if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("/") || href.startsWith("../")) return undefined
+
+	let path = href.startsWith("./") ? href.slice(2) : href
+
+	try {
+		path = decodeURIComponent(path)
+	} catch {
+		// Kept as written.
+	}
+
+	return path
+}
+
+// What an embedded object is, by its media type in the manifest ("chart", "formula", ...).
+function objectKind(translator: Translator, href: string, element: string): string {
+	if (element !== "draw:object") return element.slice("draw:".length)
+
+	const path = packagePath(href)
+	const mediaType = path === undefined ? undefined : (translator.odf.mediaTypeOf(`${path}/`) ?? translator.odf.mediaTypeOf(path))
+
+	if (mediaType === undefined) return "object"
+
+	const match = /opendocument\.([a-z-]+)$/.exec(mediaType)
+
+	return match?.[1] ?? "object"
+}

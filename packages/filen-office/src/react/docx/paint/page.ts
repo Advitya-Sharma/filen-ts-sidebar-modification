@@ -877,7 +877,63 @@ function paintGraphics(document: Document, page: DocxPageData, tables: DocxTable
 	for (let g = 0; g < page.graphicCount; g++) paintGraphic(document, into, page, tables.decorations, g)
 }
 
-function paintPlaced(document: Document, page: DocxPageData, into: readonly [HTMLElement, HTMLElement, HTMLElement]): PaintedObject[] {
+// How the page's objects and text box lines stack (CSS z-index in the page content's own stacking context): the
+// behind layer's objects below the text, the front layer's above it, each in page order (the layout's stacking
+// order), and a text box's lines right above their box. Inline objects and the rest of the page stay in document
+// order at level 0; the behind layer's graphics go below its objects, as before.
+interface Stacking {
+	readonly objects: readonly string[]
+	// Per source, "" when not text box text drawn with a box on this page.
+	readonly sources: readonly string[]
+	readonly behindGraphics: string
+}
+
+function stacking(page: DocxPageData): Stacking {
+	const objects: string[] = []
+	let behind = 0
+	let front = 0
+
+	for (let o = 0; o < page.objectCount; o++) {
+		const layer = page.objectInts[o * OBJECT_INTS + 1] ?? LAYER_TEXT
+
+		if (layer === LAYER_BEHIND) behind++
+	}
+
+	const boxes = new Map<number, string>()
+	let seenBehind = 0
+
+	for (let o = 0; o < page.objectCount; o++) {
+		const layer = page.objectInts[o * OBJECT_INTS + 1] ?? LAYER_TEXT
+		const id = page.objectInts[o * OBJECT_INTS] ?? -1
+		const z = layer === LAYER_BEHIND ? -2 * (behind - seenBehind++) : layer === LAYER_FRONT ? 2 * front++ + 2 : 0
+
+		objects.push(layer === LAYER_TEXT ? "" : String(z))
+
+		if (!boxes.has(id)) boxes.set(id, String(z + 1))
+	}
+
+	const sources: string[] = []
+	const owners = page.sourceOwners
+
+	if (owners !== undefined) {
+		for (let source = 0; source < page.sourceCount; source++) sources.push(boxes.get(owners[source] ?? -1) ?? "")
+	}
+
+	return { objects, sources, behindGraphics: behind > 0 ? String(-2 * behind - 1) : "" }
+}
+
+function stackLine(line: PaintedLine, z: string): void {
+	if (line.text.style.zIndex !== z) line.text.style.zIndex = z
+	if (line.under !== undefined && line.under.style.zIndex !== z) line.under.style.zIndex = z
+	if (line.over !== undefined && line.over.style.zIndex !== z) line.over.style.zIndex = z
+}
+
+function paintPlaced(
+	document: Document,
+	page: DocxPageData,
+	into: readonly [HTMLElement, HTMLElement, HTMLElement],
+	stack: Stacking
+): PaintedObject[] {
 	const objects: PaintedObject[] = []
 
 	for (let o = 0; o < page.objectCount; o++) {
@@ -890,6 +946,8 @@ function paintPlaced(document: Document, page: DocxPageData, into: readonly [HTM
 		const id = page.objectInts[i] ?? -1
 
 		element.dataset["foObject"] = String(id)
+
+		if ((stack.objects[o] ?? "") !== "") element.style.zIndex = stack.objects[o] ?? ""
 		;(layer === LAYER_BEHIND ? into[0] : layer === LAYER_FRONT ? into[2] : into[1]).appendChild(element)
 		objects.push({ element, id, kind: page.objectKinds[o] ?? 0, width, height })
 	}
@@ -940,15 +998,20 @@ export function paintPage(page: DocxPageData, context: PagePaintContext): Painte
 
 	paintGraphics(document, page, tables, graphics)
 
+	const stack = stacking(page)
 	const links = linksBySource(page)
 	const lines: PaintedLine[] = []
 	const texts: PaintedText[] = []
 
+	graphics[0].style.zIndex = stack.behindGraphics
+
 	for (let line = 0; line < page.lineCount; line++) {
 		const count = lineLook(page, line, links)
-		const text = page.sourceTexts[page.lineInts[line * LINE_INTS + 5] ?? -1] ?? ""
+		const source = page.lineInts[line * LINE_INTS + 5] ?? -1
+		const text = page.sourceTexts[source] ?? ""
 		const painted = paintLine(document, page, tables, line, links, keptLook(lookHash(count, text), count, text))
 
+		stackLine(painted, stack.sources[source] ?? "")
 		lines.push(painted)
 		textElements.appendChild(painted.text)
 
@@ -958,7 +1021,7 @@ export function paintPage(page: DocxPageData, context: PagePaintContext): Painte
 		for (const text of painted.texts) texts.push(text)
 	}
 
-	const objects = paintPlaced(document, page, placed)
+	const objects = paintPlaced(document, page, placed, stack)
 
 	fills.prepend(graphics[1])
 	behind.append(graphics[0], placed[0])
@@ -995,6 +1058,7 @@ export function patchPage(
 	const { document, tables } = context
 	const parts = painted.parts
 	const links = linksBySource(page)
+	const stack = stacking(page)
 	const old = painted.lines
 	// Painted lines by how they look (the hash of it): the first of each, and the next with the same hash.
 	const firstByHash = new Map<number, number>()
@@ -1085,6 +1149,7 @@ export function patchPage(
 		if (next.under !== undefined && next.under.parentNode !== parts.fills) parts.fills.appendChild(next.under)
 		if (next.over !== undefined && next.over.parentNode !== parts.overLines) parts.overLines.appendChild(next.over)
 
+		stackLine(next, stack.sources[source] ?? "")
 		lines.push(next)
 
 		for (const text of next.texts) texts.push(text)
@@ -1121,6 +1186,8 @@ export function patchPage(
 		paintGraphics(document, page, tables, parts.graphics)
 	}
 
+	parts.graphics[0].style.zIndex = stack.behindGraphics
+
 	const objectsKey = arraysKey(page.objectFloats, page.objectInts, page.objectKinds)
 	const objectsChanged = objectsKey !== parts.objectsKey
 	let objects = painted.objects
@@ -1128,7 +1195,7 @@ export function patchPage(
 	if (objectsChanged) {
 		for (const element of parts.objects) element.replaceChildren()
 
-		objects = paintPlaced(document, page, parts.objects)
+		objects = paintPlaced(document, page, parts.objects, stack)
 	}
 
 	painted.root.style.width = `${px(page.width)}px`

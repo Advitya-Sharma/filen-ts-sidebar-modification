@@ -294,6 +294,9 @@ export interface XlsxColRange {
 	readonly last: number
 	// Characters of the default font (width), NaN for none.
 	readonly width: number
+	// The width as a length in pixels, for a source that gives lengths (OpenDocument): shown as is, whatever the
+	// default font's digit measures.
+	readonly px?: number
 	// cellXfs index, -1 for none.
 	readonly style: number
 	// RowFlag-like bits: HIDDEN, CUSTOM_HEIGHT (customWidth), COLLAPSED, outline level; BEST_FIT below.
@@ -322,6 +325,48 @@ export interface XlsxSheetFormat {
 	readonly thickBottom: boolean
 	readonly outlineLevelRow: number
 	readonly outlineLevelCol: number
+	// The default column width as a length in pixels (see XlsxColRange.px).
+	readonly defaultColPx?: number
+}
+
+// A run of rows alike: RowFlag bits and the height in points (NaN: the sheet's default).
+export interface XlsxRowRun {
+	readonly first: number
+	readonly last: number
+	readonly flags: number
+	readonly heightPt: number
+}
+
+// The run holding `row` in ascending runs, undefined for none.
+export function rowRunAt(runs: readonly XlsxRowRun[] | undefined, row: number): XlsxRowRun | undefined {
+	if (runs === undefined) return undefined
+
+	let low = 0
+	let high = runs.length
+
+	while (low < high) {
+		const middle = (low + high) >>> 1
+
+		if ((runs[middle]?.first ?? 0) <= row) low = middle + 1
+		else high = middle
+	}
+
+	const run = runs[low - 1]
+
+	return run !== undefined && row <= run.last ? run : undefined
+}
+
+// Cells formatted in runs the store does not hold one by one (an OpenDocument source's style-only blocks, which
+// can cover millions of cells): the format an empty cell has of its own, before its row's and its column's.
+export interface XlsxStyleRuns {
+	// Past the last row and column a run covers.
+	readonly rowExtent: number
+	readonly colExtent: number
+	// The cellXfs index of an empty cell at (row, col), -1 for none.
+	styleAt(row: number, col: number): number
+	// The runs crossing `range`, clipped to it, in row then column order.
+	forEach(range: SheetRange, visit: (startRow: number, startCol: number, endRow: number, endCol: number, style: number) => void): void
+	estimateBytes(): number
 }
 
 // The first <sheetView> (the others are kept as written).
@@ -382,6 +427,15 @@ export interface XlsxSheetModel {
 	// A sheet with no part in the source (a duplicated one): its root's start tag, when it takes another part's
 	// (namespaces, mc:Ignorable); without one the writer makes a plain root.
 	readonly freshRoot?: string | undefined
+	// Formats of empty cells the store does not hold (XlsxStyleRuns); none for a SpreadsheetML source.
+	readonly styleRuns?: XlsxStyleRuns
+	// Rows the store does not hold, alike in runs (an OpenDocument source's hidden or resized rows without cells, which
+	// can reach the grid's end): ascending, apart from each other and from the store's rows. None for SpreadsheetML.
+	readonly rowRuns?: readonly XlsxRowRun[]
+	// Formula cells (history.ts cellKeyOf) whose stored results are calculated again once the engine is built, the
+	// stored one shown until then and where the engine holds the formula: an OpenDocument source's volatile formulas
+	// (LibreOffice recalculates them on load) and results written as error text.
+	readonly recalculate?: ReadonlySet<number>
 }
 
 // --- Workbook ---
@@ -592,6 +646,9 @@ export interface XlsxAlignment {
 export interface XlsxCellProtection {
 	readonly locked?: boolean
 	readonly hidden?: boolean
+	// The content is not shown while the sheet is protected (OpenDocument's style:cell-protect="hidden-and-protected",
+	// ODF 1.3 Part 3 §20.189); SpreadsheetML's hidden hides formulas only.
+	readonly hideAll?: boolean
 }
 
 export { XfApply } from "../../sheet/style/xfApply"

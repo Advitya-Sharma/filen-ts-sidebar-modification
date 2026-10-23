@@ -1,5 +1,5 @@
 import type { Slicing } from "../slicing"
-import { parseXml, parseXmlSliced, type XmlDocument } from "../xml/index"
+import { encodeUtf8, parseXml, parseXmlSliced, type XmlDocument } from "../xml/index"
 import { CONTENT_TYPES_PART, parseContentTypes, type ContentTypes } from "./contentTypes"
 import { OpcError } from "./errors"
 import type { ByteSource } from "./io"
@@ -9,19 +9,32 @@ import { Relationships, parseRelationships } from "./relationships"
 import { ZipArchive, type ZipEntry, type ZipOpenOptions } from "./zipReader"
 import { planZip, type PartChange, type ZipChanges, type ZipPlan } from "./zipWriter"
 
+const EMPTY = new Uint8Array(0)
+
+// A part held elsewhere (in the archive a document was translated from), read when asked for.
+export interface LinkedPart {
+	readonly size: number
+	read(): Promise<Uint8Array>
+}
+
 // An OPC package (docx, xlsx, pptx) over a lazily read zip. Parts are inflated on request and not kept:
 // whoever parses a part owns the cache for it. Content types and relationships, small and read often,
 // are parsed once.
+//
+// A package can also be a map of parts held in memory (a document translated from another format): it reads
+// like an opened one and has no archive, so nothing saves from it.
 export class OpcPackage {
-	readonly zip: ZipArchive
+	private readonly archive: ZipArchive | undefined
+	private readonly memory: ReadonlyMap<string, Uint8Array | LinkedPart> | undefined
 	private readonly parts = new Map<string, ZipEntry>()
 	private contentTypesPromise: Promise<ContentTypes> | null = null
 	private readonly relationshipsPromises = new Map<string, Promise<Relationships>>()
 
-	private constructor(zip: ZipArchive) {
-		this.zip = zip
+	private constructor(zip: ZipArchive | undefined, entries: readonly ZipEntry[], memory?: ReadonlyMap<string, Uint8Array | LinkedPart>) {
+		this.archive = zip
+		this.memory = memory
 
-		for (const entry of zip.entries) {
+		for (const entry of entries) {
 			// Folder entries some writers add are not parts.
 			if (entry.name.endsWith("/") && entry.uncompressedSize === 0) continue
 
@@ -40,7 +53,49 @@ export class OpcPackage {
 	}
 
 	static async open(source: ByteSource, options: ZipOpenOptions = {}): Promise<OpcPackage> {
-		return new OpcPackage(await ZipArchive.open(source, options))
+		const zip = await ZipArchive.open(source, options)
+
+		return new OpcPackage(zip, zip.entries)
+	}
+
+	// Parts by name (as zip entry names: "word/document.xml"); reads return the arrays given, never copies, or
+	// what a linked part reads.
+	static fromParts(parts: ReadonlyMap<string, Uint8Array | LinkedPart>): OpcPackage {
+		const entries: ZipEntry[] = []
+
+		for (const [name, part] of parts) {
+			const size = part instanceof Uint8Array ? part.length : part.size
+
+			entries.push({
+				index: entries.length,
+				name,
+				nameBytes: encodeUtf8(name),
+				versionMadeBy: 20,
+				versionNeeded: 20,
+				flags: 0,
+				method: 0,
+				modTime: 0,
+				modDate: 0,
+				crc32: 0,
+				compressedSize: size,
+				uncompressedSize: size,
+				localHeaderOffset: 0,
+				internalAttributes: 0,
+				externalAttributes: 0,
+				extra: EMPTY,
+				zip64Fields: 0,
+				comment: EMPTY
+			})
+		}
+
+		return new OpcPackage(undefined, entries, parts)
+	}
+
+	// The archive the package was opened from (copies and save plans read it).
+	get zip(): ZipArchive {
+		if (this.archive === undefined) throw new OpcError("missingPart", "A package held in memory has no archive")
+
+		return this.archive
 	}
 
 	// The zip entry of a part, matched as OPC compares names (case-insensitive, percent-decoded).
@@ -57,6 +112,10 @@ export class OpcPackage {
 		const entry = this.entry(partName)
 
 		if (entry === undefined) throw new OpcError("missingPart", `No part ${partName}`)
+
+		const held = this.memory?.get(entry.name)
+
+		if (held !== undefined) return held instanceof Uint8Array ? held : held.read()
 
 		return slicing === undefined ? this.zip.read(entry) : this.zip.readSliced(entry, slicing)
 	}

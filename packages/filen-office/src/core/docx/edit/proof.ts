@@ -19,6 +19,13 @@ export interface LockRequest {
 	readonly reason: LockReason
 }
 
+// The top-level block a range starts at: its index and position. A host proving in runs passes it, so each run
+// walks its own blocks rather than every block before it.
+export interface BlockStart {
+	readonly index: number
+	readonly pos: number
+}
+
 const nodes = docxSchema.nodes
 
 // Content the model does not read (an element it kept opaque) may depend on its neighbours in ways an
@@ -45,8 +52,15 @@ export const conservativeProof: BlockProof = {
 
 // Proves the source blocks in [from, to) of a story document: paragraphs, and tables as a whole before
 // their cells' content (a failed table is locked whole). Only blocks still pristine are checked.
-export function proveBlocks(story: StoryDoc, doc: Node, proof: BlockProof, from: number = 0, to: number = doc.content.size): LockRequest[] {
-	const steps = proveSteps(story, doc, proof, from, to, undefined)
+export function proveBlocks(
+	story: StoryDoc,
+	doc: Node,
+	proof: BlockProof,
+	from: number = 0,
+	to: number = doc.content.size,
+	start?: BlockStart
+): LockRequest[] {
+	const steps = proveSteps(story, doc, proof, from, to, undefined, start)
 
 	for (;;) {
 		const step = steps.next()
@@ -62,9 +76,10 @@ export function proveBlocksSteps(
 	proof: BlockProof,
 	due: () => boolean,
 	from: number = 0,
-	to: number = doc.content.size
+	to: number = doc.content.size,
+	start?: BlockStart
 ): Generator<void, LockRequest[]> {
-	return proveSteps(story, doc, proof, from, to, due)
+	return proveSteps(story, doc, proof, from, to, due, start)
 }
 
 interface Frame {
@@ -84,10 +99,11 @@ function* proveSteps(
 	proof: BlockProof,
 	from: number,
 	to: number,
-	due: (() => boolean) | undefined
+	due: (() => boolean) | undefined,
+	start: BlockStart | undefined
 ): Generator<void, LockRequest[]> {
 	const out: LockRequest[] = []
-	const stack: Frame[] = [{ parent: doc, start: 0, from, to, index: 0, pos: 0 }]
+	const stack: Frame[] = [{ parent: doc, start: 0, from, to, index: start?.index ?? 0, pos: start?.pos ?? 0 }]
 
 	while (stack.length > 0) {
 		const frame = stack[stack.length - 1] as Frame

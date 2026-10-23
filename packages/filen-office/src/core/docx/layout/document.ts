@@ -528,6 +528,8 @@ class Paginator {
 	private editedCompat: LayoutCompat | undefined = undefined
 	private readonly maxPages: number
 	private readonly page = new PageOutput()
+	// A placed object's stacking key: its relativeHeight (VML: z-index).
+	private readonly zOrderOf = (id: number): number => this.engine.objects.floats[id]?.zOrder ?? 0
 	private readonly header = new PageOutput()
 	private readonly footer = new PageOutput()
 	private readonly exclusions = new Exclusions()
@@ -1563,6 +1565,7 @@ class Paginator {
 
 		page.append(this.header, 0, 0)
 		page.append(this.footer, 0, 0)
+		page.stackObjects(this.zOrderOf)
 		this.put(layout.pages, inPlace?.pages, index, new PageDisplayList(page, info))
 		this.put(layout.anchors, inPlace?.anchors, index, this.anchor)
 		this.sectionPageCounts[this.pageSection] = (this.sectionPageCounts[this.pageSection] ?? 0) + 1
@@ -1901,6 +1904,7 @@ class Paginator {
 		page.append(list, 0, 0, -Infinity, Infinity, null, entry.body)
 		page.append(this.header, 0, 0)
 		page.append(this.footer, 0, 0)
+		page.stackObjects(this.zOrderOf)
 		layout.pages[entry.index] = new PageDisplayList(page, info)
 		layout.dirty.add(entry.index)
 		this.records[entry.index] = { ...entry, values, info, headerBottom, footerTop }

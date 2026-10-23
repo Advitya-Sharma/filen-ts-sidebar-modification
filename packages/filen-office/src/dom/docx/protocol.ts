@@ -98,6 +98,9 @@ export interface DocxPageData {
 	readonly sourceCount: number
 	readonly sourceInts: Int32Array
 	readonly sourceTexts: readonly string[]
+	// Per source, the object (by id) whose text box its paragraph is laid out in, -1 for none; absent when the page
+	// has no text box text. The text is drawn with its box.
+	readonly sourceOwners?: Int32Array
 	readonly linkCount: number
 	readonly linkInts: Int32Array
 }
@@ -204,4 +207,7 @@ export interface DocxOpenOptions {
 	// Keep the model after layout (editing needs it). A viewer lets the engine drop it once every page and
 	// object is prepared, keeping only what find, links, bookmarks and images need.
 	readonly retain?: boolean
+	// The file's format: an OpenDocument text document ("odt") is translated in the engine's realm and shown
+	// through the same layout (default "docx": any word-processing package).
+	readonly format?: "docx" | "odt"
 }

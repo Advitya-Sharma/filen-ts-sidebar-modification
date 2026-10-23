@@ -2,6 +2,7 @@ import type { FontAssets } from "../../core/fonts/index"
 import type { TextMeasurer } from "../../core/text/index"
 import { canMeasureOffscreen, canvasMeasurer, offscreenMeasurer, type CanvasContextLike } from "../canvasMeasurer"
 import { fontFaceHost, type FontFaceScope } from "../fontFaceHost"
+import { openOdtAsDocx } from "../../core/odt/index"
 import type { DocxEngineServices } from "./engine"
 import { macrotaskYield } from "./host"
 
@@ -67,7 +68,8 @@ function isFontFaceScope(scope: unknown): scope is FontFaceScope {
 }
 
 // Services for an engine in a worker: faces registered in the worker's own FontFaceSet (and replayed to
-// the page), widths measured on an OffscreenCanvas.
+// the page), widths measured on an OffscreenCanvas. OpenDocument text is translated here, so the translator
+// is in the worker's bundle only.
 export function workerServices(scope: unknown, fonts: FontLocation): DocxEngineServices {
 	if (!isFontFaceScope(scope)) throw new Error("The CSS Font Loading API is not available in this worker")
 
@@ -77,7 +79,8 @@ export function workerServices(scope: unknown, fonts: FontLocation): DocxEngineS
 		fontAssets: fetchFontAssets(fonts),
 		measurer: offscreenMeasurer(scope),
 		yield: macrotaskYield(),
-		sliceMs: 12
+		sliceMs: 12,
+		openOdt: openOdtAsDocx
 	}
 }
 

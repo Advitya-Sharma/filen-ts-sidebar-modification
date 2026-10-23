@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { toast } from "sonner"
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import type { SheetCommand } from "@filen/office/core/sheet"
 import { DEFAULT_PAGE_SETUP, paginate, paperPoints } from "@filen/office/core/sheet/print"
@@ -16,9 +17,23 @@ import { openGrid, workbook } from "@/tests/sheetMenusFixtures"
 // The print dialog: the pages as they print, the choices saved into the active sheet's page setup, and the browser's
 // print of a root holding the pages.
 
+// A page past what a print draws (MAX_PAGE_CELLS) needs millions of cells; the drawing refuses it here instead.
+const refusing = vi.hoisted(() => ({ on: false }))
+
+vi.mock("@filen/office/react/sheet/print", async original => {
+	const actual = await original<typeof import("@filen/office/react/sheet/print")>()
+
+	return {
+		...actual,
+		renderPrintPage: (...args: Parameters<typeof actual.renderPrintPage>) =>
+			refusing.on ? Promise.reject(new actual.PrintPageTooLarge(args[1] + 1)) : actual.renderPrintPage(...args)
+	}
+})
+
 afterEach(() => {
 	cleanup()
 	vi.restoreAllMocks()
+	refusing.on = false
 })
 
 // The browser's print, which happy-dom lacks: `during` sees the document as the printer would, then the dialog closes.
@@ -251,4 +266,45 @@ describe("the print dialog", () => {
 
 		expect(run).not.toHaveBeenCalled()
 	})
+
+	it("says when a page holds too many cells to draw, and prints nothing", async () => {
+		const rows = Array.from({ length: 20 }, (_, row) => Array.from({ length: 4 }, (_, col) => row + col))
+		const model = await openGrid(await workbook([{ name: "Data", rows }]), "xlsx")
+		const read = await sheetSettings(model, "xlsx", model.getSnapshot().sheets[0] ?? SHEET)
+
+		if (read === null) throw new Error("no settings")
+
+		refusing.on = true
+
+		const active = read
+		const error = vi.spyOn(toast, "error")
+		const print = stubPrint(() => undefined)
+
+		render(
+			<GridHarness model={model}>
+				{grid => (
+					<SheetPrintDialog
+						active={active}
+						grid={grid}
+						model={model}
+						kind="xlsx"
+						name="big.xlsx"
+						canSave={false}
+						run={() => undefined}
+						onClose={() => undefined}
+					/>
+				)}
+			</GridHarness>
+		)
+
+		const message = preview.previewSheetPrintPageTooLarge.replace("{{page}}", "1")
+
+		await screen.findByText(message, undefined, { timeout: 10_000 })
+		fireEvent.click(screen.getByRole("button", { name: preview.previewSheetPrintButton }))
+
+		await waitFor(() => {
+			expect(error).toHaveBeenCalledWith(message)
+		})
+		expect(print).not.toHaveBeenCalled()
+	}, 30_000)
 })

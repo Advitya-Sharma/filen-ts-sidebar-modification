@@ -72,7 +72,7 @@ async function download(file: UcdFile): Promise<void> {
 }
 
 // Calls `entry` for every data line of a UCD property file (ranges inclusive), after its @missing defaults.
-function forEachEntry(source: string, entry: (first: number, last: number, value: string) => void): void {
+export function forEachEntry(source: string, entry: (first: number, last: number, value: string) => void): void {
 	const missing: [number, number, string][] = []
 	const explicit: [number, number, string][] = []
 
@@ -91,7 +91,7 @@ function forEachEntry(source: string, entry: (first: number, last: number, value
 	for (const [first, last, value] of [...missing, ...explicit]) entry(first, last, value)
 }
 
-function propertyArray(source: string, map: (value: string) => number, initial: number): Uint8Array {
+export function propertyArray(source: string, map: (value: string) => number, initial: number): Uint8Array {
 	const values = new Uint8Array(MAX_CODE_POINT + 1).fill(initial)
 
 	forEachEntry(source, (first, last, value) => values.fill(map(value), first, last + 1))
@@ -283,7 +283,7 @@ function wordBreakValues(): Uint8Array {
 	return out
 }
 
-function runsOf(values: Uint8Array): [number, number][] {
+export function runsOf(values: Uint8Array): [number, number][] {
 	const runs: [number, number][] = []
 
 	for (let cp = 0; cp <= MAX_CODE_POINT;) {

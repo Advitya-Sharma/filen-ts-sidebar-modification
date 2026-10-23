@@ -173,6 +173,23 @@ function printArea(sheet: PrintSheet): { paper: { width: number; height: number 
 	}
 }
 
+// A chartsheet's pagination: one page, its paper and the area inside its margins, at 100 % (a chart sheet's print
+// has no scaling: Microsoft Support, "Print a chart").
+export function chartPagination(setup: SheetPageSetup): SheetPagination {
+	const { paper, area } = printArea({ setup, ranges: [], rows: { count: 0, size: () => 0 }, cols: { count: 0, size: () => 0 } })
+	const span = { first: 0, last: 0 }
+
+	return {
+		scale: 1,
+		paper,
+		area,
+		headingWidth: 0,
+		headingHeight: 0,
+		pages: [{ range: 0, rows: span, cols: span, titleRows: null, titleCols: null }],
+		more: false
+	}
+}
+
 // Whether every range fits `wide` by `tall` pages at `percent` (0: any number on that axis).
 function fits(sheet: PrintSheet, percent: number, area: { width: number; height: number }, wide: number, tall: number): boolean {
 	for (const range of sheet.ranges) {

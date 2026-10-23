@@ -77,6 +77,22 @@ export type FaceRegistration = FontFaceDescriptor &
 // Reads an embedded face's font data, at most `maxBytes` of it (larger fonts must be refused unread).
 export type EmbeddedFontReader = (maxBytes: number) => Promise<Uint8Array>
 
+// Where a PDF export gets the face a request draws with: a bundled family's face, or the document's embedded
+// face (with its OS/2 fsType, and the bundled family to use when that forbids embedding). Installed and generic
+// fonts are never embedded; the bundled family that stands in for them is.
+export type PdfFaceSource =
+	| { readonly kind: "bundled"; readonly family: BundledFamily; readonly weight: number; readonly italic: boolean }
+	| {
+			readonly kind: "embedded"
+			// Stable per face, for caching.
+			readonly key: string
+			readonly read: EmbeddedFontReader
+			readonly fsType: number
+			readonly weight: number
+			readonly italic: boolean
+			readonly substitute: BundledFamily
+	  }
+
 export interface EmbeddedFontFailure {
 	readonly family: string
 	readonly bold: boolean
@@ -202,6 +218,12 @@ function requestIndex(request: FontRequest): number {
 
 function isLatin(slot: FontSlot): boolean {
 	return slot === "ascii" || slot === "hAnsi"
+}
+
+const BUNDLED_FAMILIES: readonly BundledFamily[] = ["carlito", "caladea", "arimo", "tinos", "cousine", "gelasio", "selawik"]
+
+function genericFamily(generic: GenericFamily): BundledFamily {
+	return generic === "serif" ? "tinos" : generic === "monospace" ? "cousine" : "arimo"
 }
 
 function reasonOf(error: unknown): string {
@@ -340,6 +362,57 @@ export class FontManager {
 
 	registrations(): readonly FaceRegistration[] {
 		return this.registered
+	}
+
+	// The face a PDF embeds for `request` (see PdfFaceSource); the request must have been prepared.
+	pdfFace(request: FontRequest): PdfFaceSource {
+		const font = this.resolve(request)
+		const substitution = this.candidates(request.family)
+			.map(name => SUBSTITUTIONS.get(name.toLowerCase()))
+			.find(known => known !== undefined)
+		const weight = font.weight
+		const substitute: BundledFamily =
+			substitution?.family ?? fallbackFor(request.family, this.hints(request.family), true).family ?? genericFamily(font.generic)
+
+		if (font.source === "embedded") {
+			for (const entry of this.embedded.values()) {
+				if (entry.alias !== font.family) continue
+
+				const face =
+					entry.faces.find(f => f.weight === weight && f.italic === font.italic) ??
+					entry.faces.find(f => f.italic === font.italic) ??
+					entry.faces.find(f => f.weight === weight) ??
+					entry.faces[0]
+
+				if (face === undefined) break
+
+				const key = styleKey(face.weight >= 700, face.italic)
+				const source = entry.sources.get(key)
+
+				if (source === undefined) break
+
+				return {
+					kind: "embedded",
+					key: `${entry.alias}:${key}`,
+					read: source.read,
+					fsType: face.fsType,
+					weight: face.weight,
+					italic: face.italic,
+					substitute
+				}
+			}
+		}
+
+		if (font.source === "bundled" && font.family !== null && font.family.startsWith(`${this.prefix}-`)) {
+			const alias = font.family.slice(this.prefix.length + 1)
+			const family = BUNDLED_FAMILIES.find(known => known === alias)
+
+			if (family !== undefined) return { kind: "bundled", family, weight, italic: font.italic }
+		}
+
+		// An installed font (or a generic one) stands in for the request on screen: the PDF embeds the bundled
+		// family the request's own hints pick, never one guessed from the installed font's name alone.
+		return { kind: "bundled", family: substitute, weight, italic: font.italic }
 	}
 
 	// Whether an embedded font may be embedded again on save (OS/2 fsType: not restricted-license).

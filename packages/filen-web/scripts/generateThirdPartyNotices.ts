@@ -635,6 +635,20 @@ const OFFICE_DERIVED: {
 		text: sections => noticeFence(sections, "ECMA-376 preset shape definitions")
 	},
 	{
+		section: "[MS-DOC] Word (.doc) Binary File Format",
+		name: "[MS-DOC] Word (.doc) Binary File Format",
+		version: /^\[MS-DOC\] (v\d+) /,
+		license: "LicenseRef-Microsoft-Open-Specifications-IP-Notice",
+		text: sections => noticeFence(sections, "[MS-DOC] Word (.doc) Binary File Format")
+	},
+	{
+		section: "[MS-ODRAW] Office Drawing Binary File Format",
+		name: "[MS-ODRAW] Office Drawing Binary File Format",
+		version: /^\[MS-ODRAW\] (v\d+) /,
+		license: "LicenseRef-Microsoft-Open-Specifications-IP-Notice",
+		text: sections => noticeFence(sections, "[MS-ODRAW] Office Drawing Binary File Format")
+	},
+	{
 		section: "CodeMirror highlight styles",
 		name: "CodeMirror highlight styles",
 		version: /@codemirror\/theme-one-dark (\d+\.\d+\.\d+) /,
@@ -654,6 +668,20 @@ const OFFICE_DERIVED: {
 		version: /^pdfjs-dist (\d+\.\d+\.\d+), /,
 		license: "Apache-2.0",
 		text: sections => noticeFence(sections, "Apache License 2.0")
+	},
+	{
+		section: "HarfBuzz",
+		name: "HarfBuzz",
+		version: /^HarfBuzz (\d+\.\d+\.\d+) /,
+		license: "MIT-Modern-Variant",
+		text: sections => noticeFence(sections, "HarfBuzz")
+	},
+	{
+		section: "Unicode Character Database (text shaping)",
+		name: "Unicode Character Database",
+		version: /^the Unicode Character Database (\d+\.\d+\.\d+) /,
+		license: "Unicode-3.0",
+		text: sections => noticeFence(sections, "Unicode Character Database (text shaping)")
 	}
 ]
 
@@ -704,6 +732,71 @@ function officeFontNotices(): Collected[] {
 					[
 						`The ${name} typeface, ${source} at commit ${stringField(family, "commit", OFFICE_FONTS_MANIFEST)}, used in place of ${stringField(family, "replaces", OFFICE_FONTS_MANIFEST)} when documents are displayed.`,
 						`Bundled by @filen/office (${OFFICE_REPO_DIR}/assets/fonts in the filen-ts repository, ${FILEN_TS_REPOSITORY}) and served with the app as ${records.map(face => stringField(face, "file", OFFICE_FONTS_MANIFEST)).join(", ")}.`,
+						...conversions,
+						...pdfFaceTerms(family)
+					].join(" "),
+					license.terms
+				]
+			},
+			"vendored"
+		)
+	})
+}
+
+/** The TrueType faces a family (or a fallback family) has for PDF export, and how each was made from upstream. */
+function pdfFaceTerms(family: Record<string, unknown>): string[] {
+	const pdf = family["pdf"]
+
+	if (pdf === undefined) {
+		return []
+	}
+
+	if (!Array.isArray(pdf) || pdf.length === 0) {
+		throw new Error(`${OFFICE_FONTS_MANIFEST}: "pdf" of ${String(family["id"])} is malformed`)
+	}
+
+	const records = pdf.map(face => asRecord(face, OFFICE_FONTS_MANIFEST))
+	const conversions = new Set(records.map(face => stringField(face, "conversion", OFFICE_FONTS_MANIFEST)))
+
+	return [
+		`Embedded, as glyph subsets, in PDF files the app exports, from ${records.map(face => stringField(face, "file", OFFICE_FONTS_MANIFEST)).join(", ")}, fetched only when a PDF is exported.`,
+		...conversions
+	]
+}
+
+/** The Noto families PDF export falls back to for scripts the bundled families lack. */
+function officeFallbackFontNotices(): Collected[] {
+	const fallbacks = requireJson(OFFICE_FONTS_MANIFEST)["fallbacks"]
+
+	if (!Array.isArray(fallbacks) || fallbacks.length === 0) {
+		throw new Error(`${OFFICE_FONTS_MANIFEST}: "fallbacks" is missing`)
+	}
+
+	return fallbacks.map(value => {
+		const family = asRecord(value, OFFICE_FONTS_MANIFEST)
+		const name = stringField(family, "name", OFFICE_FONTS_MANIFEST)
+		const source = stringField(family, "source", OFFICE_FONTS_MANIFEST)
+		const faces = family["faces"]
+
+		if (!Array.isArray(faces) || faces.length === 0) {
+			throw new Error(`${OFFICE_FONTS_MANIFEST}: ${name} has no faces`)
+		}
+
+		const records = faces.map(face => asRecord(face, OFFICE_FONTS_MANIFEST))
+		const conversions = new Set(records.map(face => stringField(face, "conversion", OFFICE_FONTS_MANIFEST)))
+		const license = splitCopyright(readFileSync(`${OFFICE_FONTS}/${stringField(family, "licenseFile", OFFICE_FONTS_MANIFEST)}`, "utf8"))
+
+		return vendoredNotice(
+			{
+				name,
+				version: stringField(family, "version", OFFICE_FONTS_MANIFEST),
+				license: stringField(family, "license", OFFICE_FONTS_MANIFEST),
+				copyright: license.copyright,
+				repository: source,
+				terms: [
+					[
+						`The ${name} typeface, ${source}, embedded as glyph subsets in PDF files the app exports when their text is in a script the bundled typefaces lack.`,
+						`Bundled by @filen/office (${OFFICE_REPO_DIR}/assets/fonts in the filen-ts repository, ${FILEN_TS_REPOSITORY}) and served with the app as ${records.map(face => stringField(face, "file", OFFICE_FONTS_MANIFEST)).join(", ")}, fetched only when needed.`,
 						...conversions
 					].join(" "),
 					license.terms
@@ -901,7 +994,7 @@ const rust = collectRust(expectedSdk)
 const ffmpeg = ffmpegModuleNotices()
 const engine = wllamaEngineNotices()
 const model = assistantModelNotice(QWEN35_4B)
-const office = [...officeFontNotices(), ...officeDerivedNotices()]
+const office = [...officeFontNotices(), ...officeFallbackFontNotices(), ...officeDerivedNotices()]
 const spellcheckCrates = spellcheckCrateNotices(rust.entries)
 const dictionaries = spellcheckDictionaryNotices()
 const vendored = [...ffmpeg, ...engine, model, ...office, ...dictionaries]

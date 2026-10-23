@@ -23,7 +23,7 @@ import { decoratePane, decoratorInset, paintScene, type SheetCellDecorator } fro
 import type { SheetGridModel } from "../model"
 import { CF_BAR_DECORATOR, CF_ICON_DECORATOR } from "../overlays/cf"
 import { BorderPainter } from "../paint/borders"
-import { rgb } from "../paint/canvas"
+import { rgb, type GridCanvas } from "../paint/canvas"
 import { paintCells } from "../paint/cells"
 import { PatternCache } from "../paint/patterns"
 import { DEFAULT_POINTS, TextMeasurer, fontFamily } from "../paint/text"
@@ -37,7 +37,7 @@ import { escapeSvgText, SvgCanvas } from "./svgCanvas"
 // formatting's bars and icons print, the grid's selection, notes' marks and filter buttons do not, as in Excel.
 
 // CSS pixels at 100 % to points.
-const POINTS_PER_PX = 0.75
+export const POINTS_PER_PX = 0.75
 
 // What a printed page looks like where the file says nothing: paper white, black text, grey gridlines.
 export const PRINT_THEME: SheetGridTheme = {
@@ -197,7 +197,7 @@ export function pageView(printed: PrintedSheet, page: PrintPage): GridView {
 }
 
 // The row numbers and column letters, in their bands, over the indices each segment shows.
-function paintHeadings(canvas: SvgCanvas, view: GridView, theme: SheetGridTheme, mirrored: boolean): void {
+function paintHeadings(canvas: GridCanvas, view: GridView, theme: SheetGridTheme, mirrored: boolean): void {
 	const left = (x: number, width: number): number => (mirrored ? view.width - x - width : x)
 	const cell = (x: number, y: number, width: number, height: number, label: string): void => {
 		canvas.fillStyle = theme.headerBackground
@@ -236,9 +236,14 @@ function paintHeadings(canvas: SvgCanvas, view: GridView, theme: SheetGridTheme,
 	}
 
 	if (view.cols.header > 0) {
-		cell(0, 0, view.cols.header, view.rows.header, "")
+		// A slice below a page's first has no column letters of its own (printSlices.ts).
+		const letters = view.rows.header > 0
+
+		if (letters) cell(0, 0, view.cols.header, view.rows.header, "")
+
 		walk(view.rows, (row, y, height) => cell(0, y, view.cols.header, height, String(row + 1)))
-		walk(view.cols, (col, x, width) => cell(x, 0, width, view.rows.header, columnName(col)))
+
+		if (letters) walk(view.cols, (col, x, width) => cell(x, 0, width, view.rows.header, columnName(col)))
 	}
 }
 
@@ -291,18 +296,30 @@ export interface BandPicture {
 
 export type BandPictures = Partial<Record<"left" | "center" | "right", BandPicture>>
 
-function band(
+// One section's place in a band (a header or a footer): its anchor, its picture's box and its lines of text, each
+// line's pieces in their looks (fields joined with the text around them when they share its look). Points; `y` is
+// the line's top edge in a header and its bottom edge in a footer.
+export interface BandSection<P> {
+	readonly x: number
+	readonly anchor: "start" | "middle" | "end"
+	readonly picture: { readonly left: number; readonly top: number; readonly scale: number; readonly picture: P } | null
+	readonly lines: readonly {
+		readonly y: number
+		readonly pieces: readonly { readonly text: string; readonly style: HeaderFooterStyle }[]
+	}[]
+}
+
+export function bandLayout<P extends { readonly width: number; readonly height: number }>(
 	sections: HeaderFooterSections,
 	values: HeaderFooterValues,
 	area: { readonly left: number; readonly right: number },
 	at: number,
 	header: boolean,
-	font: string,
 	scale: number,
-	pictures: BandPictures
-): string {
-	let out = ""
-	const place: readonly ["left" | "center" | "right", number, string][] = [
+	pictures: Partial<Record<"left" | "center" | "right", P>>
+): BandSection<P>[] {
+	const out: BandSection<P>[] = []
+	const place: readonly ["left" | "center" | "right", number, BandSection<P>["anchor"]][] = [
 		["left", area.left, "start"],
 		["center", (area.left + area.right) / 2, "middle"],
 		["right", area.right, "end"]
@@ -330,19 +347,24 @@ function band(
 		// A picture (&G) stands at the band's edge, the section's text after it: below in a header, above in a footer.
 		const picture = sections[section].some(run => run.kind === "field" && run.field === "picture") ? pictures[section] : undefined
 		let shift = 0
+		let placed: BandSection<P>["picture"] = null
 
 		if (picture !== undefined) {
 			const width = picture.width * scale
 			const height = picture.height * scale
-			const left = anchor === "start" ? x : anchor === "middle" ? x - width / 2 : x - width
-			const top = header ? at : at - height
 
-			out += `<g transform="translate(${number(left)} ${number(top)}) scale(${String(scale)})">${picture.markup}</g>`
+			placed = {
+				left: anchor === "start" ? x : anchor === "middle" ? x - width / 2 : x - width,
+				top: header ? at : at - height,
+				scale,
+				picture
+			}
 			shift = height
 		}
 
+		const shown: { y: number; pieces: { text: string; style: HeaderFooterStyle }[] }[] = []
+
 		ordered.forEach((line, k) => {
-			// Fields join the text around them in one span when they share its look.
 			const pieces: { text: string; style: HeaderFooterStyle }[] = []
 
 			for (const run of line) {
@@ -353,34 +375,69 @@ function band(
 				else pieces.push({ text, style: run.style })
 			}
 
-			const content = pieces.map(piece => tspan(piece.text, piece.style, font, DEFAULT_POINTS, scale)).join("")
+			const kept = pieces.filter(piece => piece.text !== "")
 
-			if (content === "") return
-
-			const y = header ? at + shift + k * lineHeight : at - shift - k * lineHeight
-
-			out +=
-				`<text x="${number(x)}" y="${number(y)}" text-anchor="${anchor}" dominant-baseline="${header ? "text-before-edge" : "text-after-edge"}">` +
-				`${content}</text>`
+			if (kept.length > 0) shown.push({ y: header ? at + shift + k * lineHeight : at - shift - k * lineHeight, pieces: kept })
 		})
+
+		out.push({ x, anchor, picture: placed, lines: shown })
 	}
 
 	return out
 }
 
-export function printPageSvg(options: PrintPageOptions): string {
-	const { model, printed, page, measure } = options
-	const theme = options.theme ?? PRINT_THEME
-	const { layout, setup, pagination } = printed
-	const view = pageView(printed, page)
+function band(
+	sections: HeaderFooterSections,
+	values: HeaderFooterValues,
+	area: { readonly left: number; readonly right: number },
+	at: number,
+	header: boolean,
+	font: string,
+	scale: number,
+	pictures: BandPictures
+): string {
+	let out = ""
+
+	for (const section of bandLayout(sections, values, area, at, header, scale, pictures)) {
+		const placed = section.picture
+
+		if (placed !== null)
+			out += `<g transform="translate(${number(placed.left)} ${number(placed.top)}) scale(${String(placed.scale)})">${placed.picture.markup}</g>`
+
+		for (const line of section.lines) {
+			const content = line.pieces.map(piece => tspan(piece.text, piece.style, font, DEFAULT_POINTS, scale)).join("")
+
+			out +=
+				`<text x="${number(section.x)}" y="${number(line.y)}" text-anchor="${section.anchor}" dominant-baseline="${header ? "text-before-edge" : "text-after-edge"}">` +
+				`${content}</text>`
+		}
+	}
+
+	return out
+}
+
+// A page's cells (the title rows and columns repeated on it), conditional formatting's bars and icons, and the
+// headings, drawn on `canvas` at 100 % in the page's view (or a slice's, sliceView). `textCell` hears which cell each
+// text belongs to.
+export function paintPrintedCells(
+	canvas: GridCanvas,
+	model: SheetGridModel,
+	printed: PrintedSheet,
+	page: PrintPage,
+	theme: SheetGridTheme,
+	textCell?: (row: number, col: number) => void,
+	sliced?: GridView
+): GridView {
+	const { layout, setup } = printed
+	const view = sliced ?? pageView(printed, page)
 	// Draft quality prints no gridlines (and no graphics: the job leaves objects out).
 	const printLayout: SheetLayout = { ...layout, gridLines: setup.gridLines && !setup.draft }
-	const canvas = new SvgCanvas(`${options.id}-`, measure)
 	const painters = {
 		canvas,
 		measurer: new TextMeasurer(canvas),
 		borders: new BorderPainter(canvas),
-		patterns: new PatternCache(() => null)
+		patterns: new PatternCache(() => null),
+		...(textCell !== undefined && { textCell })
 	}
 	const scene = paintScene({
 		model,
@@ -412,13 +469,27 @@ export function printPageSvg(options: PrintPageOptions): string {
 
 	paintHeadings(canvas, view, theme, layout.rightToLeft)
 
+	return view
+}
+
+export function printPageSvg(options: PrintPageOptions): string {
+	const { model, printed, page, measure } = options
+	const canvas = new SvgCanvas(`${options.id}-`, measure)
+	const view = paintPrintedCells(canvas, model, printed, page, options.theme ?? PRINT_THEME)
+
+	return placedPage(options, view, canvas.markup())
+}
+
+// A page around its cells' markup (drawn in `view`, the page's), placed on the paper as the setup says.
+export function placedPage(options: Omit<PrintPageOptions, "measure">, view: GridView, cells: string): string {
+	const { setup, pagination } = options.printed
 	const { area, scale } = pagination
 	const k = POINTS_PER_PX * scale
 	const width = view.width * k
 	const height = view.height * k
 	const x = area.x + (setup.horizontalCentered ? Math.max(0, (area.width - width) / 2) : 0)
 	const y = area.y + (setup.verticalCentered ? Math.max(0, (area.height - height) / 2) : 0)
-	const content = `<g transform="translate(${number(x)} ${number(y)}) scale(${String(k)})">${canvas.markup()}${options.over ?? ""}</g>`
+	const content = `<g transform="translate(${number(x)} ${number(y)}) scale(${String(k)})">${cells}${options.over ?? ""}</g>`
 
 	return framePage(options, content)
 }

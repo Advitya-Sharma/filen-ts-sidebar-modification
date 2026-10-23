@@ -1,5 +1,5 @@
 import { fileTypeExtension, previewCategoryForExtension } from "@/features/drive/lib/preview.logic"
-import { fileIconKey as sharedFileIconKey, type ContentVerdict, type FileIconKey, type FileIconSets } from "@filen/shared"
+import { fileIconKey as sharedFileIconKey, type FileVerdict, type FileIconKey, type FileIconSets } from "@filen/shared"
 
 // The concrete file-type glyphs in src/assets/file-icons/ (byte-identical to filen-mobile's set) a
 // file routes to — re-exported from @filen/shared so itemIcon.tsx and transferRow.logic.ts can keep
@@ -24,7 +24,7 @@ const ICON_SETS: FileIconSets = {
 // shows the text glyph, an extensionless upload its mime's, a `.ts` read as a transport stream the video
 // glyph). `mime` is absent where none is stored (a transfer row), `uuid` where the file has none yet;
 // `verdict` as fileTypeExtension takes it. An empty name (an undecryptable file) falls through to "other".
-export function fileIconKey(name: string, mime?: string | null, uuid?: string, verdict?: ContentVerdict): FileIconKey {
+export function fileIconKey(name: string, mime?: string | null, uuid?: string, verdict?: FileVerdict): FileIconKey {
 	const extension = fileTypeExtension(name, mime, uuid, verdict)
 	const key = sharedFileIconKey(extension, ICON_SETS)
 

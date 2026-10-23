@@ -4,6 +4,7 @@ import { macroButtonText } from "../core/docx/model/macroButton"
 import { buildDocx } from "./docxSynthetic"
 import { layOut, pageLines } from "./layoutFixtures"
 import { pagedEditor } from "./pagedFixtures"
+import { cpuMs } from "./timing"
 
 const instr = (text: string): string => `<w:r><w:instrText xml:space="preserve">${text}</w:instrText></w:r>`
 const char = (type: string): string => `<w:r><w:fldChar w:fldCharType="${type}"/></w:r>`
@@ -71,13 +72,30 @@ describe("MACROBUTTON display text", () => {
 	it("strips trailing switches in time linear in the instruction", () => {
 		// "\\*a" repeated before a plain word: what a regular expression of repeated groups backtracks on.
 		const crafted = (n: number): string => `MACROBUTTON m ${"\\*a".repeat(n)} b`
-		const started = performance.now()
+		const started = cpuMs()
 
 		expect(macroButtonText(crafted(26))).toBe("\\*a".repeat(26) + " b")
 		expect(macroButtonText(crafted(20_000))?.length).toBe(60_002)
-		expect(performance.now() - started).toBeLessThan(250)
+		expect(cpuMs() - started).toBeLessThan(250)
 		expect(macroButtonText(" MACROBUTTON m Text \\* MERGEFORMAT ")).toBe("Text")
 		expect(macroButtonText(" MACROBUTTON m Text\\*Upper \\*  Lower ")).toBe("Text")
+	})
+
+	it("shows the results of fields nested in its display text, as the instruction's value holds them", async () => {
+		const nested = (inner: string): string => char("begin") + instr(" MACROBUTTON FollowHLink ") + inner + char("end")
+		const hyperlink =
+			char("begin") + instr(' HYPERLINK "https://filen.io" ') + char("separate") + run("Read the guidance") + char("end")
+		const layout = await layOut(
+			buildDocx({
+				body:
+					para(nested(hyperlink)) +
+					para(nested(run("before ") + hyperlink)) +
+					// A nested field without a result adds nothing; its instruction is never shown.
+					para(char("begin") + instr(" MACROBUTTON m Text ") + char("begin") + instr(" PAGE ") + char("end") + char("end"))
+			})
+		)
+
+		expect(pageLines(layout, 0).map(line => line.text)).toEqual(["Read the guidance", "Read the guidance", "Text"])
 	})
 
 	it("lays out a document with a crafted MACROBUTTON promptly", async () => {

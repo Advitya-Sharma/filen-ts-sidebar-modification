@@ -50,6 +50,12 @@ import { SheetToolbar } from "@/features/spreadsheet/toolbar/sheetToolbar"
 import { borderShortcut, setFormatCellsOpen } from "@/features/spreadsheet/toolbar/formatCellsState"
 import { downloadSheetCsv } from "@/features/spreadsheet/save/sheetCsv"
 import { SheetFileMenu } from "@/features/spreadsheet/save/sheetFileMenu"
+import { useSheetPdfExport } from "@/features/spreadsheet/save/useSheetPdfExport"
+import { fileStem } from "@/features/spreadsheet/save/sheetSave.logic"
+import { formOf, pdfRequest, printRequests } from "@/features/spreadsheet/print/print.logic"
+import { sheetSettings } from "@/features/spreadsheet/print/printSettings"
+import { browserLanguage } from "@/features/spreadsheet/formulaBar/sheetLocale"
+import { usePreviewDownloadable } from "@/features/preview/lib/accessMode"
 import { useSheetAutosave } from "@/features/spreadsheet/save/useSheetAutosave"
 import { useSheetFill } from "@/features/spreadsheet/fill/useSheetFill"
 import { useShortcutRequests } from "@/features/spreadsheet/objects/insertRequests"
@@ -88,6 +94,8 @@ export interface SheetBodyProps {
 	onSaveAsXlsx: (() => Promise<void>) | undefined
 	// Idle autosave asks the overlay to save; true when a save started.
 	onAutosave: (() => boolean) | undefined
+	// A password-protected workbook as stored: its PDF asks for the password and is encrypted with it.
+	encryptedFile?: Uint8Array | undefined
 }
 
 // The features whose menu groups are about a chartsheet's chart (the others' are about cells, which it has none of).
@@ -110,9 +118,11 @@ export function SheetBody({
 	modifyLocked,
 	layerKey,
 	onSaveAsXlsx,
-	onAutosave
+	onAutosave,
+	encryptedFile
 }: SheetBodyProps) {
 	const { t } = useTranslation(["preview", "common"])
+	const downloadable = usePreviewDownloadable()
 	const [model] = useState(() => createSheetGrid(handle))
 	const grid = useSheetGrid(model)
 	const { theme } = useTheme()
@@ -260,8 +270,9 @@ export function SheetBody({
 	}
 
 	// Excel's "CSV UTF-8": the sheet on show, as each cell shows; a password-protected workbook's cells stay sealed.
+	// Neither CSV nor PDF of a file that may not be downloaded.
 	const downloadCsv =
-		handle.info.encrypted === undefined && grid.failed === null
+		downloadable && handle.info.encrypted === undefined && grid.failed === null
 			? () => {
 					const sheet = grid.sheets.find(entry => entry.id === grid.sheet)
 
@@ -285,6 +296,44 @@ export function SheetBody({
 				}
 			: undefined
 
+	// The sheet on show as it prints (its print area and page setup), made in the worker beside the session; a
+	// protected workbook's password is asked first.
+	const pdf = useSheetPdfExport({
+		session: handle.session,
+		fileName: alt,
+		encryptedFile,
+		offered: downloadable && grid.failed === null
+	})
+	const workbookOf = () => ({ kind, sheets: grid.sheets, date1904: model.date1904, showFormulas: grid.showFormulas })
+	const fileOf = () => ({ name: alt, title: fileStem(alt), lang: browserLanguage() })
+	const startPdf = pdf.start
+	const downloadPdf =
+		startPdf !== undefined
+			? () => {
+					const sheet = grid.sheets.find(entry => entry.id === grid.sheet)
+
+					if (sheet === undefined) {
+						return
+					}
+
+					startPdf(async () => {
+						if (!(await model.commitEditing(null))) {
+							return null
+						}
+
+						const active = await sheetSettings(model, kind, sheet)
+
+						if (active === null) {
+							return null
+						}
+
+						const requests = printRequests(formOf(active.setup), active, [active], grid.selection.ranges) ?? []
+
+						return pdfRequest(requests, fileOf(), workbookOf())
+					})
+				}
+			: undefined
+
 	useEffect(() => {
 		if (saveRef === undefined) {
 			return undefined
@@ -303,7 +352,20 @@ export function SheetBody({
 	const formula = useSheetFormula({ grid, gridRef, handle, canEdit: cellsWritable, run })
 	const fill = useSheetFill({ grid, canEdit: cellsWritable, run })
 	const touch = useSheetTouch({ grid, gridRef, canEdit: cellsWritable, clipboard })
-	const print = useSheetPrint({ grid, model, kind, name: alt, canEdit, run })
+	const print = useSheetPrint({
+		grid,
+		model,
+		kind,
+		name: alt,
+		canEdit,
+		run,
+		onSavePdf:
+			startPdf === undefined
+				? undefined
+				: requests => {
+						startPdf(() => Promise.resolve(pdfRequest(requests, fileOf(), workbookOf())))
+					}
+	})
 	const charts = useSheetCharts({ grid, gridRef, handle, canEdit, text })
 	// Pictures, shapes and chart frames: their overlay goes first, under the other features' cards and popovers.
 	const objects = useSheetObjects({
@@ -541,9 +603,11 @@ export function SheetBody({
 							{t("previewSpreadsheetSaveAsXlsx")}
 						</Button>
 					)}
+					{pdf.prompt}
 					<SheetFileMenu
 						text={text}
 						onDownloadCsv={downloadCsv}
+						onDownloadPdf={downloadPdf}
 						onPrint={print.open}
 						onSaveAsXlsx={
 							onSaveAsXlsx === undefined
