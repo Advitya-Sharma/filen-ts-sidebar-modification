@@ -4,7 +4,8 @@ import { MAX_PRINT_PAGES } from "@filen/office/core/sheet/print"
 import { sheetPdf, type SheetPdfRequest } from "@filen/office/react/sheet/print"
 import { fileStem } from "@/features/spreadsheet/save/sheetSave.logic"
 import { downloadBlob } from "@/lib/downloadBlob"
-import { i18n } from "@/lib/i18n"
+import { PDF_DETERMINISTIC } from "@/features/office/lib/pdfTestMode"
+import { i18n, type PreviewKey } from "@/lib/i18n"
 import { log } from "@/lib/log"
 
 // Download as PDF for a spreadsheet: the print made in the sheet worker beside the session (cells, objects and
@@ -15,6 +16,74 @@ let exports = 0
 
 export function pdfDownloadName(fileName: string): string {
 	return `${fileStem(fileName)}.pdf`
+}
+
+type SheetPdfOutcome = Awaited<ReturnType<typeof sheetPdf>>
+
+// The print made in the worker (see sheetPdf); `password` (a protected workbook's, checked first) encrypts the PDF
+// and goes with this export only.
+export function makeSheetPdf(
+	session: SheetSessionApi,
+	request: SheetPdfRequest,
+	options: {
+		readonly signal: AbortSignal
+		readonly onProgress: (done: number, total: number) => void
+		readonly password?: string | undefined
+	}
+): Promise<SheetPdfOutcome> {
+	return sheetPdf(session, request, {
+		signal: options.signal,
+		onProgress: options.onProgress,
+		...(options.password !== undefined && { password: options.password }),
+		...(PDF_DETERMINISTIC && { deterministic: true })
+	})
+}
+
+export interface SheetPdfMessage {
+	readonly key: PreviewKey
+	readonly values: Readonly<Record<string, number>>
+}
+
+// What an export tells the user (logged): beside a made PDF, what it simplified; a refused or failed one, why. A
+// session closed while the PDF was made (the user left) tells nothing.
+export function sheetPdfMessages(result: SheetPdfOutcome): {
+	readonly warnings: SheetPdfMessage[]
+	readonly error: SheetPdfMessage | null
+} {
+	if (result.ok) {
+		const warnings: SheetPdfMessage[] = []
+
+		if (result.missingGlyphs > 0 || result.missingImages > 0) {
+			log.warn("preview", "spreadsheet pdf simplified", { glyphs: result.missingGlyphs, images: result.missingImages })
+			warnings.push({ key: "previewSheetPdfSimplified", values: {} })
+		}
+
+		if (result.unshapedRuns > 0) {
+			log.warn("preview", "spreadsheet pdf unshaped", { runs: result.unshapedRuns })
+			warnings.push({ key: "previewSheetPdfUnshaped", values: {} })
+		}
+
+		return { warnings, error: null }
+	}
+
+	switch (result.reason) {
+		case "closed":
+			return { warnings: [], error: null }
+		case "nothing":
+			return { warnings: [], error: { key: "previewSheetPdfNothing", values: {} } }
+		case "tooManyPages":
+			return { warnings: [], error: { key: "previewSheetPdfTooMany", values: { pages: MAX_PRINT_PAGES } } }
+		case "passwordUnsupported":
+			return { warnings: [], error: { key: "previewSheetPdfPasswordUnsupported", values: {} } }
+		case "pageTooLarge":
+			return { warnings: [], error: { key: "previewSheetPdfPageTooLarge", values: { page: result.pages ?? 1 } } }
+		default:
+			return { warnings: [], error: { key: "previewSheetPdfFailed", values: {} } }
+	}
+}
+
+function messageText(message: SheetPdfMessage): string {
+	return Object.keys(message.values).length === 0 ? i18n.t(`preview:${message.key}`) : i18n.t(`preview:${message.key}`, message.values)
 }
 
 // `password` (a protected workbook's, checked first) encrypts the PDF; it goes with this export only.
@@ -42,48 +111,22 @@ export async function downloadSheetPdf(
 	show(null, 0)
 
 	try {
-		const result = await sheetPdf(session, request, {
-			signal: controller.signal,
-			onProgress: show,
-			...(password !== undefined && { password })
-		})
+		const result = await makeSheetPdf(session, request, { signal: controller.signal, onProgress: show, password })
 
 		toast.dismiss(id)
 
 		if (result.ok) {
 			downloadBlob(pdfDownloadName(fileName), result.blob)
-
-			if (result.missingGlyphs > 0 || result.missingImages > 0) {
-				log.warn("preview", "spreadsheet pdf simplified", { glyphs: result.missingGlyphs, images: result.missingImages })
-				toast.warning(i18n.t("preview:previewSheetPdfSimplified"))
-			}
-
-			if (result.unshapedRuns > 0) {
-				log.warn("preview", "spreadsheet pdf unshaped", { runs: result.unshapedRuns })
-				toast.warning(i18n.t("preview:previewSheetPdfUnshaped"))
-			}
-
-			return
 		}
 
-		switch (result.reason) {
-			// The viewer was closed while the PDF was being made: the user left, nothing failed.
-			case "closed":
-				break
-			case "nothing":
-				toast.error(i18n.t("preview:previewSheetPdfNothing"))
-				break
-			case "tooManyPages":
-				toast.error(i18n.t("preview:previewSheetPdfTooMany", { pages: MAX_PRINT_PAGES }))
-				break
-			case "passwordUnsupported":
-				toast.error(i18n.t("preview:previewSheetPdfPasswordUnsupported"))
-				break
-			case "pageTooLarge":
-				toast.error(i18n.t("preview:previewSheetPdfPageTooLarge", { page: result.pages ?? 1 }))
-				break
-			default:
-				toast.error(i18n.t("preview:previewSheetPdfFailed"))
+		const { warnings, error } = sheetPdfMessages(result)
+
+		for (const warning of warnings) {
+			toast.warning(messageText(warning))
+		}
+
+		if (error !== null) {
+			toast.error(messageText(error))
 		}
 	} catch (error) {
 		toast.dismiss(id)

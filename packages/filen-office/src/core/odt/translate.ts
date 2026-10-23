@@ -1,4 +1,5 @@
 import { ZipError, sliceClock, type ByteSource, type SliceClock, type Slicing, type ZipLimits } from "../opc/index"
+import { runSliced } from "../slicing"
 import type { LinkedPart } from "../opc/package"
 import { METHOD_STORED } from "../opc/zipReader"
 import {
@@ -13,10 +14,21 @@ import {
 	type ContentPrologue
 } from "../odf/index"
 import { ODF_STYLE_NS } from "../docx/layout/geometry"
-import { Namespaces, XmlError, decodeUtf8, encodeUtf8, parseXml, transcodeUtf16, type XmlDocument } from "../xml/index"
+import {
+	Namespaces,
+	XmlError,
+	assertWellFormed,
+	assertWellFormedSliced,
+	decodeUtf8,
+	encodeUtf8,
+	parseXml,
+	transcodeUtf16,
+	type XmlDocument
+} from "../xml/index"
 import { paragraph } from "./flow"
 import { imageKind } from "./frames"
 import { GeometryError } from "./geometry"
+import { readContentPrologueSliced } from "../odf/prologue"
 import { BodyFlow } from "./pages"
 import { BodyScanner, inflateChunks, OdtScanError, type BodyBatch } from "./scan"
 import { Translator, type TranslatorSettings } from "./translator"
@@ -26,6 +38,8 @@ import { PART_NAMESPACES, REL, twips, XML_DECLARATION } from "./wml"
 export interface OdtTranslateOptions {
 	readonly slicing?: Slicing
 	readonly limits?: Partial<ZipLimits>
+	// Every stream read is checked for every well-formedness rule (a written file's proof), not only its structure.
+	readonly strict?: boolean
 }
 
 const IMAGE_TYPES: Readonly<Record<string, string>> = {
@@ -48,6 +62,10 @@ const NOTE_FORMATS: Readonly<Record<string, string>> = {
 	I: "upperRoman"
 }
 const NOTE_RESTARTS: Readonly<Record<string, string>> = { document: "continuous", chapter: "eachSect", page: "eachPage" }
+
+// Automatic styles, their resolutions and mappings kept while translating (a body uses most of its automatic styles
+// once, in order: past this many, the oldest are let go and read again if a later block asks).
+const KEEP_STYLES = 512
 
 // Streams that are never pictures.
 function mayBePicture(name: string): boolean {
@@ -86,7 +104,7 @@ async function head(odf: OdfPackage, name: string, clock: SliceClock | undefined
 	return new Uint8Array(0)
 }
 
-function configBoolean(settings: XmlDocument | undefined, name: string): boolean | undefined {
+export function configBoolean(settings: XmlDocument | undefined, name: string): boolean | undefined {
 	if (settings === undefined) return undefined
 
 	const namespaces = new Namespaces(settings)
@@ -129,6 +147,11 @@ function isDamage(error: unknown): error is Error {
 
 // Translates an ODF text document into a WordprocessingML package held in memory. content.xml is read once,
 // streamed: its prologue (automatic styles) first, then the body a batch of top-level blocks at a time.
+async function wellFormed(document: XmlDocument, clock: SliceClock | undefined): Promise<void> {
+	if (clock === undefined) assertWellFormed(document)
+	else await assertWellFormedSliced(document, clock)
+}
+
 export async function translateOdt(source: ByteSource, options: OdtTranslateOptions = {}): Promise<OdtTranslateResult> {
 	const opened = await OdfPackage.open(source, {
 		kinds: ["text", "text-master", "text-web"],
@@ -156,6 +179,9 @@ export async function translateOdt(source: ByteSource, options: OdtTranslateOpti
 async function translate(odf: OdfPackage, options: OdtTranslateOptions): Promise<OdtTranslateResult> {
 	const clock = options.slicing === undefined ? undefined : sliceClock(options.slicing)
 	const styles = await odf.xml("styles.xml", clock)
+
+	if (options.strict === true && styles !== undefined) await wellFormed(styles, clock)
+
 	let settingsXml: XmlDocument | undefined
 
 	try {
@@ -164,7 +190,10 @@ async function translate(odf: OdfPackage, options: OdtTranslateOptions): Promise
 		if (!(error instanceof XmlError || error instanceof ZipError)) throw error
 	}
 
-	const settings: TranslatorSettings = { tabsRelativeToIndent: configBoolean(settingsXml, "TabsRelativeToIndent") ?? true }
+	const settings: TranslatorSettings = {
+		tabsRelativeToIndent: configBoolean(settingsXml, "TabsRelativeToIndent") ?? true,
+		keepAtMost: KEEP_STYLES
+	}
 	// LibreOffice sums the spacing between paragraphs only under AddParaTableSpacing (absent: the larger of the two).
 	const sumSpacing = configBoolean(settingsXml, "AddParaTableSpacing") ?? false
 	// Drawing shapes stay on their anchor's page (ODF 1.3 Part 3 §20.267, style:flow-with-text false) unless the
@@ -185,9 +214,11 @@ async function translate(odf: OdfPackage, options: OdtTranslateOptions): Promise
 	const body = new BodyFlow()
 	const origins: OdtOrigin[] = []
 	let originsExact = true
-	const start = (prologue: ContentPrologue): Translator => {
-		const sheet = new OdfStyleSheet(styles, prologue)
-		const created = new Translator(odf, sheet, new OdfStyleResolver(sheet), settings)
+	const start = async (prologue: ContentPrologue): Promise<Translator> => {
+		const sheet = clock === undefined ? new OdfStyleSheet(styles, prologue) : await OdfStyleSheet.build(styles, prologue, clock)
+		sheet.keepAtMost = KEEP_STYLES
+
+		const created = new Translator(odf, sheet, new OdfStyleResolver(sheet, { keepAtMost: KEEP_STYLES }), settings)
 
 		for (const [name, kind] of kinds) created.frames.kinds.set(name, kind)
 
@@ -206,9 +237,14 @@ async function translate(odf: OdfPackage, options: OdtTranslateOptions): Promise
 			translator.scope = "content"
 
 			for (const block of batch.blocks) {
-				const first = body.count
+				if (clock?.due === true) await clock.pause()
 
-				translator.block(block.node, body)
+				const first = body.count
+				const state = translator.blockState()
+
+				translator.blockBase = block.start - batch.document.start(block.node)
+				await runSliced(translator.blockSteps(block.node, body), clock)
+				translator.blockBase = undefined
 				origins.push({
 					stream: "content.xml",
 					start: block.start,
@@ -216,7 +252,8 @@ async function translate(odf: OdfPackage, options: OdtTranslateOptions): Promise
 					part: "word/document.xml",
 					first,
 					count: body.count - first,
-					lossy: translator.takeLossy()
+					lossy: translator.takeLossy(),
+					state
 				})
 			}
 
@@ -258,8 +295,16 @@ async function translate(odf: OdfPackage, options: OdtTranslateOptions): Promise
 
 		if (located === undefined) continue
 
-		translator = start(readContentPrologue(prefix.subarray(0, Math.min(prefix.length, located.bodyStart + 64))))
-		scanner = new BodyScanner(prefix.subarray(located.rootStart, located.openEnd), located.bodyStart)
+		const head = prefix.subarray(0, Math.min(prefix.length, located.bodyStart + 64))
+
+		const prologue = clock === undefined ? readContentPrologue(head) : await readContentPrologueSliced(head, clock)
+
+		if (options.strict === true) await wellFormed(prologue.document, clock)
+
+		translator = await start(prologue)
+		scanner = new BodyScanner(prefix.subarray(located.rootStart, located.openEnd), located.bodyStart, {
+			strict: options.strict === true
+		})
 		await take(scanner.push(prefix, 0))
 		prefix = new Uint8Array(0)
 	}
@@ -271,10 +316,13 @@ async function translate(odf: OdfPackage, options: OdtTranslateOptions): Promise
 		const utf16 = (prefix[0] === 0xfe && prefix[1] === 0xff) || (prefix[0] === 0xff && prefix[1] === 0xfe)
 		const bytes = utf16 ? transcodeUtf16(prefix, 2, prefix[0] === 0xff) : prefix
 		const document = parseXml(bytes)
+
+		if (options.strict === true) await wellFormed(document, clock)
+
 		const namespaces = new Namespaces(document)
 		const root = document.documentElement()
 
-		translator = start({ document, namespaces, root, bodyStart: -1, sliced: false })
+		translator = await start({ document, namespaces, root, bodyStart: -1, sliced: false })
 
 		for (let node = document.firstChildElement(root); node >= 0; node = document.nextSiblingElement(node)) {
 			if (elementName(document, namespaces, node) !== "office:body") continue
@@ -295,6 +343,8 @@ async function translate(odf: OdfPackage, options: OdtTranslateOptions): Promise
 
 	if (translator === undefined) throw new OdtScanError("content.xml has no document")
 
+	const endState = translator.blockState()
+
 	// Frames anchored to the page with no paragraph after them.
 	if (translator.pendingAnchors.length > 0) {
 		body.add(paragraph("", "", translator.pendingAnchors.join("")))
@@ -304,7 +354,7 @@ async function translate(odf: OdfPackage, options: OdtTranslateOptions): Promise
 	body.finish(translator.pages.finalSectPr())
 	body.writer.add("</w:body></w:document>")
 
-	return { ok: true, translation: assemble(odf, translator, body, origins, originsExact, sumSpacing, floatsOnPage) }
+	return { ok: true, translation: { ...assemble(odf, translator, body, origins, originsExact, sumSpacing, floatsOnPage), endState } }
 }
 
 const BODY = encodeUtf8("body")
@@ -458,5 +508,15 @@ function assemble(
 		)
 	)
 
-	return { parts, origins, originsExact, facts: odf.facts, lossy: translator.lossyCounts, objects: translator.objectKinds }
+	return {
+		parts,
+		origins,
+		originsExact,
+		facts: odf.facts,
+		lossy: translator.lossyCounts,
+		objects: translator.objectKinds,
+		numbering: translator.lists.numStyles,
+		media: new Map(translator.frames.media.map(media => [media.part, media.source])),
+		sections: translator.pages.sections
+	}
 }

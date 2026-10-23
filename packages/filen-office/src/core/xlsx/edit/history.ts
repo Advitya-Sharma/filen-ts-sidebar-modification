@@ -1,6 +1,6 @@
 import type { SheetId } from "../../sheet/protocol"
 import type { RowBlock, SheetStore } from "../model/store"
-import { CellKind, RowFlag, SLOT_BLOCK, type XlsxSheetStore } from "../model/types"
+import { CellKind, ROW_MARKS, SLOT_BLOCK, type XlsxSheetStore } from "../model/types"
 
 // What an xlsx edit keeps to be undone and redone: the cells it wrote as they were before and after, the row
 // properties it set, and for a structure edit the store's blocks as they were. Records in the workbook (styles,
@@ -127,13 +127,18 @@ export interface RowState {
 
 export const NO_ROW: RowState = { height: Number.NaN, style: -1, flags: 0 }
 
-const OWN_ROW_FLAGS = ~(RowFlag.DIRTY | RowFlag.NEW) & 0xffff
+const OWN_ROW_FLAGS = ~ROW_MARKS & 0xffff
 
 export function rowState(store: SheetStore, row: number): RowState {
 	const block = store.blocks[store.blockOf(row)]
 	const index = block === undefined ? -1 : block.rowIndex(row)
 
-	if (block === undefined || index < 0) return NO_ROW
+	if (block === undefined || index < 0) {
+		// A row an OpenDocument run gives properties without a store row of its own.
+		const base = store.rowBase?.(row)
+
+		return base === undefined ? NO_ROW : { height: base.heightPt, style: -1, flags: base.flags & OWN_ROW_FLAGS }
+	}
 
 	return {
 		height: block.rowHeights[index] ?? Number.NaN,

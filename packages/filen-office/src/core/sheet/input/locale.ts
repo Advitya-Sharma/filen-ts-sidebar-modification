@@ -1,4 +1,5 @@
 import type { SheetLocale } from "../protocol"
+import { TERRITORY_CURRENCIES } from "./currencies.generated"
 
 // Entries as typed in the user's locale, and the file's own syntax shown back in it. Files always store en-US syntax
 // and English function names (ECMA-376 Part 1 §18.17: the formula grammar's "," between arguments, "." in numbers);
@@ -220,6 +221,199 @@ export function localizedNumber(text: string, locale: SheetLocale): { value: num
 	return null
 }
 
+interface TextNumberReader {
+	readonly number: RegExp
+	readonly grouped: RegExp
+	readonly decimal: string
+	readonly decimalCode: number
+	readonly group: RegExp
+	// Longest first, so "US$" is read before "$".
+	readonly currencies: readonly string[]
+	readonly currencyCodes: readonly number[]
+}
+
+const textReaders = new Map<string, TextNumberReader>()
+
+const SPACE = 32
+const PLUS = 43
+const MINUS = 45
+const PAREN = 40
+
+function isSpace(code: number): boolean {
+	return code === SPACE || code === 0xa0 || code === 0x202f || (code >= 9 && code <= 13)
+}
+
+function textNumberReader(locale: SheetLocale): TextNumberReader {
+	const currencies = (locale.currencies ?? (locale.decimal === "." ? ["$"] : []))
+		.filter(symbol => symbol !== "")
+		.sort((a, z) => z.length - a.length)
+	const key = `${locale.decimal}\u0000${locale.group}\u0000${currencies.join("\u0000")}`
+	let reader = textReaders.get(key)
+
+	if (reader === undefined) {
+		const point = escaped(locale.decimal)
+		const group = /\s/u.test(locale.group) ? "[\\s\\u00a0\\u202f]" : escaped(locale.group)
+
+		reader = {
+			number: new RegExp(`^(\\d+(${point}\\d*)?|${point}\\d+)(e[-+]?\\d+)?$`, "i"),
+			grouped: new RegExp(`^\\d{1,3}(${group}\\d{3})+(${point}\\d*)?$`),
+			decimal: locale.decimal,
+			decimalCode: locale.decimal.charCodeAt(0),
+			group: new RegExp(group, "g"),
+			currencies,
+			currencyCodes: currencies.map(symbol => symbol.charCodeAt(0))
+		}
+		textReaders.set(key, reader)
+	}
+
+	return reader
+}
+
+// The digits of a number as the locale writes them (no sign): plain, with an exponent, grouped, or a whole number
+// and a fraction ("1 1/2"). Undefined for anything else.
+function unsignedNumber(text: string, reader: TextNumberReader): number | undefined {
+	if (reader.number.test(text)) return Number(reader.decimal === "." ? text : text.replace(reader.decimal, "."))
+	if (reader.grouped.test(text)) return Number(text.replace(reader.group, "").replace(reader.decimal, "."))
+
+	const space = text.indexOf(" ")
+	const slash = text.indexOf("/")
+
+	if (space > 0 && slash > space) {
+		const whole = text.slice(0, space)
+		const numerator = text.slice(space + 1, slash)
+		const denominator = text.slice(slash + 1)
+
+		if (DIGITS.test(whole) && DIGITS.test(numerator) && DIGITS.test(denominator) && Number(denominator) !== 0) {
+			return Number(whole) + Number(numerator) / Number(denominator)
+		}
+	}
+
+	return undefined
+}
+
+const DIGITS = /^\d+$/
+
+// A number given as text where a formula takes a number ("1,000"*1, ABS("$4.00")), read as Excel reads text "that
+// looks like an accepted number format" (support.microsoft.com "Calculation operators and precedence in Excel":
+// ="1"+"2" is 3, =1+"$4.00" is 5) in the locale: its decimal point and grouping, a sign before or after (5- is -5),
+// one of the locale's currency symbols before or after the number, with the sign on either side of it, a percent sign after,
+// parentheses around a negative number, an exponent and a whole number with a fraction; surrounding spaces are
+// ignored. Where the page is silent, as LibreOffice 7.5 reads text in en-US and de-DE. Dates and times are read
+// apart (formula/textDates.ts). Undefined when the text reads as no number, most of it at its first character.
+export function textNumber(text: string, locale: SheetLocale): number | undefined {
+	return readTextNumber(text, textNumberReader(locale))
+}
+
+// textNumber for one locale, its reader resolved once (the engine reads every text operand through it).
+export function textNumberParser(locale: SheetLocale): (text: string) => number | undefined {
+	const reader = textNumberReader(locale)
+
+	return text => readTextNumber(text, reader)
+}
+
+function readTextNumber(text: string, reader: TextNumberReader): number | undefined {
+	let start = 0
+	let end = text.length
+
+	while (start < end && isSpace(text.charCodeAt(start))) start++
+	while (end > start && isSpace(text.charCodeAt(end - 1))) end--
+
+	if (start === end) return undefined
+
+	const first = text.charCodeAt(start)
+	let whole = true
+
+	for (let index = start; whole && index < end; index++) whole = isDigit(text.charCodeAt(index))
+
+	if (whole) {
+		const value = Number(start === 0 && end === text.length ? text : text.slice(start, end))
+
+		// Digits past what a number holds are no number: #VALUE!, not an overflow.
+		return Number.isFinite(value) ? value : undefined
+	}
+
+	if (
+		!isDigit(first) &&
+		first !== PLUS &&
+		first !== MINUS &&
+		first !== PAREN &&
+		first !== reader.decimalCode &&
+		!reader.currencyCodes.includes(first)
+	) {
+		return undefined
+	}
+
+	let body = text.slice(start, end)
+	let negative = false
+	let signed = false
+
+	// (1,000) and ($5): a negative number, with no sign or percent inside.
+	const parenthesised = first === PAREN
+
+	if (parenthesised) {
+		if (body.charCodeAt(body.length - 1) !== 41) return undefined
+
+		body = body.slice(1, -1).trim()
+		negative = true
+		signed = true
+	}
+
+	const sign = (): boolean => {
+		const code = body.charCodeAt(0)
+
+		if (code !== PLUS && code !== MINUS) return true
+		if (signed) return false
+
+		signed = true
+		negative = code === MINUS
+		body = body.slice(1)
+
+		return true
+	}
+
+	if (!sign()) return undefined
+
+	let currency = false
+	const leading = reader.currencies.find(symbol => body.startsWith(symbol))
+
+	if (leading !== undefined) {
+		currency = true
+		body = body.slice(leading.length).trimStart()
+
+		if (!sign()) return undefined
+	}
+
+	if (!parenthesised && body.charCodeAt(body.length - 1) === MINUS) {
+		if (signed) return undefined
+
+		signed = true
+		negative = true
+		body = body.slice(0, -1).trimEnd()
+	}
+
+	let percent = false
+
+	const trailing = currency ? undefined : reader.currencies.find(symbol => body.endsWith(symbol))
+
+	if (trailing !== undefined) {
+		currency = true
+		body = body.slice(0, -trailing.length).trimEnd()
+	} else if (!parenthesised && !currency && body.endsWith("%")) {
+		percent = true
+		body = body.slice(0, -1).trimEnd()
+	}
+
+	const value = unsignedNumber(body, reader)
+
+	if (value === undefined) return undefined
+
+	if (!Number.isFinite(value)) return undefined
+
+	const scaled = percent ? value / 100 : value
+
+	return negative ? -scaled : scaled
+}
+
 const DATE = /^(\d{1,4})([/.-])(\d{1,2})\2(\d{1,4})$/
 
 // A date as typed in the locale's order (day, month and year separated by "/", "-" or "."; a two-digit year is
@@ -274,4 +468,25 @@ export function localizedInput(input: string, locale: SheetLocale | undefined): 
 	if (/^-?\d+(\.\d+)?(e[-+]?\d+)?$/i.test(input)) return input.replace(".", locale.decimal)
 
 	return input
+}
+
+// A territory's current currency (ISO 3166-1 alpha-2 → ISO 4217, Unicode CLDR: currencies.generated.ts), for the
+// app to name the locale's currency symbols. Undefined for a territory without one.
+export function territoryCurrency(territory: string): string | undefined {
+	if (territory.length !== 2) return undefined
+
+	const key = territory.toUpperCase()
+	let low = 0
+	let high = TERRITORY_CURRENCIES.length / 5 - 1
+
+	while (low <= high) {
+		const middle = (low + high) >> 1
+		const at = TERRITORY_CURRENCIES.slice(middle * 5, middle * 5 + 2)
+
+		if (at === key) return TERRITORY_CURRENCIES.slice(middle * 5 + 2, middle * 5 + 5)
+		if (at < key) low = middle + 1
+		else high = middle - 1
+	}
+
+	return undefined
 }

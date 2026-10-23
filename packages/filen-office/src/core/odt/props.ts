@@ -75,7 +75,7 @@ function underline(attributes: Attributes): string | undefined {
 	return `<w:u w:val="${value}"${hex === undefined ? "" : ` w:color="${hex}"`}/>`
 }
 
-// style:text-position: "super"|"sub"|percent, then an optional size percent (§20.374).
+// style:text-position: "super"|"sub"|percent, then an optional size percent (§20.384).
 function textPosition(value: string, fontSize: number | undefined): string {
 	const [raise = "0%", size] = value.trim().split(/\s+/)
 	const percent = raise === "super" ? 33 : raise === "sub" ? -33 : (parsePercent(raise) ?? 0)
@@ -214,7 +214,145 @@ export function runProperties(sheet: OdfStyleSheet, attributes: Attributes, sink
 		sink.lossy("textEffect")
 	}
 
+	if (untranslated(attributes, position)) sink.lossy("untranslatedText")
+
 	return out
+}
+
+// Text properties (Part 3 §20) this translation writes, or that change nothing shown.
+const TRANSLATED: ReadonlySet<string> = new Set([
+	"style:font-name",
+	"style:font-name-asian",
+	"style:font-name-complex",
+	"fo:font-family",
+	"style:font-family-asian",
+	"style:font-family-complex",
+	"style:font-family-generic",
+	"style:font-family-generic-asian",
+	"style:font-family-generic-complex",
+	"style:font-pitch",
+	"style:font-pitch-asian",
+	"style:font-pitch-complex",
+	"style:font-charset",
+	"style:font-charset-asian",
+	"style:font-charset-complex",
+	"style:font-style-name",
+	"style:font-style-name-asian",
+	"style:font-style-name-complex",
+	"fo:font-weight",
+	"style:font-weight-complex",
+	"fo:font-style",
+	"style:font-style-complex",
+	"fo:text-transform",
+	"fo:font-variant",
+	"style:text-line-through-style",
+	"style:text-line-through-type",
+	"style:text-outline",
+	"fo:text-shadow",
+	"style:font-relief",
+	"text:display",
+	"fo:color",
+	"style:use-window-font-color",
+	"fo:letter-spacing",
+	"style:text-scale",
+	"fo:font-size",
+	"style:font-size-complex",
+	"style:text-position",
+	"style:text-underline-style",
+	"style:text-underline-type",
+	"style:text-underline-width",
+	"style:text-underline-color",
+	"fo:background-color",
+	"style:text-emphasize",
+	"fo:language",
+	"fo:country",
+	"style:language-asian",
+	"style:country-asian",
+	"style:language-complex",
+	"style:country-complex",
+	"fo:script",
+	"style:script-asian",
+	"style:script-complex",
+	"style:rfc-language-tag",
+	"style:rfc-language-tag-asian",
+	"style:rfc-language-tag-complex",
+	"fo:hyphenate",
+	"fo:hyphenation-remain-char-count",
+	"fo:hyphenation-push-char-count",
+	"loext:hyphenation-no-caps",
+	"loext:hyphenation-no-last-word",
+	"loext:hyphenation-word-char-count",
+	"loext:hyphenation-zone",
+	"style:text-rotation-angle",
+	"style:text-combine",
+	"style:text-blinking",
+	"officeooo:rsid",
+	"officeooo:paragraph-rsid"
+])
+
+// Whether text properties say what their WordprocessingML (runProperties) does not.
+function untranslated(attributes: Attributes, position: string | undefined): boolean {
+	for (const [name, value] of attributes) {
+		if (TRANSLATED.has(name)) continue
+
+		switch (name) {
+			case "style:text-overline-style":
+			case "style:text-overline-type":
+				if (value !== "none") return true
+
+				break
+			case "style:text-overline-width":
+			case "style:text-overline-color":
+			case "style:text-overline-mode":
+				break
+			case "style:text-line-through-color":
+				if (value !== "font-color") return true
+
+				break
+			case "style:text-line-through-width":
+				if (value !== "auto") return true
+
+				break
+			case "style:text-line-through-mode":
+			case "style:text-underline-mode":
+				if (value !== "continuous") return true
+
+				break
+			case "style:text-line-through-text":
+			case "style:text-line-through-text-style":
+				if (value !== "") return true
+
+				break
+			case "style:letter-kerning":
+				if (value !== "false") return true
+
+				break
+			case "style:font-weight-asian":
+				if (isBold(value) !== isBold(attributes.get("fo:font-weight") ?? "normal")) return true
+
+				break
+			case "style:font-style-asian":
+				if ((value === "normal") !== ((attributes.get("fo:font-style") ?? "normal") === "normal")) return true
+
+				break
+			case "style:font-size-asian":
+				if (parseLength(value) !== parseLength(attributes.get("fo:font-size"))) return true
+
+				break
+			default:
+				return true
+		}
+	}
+
+	if (position !== undefined) {
+		// A raise with its own size, other than a superscript's or subscript's (58%): WordprocessingML sizes those itself.
+		const [raise = "0%", size] = position.trim().split(/\s+/u)
+
+		if (size !== undefined && (parsePercent(raise) ?? 0) !== 0 && (parsePercent(size) ?? 100) !== 100) return true
+		if (size !== undefined && (raise === "super" || raise === "sub") && parsePercent(size) !== 58) return true
+	}
+
+	return false
 }
 
 // A border value "width style color" (§20.183 fo:border, XSL) as a WordprocessingML border.

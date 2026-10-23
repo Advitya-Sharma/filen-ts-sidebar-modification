@@ -19,7 +19,7 @@ const KINDS: ReadonlyMap<string, SpreadsheetFileKind> = new Map([
 	// it is (edited, and saved as it was written).
 	["xlt", "xls"],
 	["tab", "tsv"],
-	// OpenDocument spreadsheets and their templates: view-only (no writer of the format yet).
+	// OpenDocument spreadsheets and their templates: edited, and saved as the OpenDocument files they are.
 	["ods", "ods"],
 	["ots", "ods"]
 ])
@@ -30,20 +30,19 @@ export function spreadsheetFileKind(extension: string): SpreadsheetFileKind | nu
 	return KINDS.get(extension) ?? null
 }
 
-// A legacy .xls (or .xlt) and an OpenDocument spreadsheet open to be looked at only; every other kind saves in the
-// format its extension names.
+// A legacy .xls (or .xlt) opens to be looked at only; every other kind saves in the format its extension names.
 export function isEditableSpreadsheetExtension(extension: string): boolean {
 	const kind = spreadsheetFileKind(extension)
 
-	return kind !== null && kind !== "xls" && kind !== "ods"
+	return kind !== null && kind !== "xls"
 }
 
 // The format a name promises, for telling whether a rename changed it: its kind, except that .xlsx, .xlsm
-// (macros kept) and the templates open alike but are different files.
+// (macros kept), .ods and the templates open alike but are different files.
 export function spreadsheetSaveFormat(extension: string): string | null {
 	const kind = spreadsheetFileKind(extension)
 
-	return kind === "xlsx" ? extension : kind
+	return kind === "xlsx" || kind === "ods" ? extension : kind
 }
 
 const ZIP = [0x50, 0x4b, 0x03, 0x04]

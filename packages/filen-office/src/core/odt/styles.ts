@@ -46,6 +46,8 @@ const NO_REASONS: readonly OdtLossyReason[] = []
 
 export interface StyleOptions {
 	readonly tabsRelativeToIndent: boolean
+	// Paragraph styles kept mapped up to this many (all by default); past it, mapped again when asked for.
+	readonly keepAtMost?: number
 }
 
 const NO_ATTRIBUTES: Attributes = new Map()
@@ -132,6 +134,8 @@ export class StyleMapper {
 				fontSize
 			}
 		}
+
+		if (this.paragraphCache.size >= (this.options.keepAtMost ?? Infinity)) this.paragraphCache.clear()
 
 		this.paragraphCache.set(key, style)
 

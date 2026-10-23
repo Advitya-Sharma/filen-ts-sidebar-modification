@@ -8,11 +8,12 @@ export { rtfBlockProof } from "../../core/rtf/write/proof"
 // RTF documents where the document engine runs (web: the docx worker): the file read once into the WordprocessingML
 // package the viewer and the editor open (never on the page's thread: a large file takes tens of ms), held there
 // with its source; Gate 1 proved there when the document is edited, and each save written back as RTF there
-// (rtfWorker.ts). The page holds no copy of the package unless the editor takes one.
+// (rtfWorker.ts). The page holds no copy of the package unless the editor takes one. OpenDocument text documents are
+// held, proved and written the same way (the pool's `odt`), saved as ODT.
 
 export type { RtfLockedBlock }
 
-// Why a save was refused (RtfWriteRefusal's reason and message), carried over the worker boundary.
+// Why a save was refused (the RTF or ODT writer's reason and message), carried over the worker boundary.
 export class DocxRtfRefusal extends Error {
 	readonly reason: string
 

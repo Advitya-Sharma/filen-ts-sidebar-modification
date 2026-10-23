@@ -14,7 +14,7 @@ import { encodeUtf8 } from "../xml/index"
 import { PART_NAMESPACES, PartWriter, twips, XML_DECLARATION } from "./wml"
 
 // Master pages as sections. A paragraph or table whose style names a master page starts a new page in that
-// page style (Part 3 §19.509 style:master-page-name): a section break, with style:page-number restarting
+// page style (Part 3 §19.501 style:master-page-name): a section break, with style:page-number restarting
 // the page count. A master page whose style:next-style-name names another is a first page: the section
 // gets a title page (w:titlePg) with the first master's headers, and the next master's for the rest.
 
@@ -93,6 +93,8 @@ export class Pages {
 	readonly parts = new Map<string, Uint8Array>()
 	readonly contentTypes: string[] = []
 	readonly origins: OdtOrigin[] = []
+	// Each section's master page and page layout, in the order their sectPr come.
+	readonly sections: { readonly master: string; readonly layout: string | undefined; readonly start: string }[] = []
 	readonly evenAndOdd: boolean
 	private nextPart = 1
 
@@ -101,6 +103,18 @@ export class Pages {
 		this.evenAndOdd = [...translator.sheet.masterPages.values()].some(master =>
 			master.regions.some(region => region.display && (region.kind === "header-left" || region.kind === "footer-left"))
 		)
+	}
+
+	// The master page the next block is on when nothing but it is set (no columns open); undefined otherwise.
+	plainMaster(): string | undefined {
+		if (this.state === undefined) return this.firstMaster
+
+		return this.state.columns === undefined && this.saved.length === 0 ? this.state.master : undefined
+	}
+
+	// Continues on master page `master` (a run of blocks translated on its own, from where the document had it).
+	resume(master: string): void {
+		this.state = { master, columns: undefined, type: "nextPage", pageStart: undefined }
 	}
 
 	private get firstMaster(): string {
@@ -212,6 +226,8 @@ export class Pages {
 		const follower = this.follower(master)
 		const main = follower ?? master
 		const layout = this.layout(main)
+
+		this.sections.push({ master: main?.name ?? state.master, layout: layout?.name, start: state.master })
 		const properties = layout?.properties
 
 		if (follower !== undefined) {
@@ -254,6 +270,17 @@ export class Pages {
 		const right = length(properties, "fo:margin-right", A4.margin)
 		const headerExtent = this.displays(main, "header") ? this.extent(layout?.header, "fo:margin-bottom") : 0
 		const footerExtent = this.displays(main, "footer") ? this.extent(layout?.footer, "fo:margin-top") : 0
+		// A header only the first page shows sits where the first page's layout puts it (w:header, w:footer: the edge
+		// of the page to the header, ECMA-376 Part 1 §17.6.11).
+		const firstLayout = follower === undefined ? undefined : this.layout(master)
+		const headerAt =
+			!this.displays(main, "header") && firstLayout !== undefined && this.displays(master, "header")
+				? length(firstLayout.properties, "fo:margin-top", top)
+				: top
+		const footerAt =
+			!this.displays(main, "footer") && firstLayout !== undefined && this.displays(master, "footer")
+				? length(firstLayout.properties, "fo:margin-bottom", bottom)
+				: bottom
 		const orientation = properties?.attributes.get("style:print-orientation") === "landscape" ? ' w:orient="landscape"' : ""
 		const borders = ["top", "left", "bottom", "right"]
 			.map(side => border(side, properties?.attributes.get(`fo:border-${side}`), properties?.attributes.get(`fo:padding-${side}`)))
@@ -265,7 +292,7 @@ export class Pages {
 				? `<w:pgNumType${format === undefined || format === "decimal" ? "" : ` w:fmt="${format}"`}${state.pageStart === undefined ? "" : ` w:start="${state.pageStart}"`}/>`
 				: ""
 
-		return `<w:sectPr>${references}<w:type w:val="${state.type}"/><w:pgSz w:w="${twips(pageWidth)}" w:h="${twips(pageHeight)}"${orientation}/><w:pgMar w:top="${twips(top + headerExtent)}" w:right="${twips(right)}" w:bottom="${twips(bottom + footerExtent)}" w:left="${twips(left)}" w:header="${twips(top)}" w:footer="${twips(bottom)}" w:gutter="0"/>${borders === "" || !/w:val="(?!nil)/.test(borders) ? "" : `<w:pgBorders w:offsetFrom="text">${borders}</w:pgBorders>`}${numbering}${this.columnsXml(columns)}${titlePage ? "<w:titlePg/>" : ""}</w:sectPr>`
+		return `<w:sectPr>${references}<w:type w:val="${state.type}"/><w:pgSz w:w="${twips(pageWidth)}" w:h="${twips(pageHeight)}"${orientation}/><w:pgMar w:top="${twips(top + headerExtent)}" w:right="${twips(right)}" w:bottom="${twips(bottom + footerExtent)}" w:left="${twips(left)}" w:header="${twips(headerAt)}" w:footer="${twips(footerAt)}" w:gutter="0"/>${borders === "" || !/w:val="(?!nil)/.test(borders) ? "" : `<w:pgBorders w:offsetFrom="text">${borders}</w:pgBorders>`}${numbering}${this.columnsXml(columns)}${titlePage ? "<w:titlePg/>" : ""}</w:sectPr>`
 	}
 
 	private columnsXml(columns: OdfElement | undefined): string {

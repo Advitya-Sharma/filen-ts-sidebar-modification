@@ -1004,6 +1004,35 @@ export function engineLacks(formula: string, unknownName?: (name: string) => boo
 	return false
 }
 
+// The functions a formula calls, as written but for _xlfn./_xlws. (a LAMBDA parameter's call left out).
+export function calledFunctions(formula: string): string[] {
+	const out: string[] = []
+	let index = 0
+
+	while (index < formula.length) {
+		const code = formula.charCodeAt(index)
+
+		if (code === QUOTE || code === APOSTROPHE) {
+			index = skipQuoted(formula, index, code)
+		} else if (code === BRACKET_OPEN) {
+			index = skipBracket(formula, index)
+		} else if (code === HASH) {
+			index = skipError(formula, index)
+		} else if (isWordChar(code)) {
+			const end = readWord(formula, index)
+			const word = formula.slice(index, end)
+
+			if (formula.charCodeAt(end) === 40 && !isParameter(word)) out.push(bareFunctionName(word))
+
+			index = end
+		} else {
+			index++
+		}
+	}
+
+	return out
+}
+
 // A defined name's formula when it is one absolute cell of a sheet of this workbook ('Data'!$A$1, or the range
 // 'Data'!$A$1:$A$1), as the engine reads it; null for anything else. Such a name stands for its cell wherever it is used.
 export function absoluteCell(formula: string): string | null {

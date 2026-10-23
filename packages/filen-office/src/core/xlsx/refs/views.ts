@@ -1,4 +1,4 @@
-import type { XlsxColRange, XlsxSheetView } from "../model/types"
+import type { XlsxColRange, XlsxRowRun, XlsxSheetView } from "../model/types"
 import { axisLimit, inBand, shiftAxisSpan, shiftIndex, shiftRange, straddles, type AxisShift } from "./axis"
 import { refuse } from "./catalogue"
 import { shiftRanges } from "./sqref"
@@ -150,4 +150,33 @@ export function shiftView(view: XlsxSheetView, shift: AxisShift): XlsxSheetView 
 		return view
 
 	return { ...view, activeRow, activeCol, selection, frozen, topRow, leftCol }
+}
+
+// Runs of rows after rows inserted or deleted, as ranges move; the same runs for an edit of columns or within a band
+// (whole rows do not move).
+export function shiftRowRuns(runs: readonly XlsxRowRun[], shift: AxisShift): readonly XlsxRowRun[] {
+	if (shift.axis !== "rows" || shift.band !== undefined || runs.length === 0) return runs
+
+	const out: XlsxRowRun[] = []
+
+	for (const run of runs) {
+		const span = shiftAxisSpan(run.first, run.last, shift)
+
+		if (span === null) continue
+
+		const last = out[out.length - 1]
+
+		if (
+			last !== undefined &&
+			last.last + 1 === span[0] &&
+			last.flags === run.flags &&
+			(last.heightPt === run.heightPt || (Number.isNaN(last.heightPt) && Number.isNaN(run.heightPt)))
+		) {
+			out[out.length - 1] = { ...last, last: span[1] }
+		} else {
+			out.push({ first: span[0], last: span[1], flags: run.flags, heightPt: run.heightPt })
+		}
+	}
+
+	return out
 }

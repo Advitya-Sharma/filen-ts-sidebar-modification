@@ -7,7 +7,7 @@ import { heldSource, type DocxDocumentUnlock, type DocxProtectedOpen, type DocxP
 import { docxProtectionServer, type DocxProtectVerdict, type DocxUnlockAnswer } from "./protectionWorker"
 import { DocxRtfRefusal, type DocxRtf, type DocxRtfEdits, type DocxRtfOpen, type RtfLockedBlock } from "./rtf"
 import { RtfAborted } from "../../core/rtf/write/writer"
-import { docxRtfServer, type DocxRtfOpened, type DocxRtfWritten } from "./rtfWorker"
+import { docxRtfServer, type DocxRtfOpened, type DocxRtfWritten, type DocxSourceFormat } from "./rtfWorker"
 import type { DocxEvent, DocxFindOptions, DocxSessionApi, DocxLocation, DocxMedia, DocxObjectData, DocxOpenOptions } from "./protocol"
 
 // Two ways to run the engine behind the same DocxSessionApi: in a worker (web), talking over a small
@@ -71,12 +71,12 @@ type Method = "objects" | "media" | "locate" | "find" | "annotations"
 // once (with the password to open an encrypted one, kept for that request only), the package it becomes is held,
 // "take" copies it and engine sessions open it with `doc`. An RTF document (rtf.ts)
 // likewise: "rtf" hands the worker a copy of the file, read into its package and held with it; "rtfProve" and "rtfWrite"
-// are calls on it.
+// are calls on it. An OpenDocument text document goes the same way ("rtf" with its format).
 type ToWorker =
 	| { readonly t: "open"; readonly s: number; readonly size: number; readonly options: DocxOpenOptions; readonly doc?: number }
 	| { readonly t: "protect"; readonly s: number; readonly size: number }
 	| { readonly t: "convert"; readonly s: number; readonly size: number; readonly password?: string }
-	| { readonly t: "rtf"; readonly s: number; readonly bytes: Uint8Array }
+	| { readonly t: "rtf"; readonly s: number; readonly bytes: Uint8Array; readonly format?: DocxSourceFormat }
 	| { readonly t: "rtfProve"; readonly s: number; readonly id: number }
 	| { readonly t: "rtfWrite"; readonly s: number; readonly id: number; readonly edits: DocxRtfEdits }
 	| { readonly t: "unlock"; readonly s: number; readonly id: number; readonly password: string }
@@ -280,7 +280,7 @@ export function serveDocxWorker(scope: DocxWorkerScope, services: (options: Docx
 			case "rtf": {
 				if (protectReads.has(id) || sessions.has(id) || !(message.bytes instanceof Uint8Array)) return
 
-				rtf.open(id, message.bytes).then(
+				rtf.open(id, message.bytes, message.format === "odt" ? "odt" : "rtf").then(
 					answer => post({ t: "rtfOpened", s: id, answer }),
 					(error: unknown) => {
 						rtf.close(id)
@@ -485,6 +485,8 @@ export interface DocxWorkerPool {
 	readonly legacy: DocxLegacy
 	// RTF documents, read, held, proved and written in the worker (rtf.ts).
 	readonly rtf: DocxRtf
+	// OpenDocument text documents, the same way (the ODT writer).
+	readonly odt: DocxRtf
 	// Starts the worker ahead of the first document (its script is parsed while the file downloads).
 	prewarm(): void
 	dispose(): void
@@ -678,7 +680,10 @@ export function docxWorkerPool(create: () => DocxWorkerLike, idleMs = 60_000): D
 		open: (source, options = {}) => openConverted(connect, () => nextSession++, scheduleIdle, openSession, source, options)
 	}
 	const rtf: DocxRtf = {
-		open: (bytes, options = {}) => openRtf(connect, () => nextSession++, scheduleIdle, openSession, bytes, options)
+		open: (bytes, options = {}) => openRtf(connect, () => nextSession++, scheduleIdle, openSession, bytes, options, "rtf")
+	}
+	const odt: DocxRtf = {
+		open: (bytes, options = {}) => openRtf(connect, () => nextSession++, scheduleIdle, openSession, bytes, options, "odt")
 	}
 
 	return {
@@ -686,6 +691,7 @@ export function docxWorkerPool(create: () => DocxWorkerLike, idleMs = 60_000): D
 		protection,
 		legacy,
 		rtf,
+		odt,
 		prewarm() {
 			scheduleIdle(connect())
 		},
@@ -1067,15 +1073,16 @@ function openConverted(
 		)
 }
 
-// The page's side of an RTF document read in the worker: the file handed over once, then the held package (opened by
-// engine sessions, copied by take()), proofs and writes as calls on it, until released.
+// The page's side of an RTF (or OpenDocument text) document read in the worker: the file handed over once, then the
+// held package (opened by engine sessions, copied by take()), proofs and writes as calls on it, until released.
 function openRtf(
 	connect: () => Connection,
 	nextId: () => number,
 	scheduleIdle: (connection: Connection) => void,
 	openSession: (source: ByteSource, listener: DocxListener, options: DocxOpenOptions, doc?: number) => DocxSessionApi,
 	bytes: Uint8Array,
-	options: DocxProtectionOptions
+	options: DocxProtectionOptions,
+	format: DocxSourceFormat
 ): Promise<DocxRtfOpen> {
 	if (options.signal?.aborted === true) return Promise.resolve({ kind: "aborted" })
 
@@ -1121,7 +1128,7 @@ function openRtf(
 		if (closed) return
 
 		if (message.t === "rtfOpened") {
-			if (message.answer === undefined) opening?.reject(new Error(message.error ?? "The RTF document could not be read"))
+			if (message.answer === undefined) opening?.reject(new Error(message.error ?? "The document could not be read"))
 			else opening?.resolve(message.answer)
 
 			opening = undefined
@@ -1146,7 +1153,7 @@ function openRtf(
 
 	return new Promise<DocxRtfOpened>((resolve, reject) => {
 		opening = { resolve, reject }
-		worker.post({ t: "rtf", s: id, bytes: copy } satisfies ToWorker, [copy.buffer])
+		worker.post({ t: "rtf", s: id, bytes: copy, ...(format === "odt" ? { format } : {}) } satisfies ToWorker, [copy.buffer])
 	})
 		.finally(() => options.signal?.removeEventListener?.("abort", abort))
 		.then(

@@ -1124,7 +1124,10 @@ export function PreviewOverlay({
 									}}
 									onFavoriteToggled={handleMenuFavoriteToggled}
 									onRestored={handleMenuRestored}
-									hiddenActionIds={previewMenuHiddenActionIds(hiddenMenuActionIds)}
+									hiddenActionIds={previewMenuHiddenActionIds(
+										hiddenMenuActionIds,
+										previewDownloadable(downloadable, variant)
+									)}
 									compressParentNaming={compressParentNaming}
 								/>
 							</DropdownMenu>

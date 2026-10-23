@@ -2,7 +2,7 @@ import { SHEET_MAX_COLS, SHEET_MAX_ROWS, type SheetAxis, type SheetId } from "..
 import { defineSheetFeature, type SheetChangeSink, type SheetHandled } from "../../sheet/registry"
 import { defaultColWidth } from "../../sheet/sizes/sizes"
 import type { SheetStore } from "../model/store"
-import { ColFlag, RowFlag, type XlsxColRange } from "../model/types"
+import { ColFlag, RowFlag, type XlsxColRange, type XlsxRowRun } from "../model/types"
 import type { XlsxDocument } from "./document"
 import { CellLog, NO_ROW, rowState, type RowState } from "./history"
 
@@ -24,6 +24,49 @@ declare module "../../sheet/protocol" {
 
 // Rows one command hides: each one becomes a row record of its own.
 export const MAX_HIDDEN_ROWS = 65_536
+
+// Runs of rows with HIDDEN cleared over `spans`: a run is split where a span starts or ends inside it, and kept
+// whole outside them. The same array when no run was hidden there.
+export function shownRuns(
+	runs: readonly XlsxRowRun[],
+	spans: readonly { readonly start: number; readonly end: number }[]
+): readonly XlsxRowRun[] {
+	let changed = false
+	const out: XlsxRowRun[] = []
+
+	for (const run of runs) {
+		if ((run.flags & RowFlag.HIDDEN) === 0 || !spans.some(span => span.start <= run.last && span.end >= run.first)) {
+			out.push(run)
+
+			continue
+		}
+
+		changed = true
+
+		const cuts = new Set<number>([run.first, run.last + 1])
+
+		for (const span of spans) {
+			if (span.start > run.first && span.start <= run.last) cuts.add(span.start)
+			if (span.end + 1 > run.first && span.end + 1 <= run.last) cuts.add(span.end + 1)
+		}
+
+		const bounds = [...cuts].sort((a, b) => a - b)
+
+		for (let k = 0; k + 1 < bounds.length; k++) {
+			const first = bounds[k] ?? 0
+			const last = (bounds[k + 1] ?? 0) - 1
+			const shown = spans.some(span => span.start <= first && span.end >= last)
+			const flags = shown ? run.flags & ~RowFlag.HIDDEN : run.flags
+
+			// A run left with nothing of its own (shown, default height) is no run.
+			if ((flags & ~RowFlag.CUSTOM_HEIGHT) === 0 && Number.isNaN(run.heightPt)) continue
+
+			out.push({ ...run, first, last, flags })
+		}
+	}
+
+	return changed ? out : runs
+}
 
 // The columns `first`..`last` with HIDDEN set or cleared, ranges split where that changes and joined back with
 // nothing: a gap gets a range of `width`.
@@ -150,6 +193,10 @@ export async function hideAxis(
 		afters.push({ ...state, flags, height: flat ? Number.NaN : state.height })
 	}
 
+	// Runs of rows the store does not hold (an OpenDocument sheet's): shown again as runs, never one record a row.
+	const runsBefore = model.rowRuns
+	let runsAfter = runsBefore
+
 	if (hidden) {
 		let count = 0
 
@@ -167,13 +214,19 @@ export async function hideAxis(
 				if (spans.some(span => row >= span.start && row <= span.end)) visit(row)
 			}
 		}
+
+		if (runsBefore !== undefined) runsAfter = shownRuns(runsBefore, spans)
 	}
 
-	if (rows.length === 0) return null
+	if (rows.length === 0 && runsAfter === runsBefore) return null
+
+	const setRuns = (runs: typeof runsBefore): void => {
+		if (runs !== runsBefore || runsAfter !== runsBefore) model.rowRuns = runs ?? []
+	}
 
 	await document.engineBeforeRows(changes)
 
-	const set = (states: readonly RowState[], sink: SheetChangeSink): void => {
+	const set = (states: readonly RowState[], sink: SheetChangeSink, runs: typeof runsBefore): void => {
 		store.setRows(
 			rows.map((row, index) => {
 				const state = states[index] ?? NO_ROW
@@ -181,11 +234,12 @@ export async function hideAxis(
 				return { row, height: state.height, style: state.style, flags: state.flags }
 			})
 		)
+		setRuns(runs)
 		document.workbook.changes.sheetRows(sheet)
 		sink.layout(sheet)
 	}
 
-	set(afters, changes)
+	set(afters, changes, runsAfter)
 
 	// SUBTOTAL and AGGREGATE leave hidden rows out.
 	const results = new CellLog()
@@ -196,11 +250,11 @@ export async function hideAxis(
 	return {
 		bytes: rows.length * 48 + results.bytes,
 		undo: sink => {
-			set(befores, sink)
+			set(befores, sink, runsBefore)
 			document.rowsRestored(results, "before", sink)
 		},
 		redo: sink => {
-			set(afters, sink)
+			set(afters, sink, runsAfter)
 			document.rowsRestored(results, "after", sink)
 		}
 	}

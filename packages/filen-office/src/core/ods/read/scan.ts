@@ -69,7 +69,8 @@ const ELEMENT_NAMES = [
 	["text", "ruby-text"],
 	["calcext", "conditional-formats"],
 	["loext", "table-protection"],
-	["table", "table-protection"]
+	["table", "table-protection"],
+	["draw", "frame"]
 ] as const satisfies readonly (readonly [Prefix, string])[]
 
 const ATTRIBUTE_NAMES = [
@@ -93,6 +94,7 @@ const ATTRIBUTE_NAMES = [
 	["table", "display"],
 	["table", "structure-protected"],
 	["table", "is-sub-table"],
+	["table", "end-cell-address"],
 	["office", "value-type"],
 	["office", "value"],
 	["office", "date-value"],
@@ -298,6 +300,8 @@ const MAX_CAPTURE = 64 * 1024 * 1024
 const MAX_DEPTH = 4096
 const MAX_ATTRIBUTES = 256
 
+const INDEXES = new WeakMap<ReadonlyMap<string, string>, readonly [NameIndex, NameIndex]>()
+
 export class OdsScanner {
 	// Set by the handler: character data is passed to text() while it is.
 	wantText = false
@@ -351,8 +355,17 @@ export class OdsScanner {
 		this.handler = handler
 		this.prefixes = new Map(prefixes)
 		this.skip = skip
-		this.elements = new NameIndex(ELEMENT_NAMES, this.prefixes, true)
-		this.attributeNames = new NameIndex(ATTRIBUTE_NAMES, this.prefixes, false)
+
+		// Scanners over the same declarations (a writer reads row after row back) share their name indexes.
+		let indexes = INDEXES.get(prefixes)
+
+		if (indexes === undefined) {
+			indexes = [new NameIndex(ELEMENT_NAMES, this.prefixes, true), new NameIndex(ATTRIBUTE_NAMES, this.prefixes, false)]
+			INDEXES.set(prefixes, indexes)
+		}
+
+		this.elements = indexes[0]
+		this.attributeNames = indexes[1]
 		this.paragraphNames()
 	}
 

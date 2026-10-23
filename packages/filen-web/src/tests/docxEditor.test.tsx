@@ -216,6 +216,85 @@ describe("DocxEditView", () => {
 		expect(editor.sessions.some(session => session.snapshot().dirty)).toBe(true)
 	})
 
+	it("stays editable while a save writes: what is typed meanwhile is kept, unsaved, for the next save", async () => {
+		hooks.settings = { authorName: "Ann", autosave: false, loaded: true }
+
+		const { editor, onDirtyChange, saveRef } = await openEditor()
+		const actual = await vi.importActual<typeof import("@/features/preview/lib/docxEditing")>("@/features/preview/lib/docxEditing")
+		let release: () => void = () => undefined
+		const held = new Promise<void>(resolve => {
+			release = resolve
+		})
+
+		// The writer reads the document as it starts, then takes its time.
+		hooks.write = async (host, options) => {
+			const written = actual.writeDocx(host, options)
+
+			await held
+
+			return written
+		}
+		typeAtStart(editor, "First ")
+
+		const save = saveRef.current
+
+		if (save === null) {
+			throw new Error("no save source")
+		}
+
+		const saving = save()
+
+		await waitFor(() => {
+			expect(hooks.hosts.length).toBeGreaterThan(0)
+		})
+		// Neither the editing area nor the toolbar goes read-only.
+		expect(screen.getByRole("textbox", { name: "report.docx" }).getAttribute("aria-readonly")).toBeNull()
+		expect(screen.getByRole("button", { name: "Bold" }).hasAttribute("disabled")).toBe(false)
+		typeAtStart(editor, "During ")
+		release()
+
+		const snapshot = await act(() => saving)
+
+		expect(await readBack(snapshot.bytes)).toContain("First ")
+		expect(await readBack(snapshot.bytes)).not.toContain("During ")
+		act(() => {
+			snapshot.commit()
+		})
+		expect(editor.sessions.some(session => session.snapshot().dirty)).toBe(true)
+		await waitFor(() => {
+			expect(onDirtyChange).toHaveBeenLastCalledWith(true)
+		})
+
+		hooks.write = undefined
+
+		const next = await act(() => save())
+
+		expect(await readBack(next.bytes)).toContain("During First ")
+	})
+
+	it("keeps the track switch unsaved when it is turned after the save read the document", async () => {
+		hooks.settings = { authorName: "Ann", autosave: false, loaded: true }
+
+		const { editor, saveRef } = await openEditor()
+		const save = saveRef.current
+
+		if (save === null) {
+			throw new Error("no save source")
+		}
+
+		typeAtStart(editor, "Edited ")
+
+		const snapshot = await act(() => save())
+
+		// Turned on while the file uploads: the file holds it off.
+		await act(() => editor.execute({ type: "review.track", on: true }))
+		act(() => {
+			snapshot.commit()
+		})
+		expect(editor.snapshot().review.tracking).toBe(true)
+		expect(editor.sessions.some(session => session.snapshot().dirty)).toBe(true)
+	})
+
 	it("formats through the toolbar and keeps the commands' state in step", async () => {
 		const { editor } = await openEditor()
 

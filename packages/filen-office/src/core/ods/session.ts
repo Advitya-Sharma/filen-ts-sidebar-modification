@@ -7,6 +7,7 @@ import type { SheetEvent, SheetSessionOptions } from "../sheet/protocol"
 import { sheetRegistry, type SheetFeature } from "../sheet/registry"
 import { RenderStyleTable, SheetSession, sessionFeature } from "../sheet/session"
 import { openOds } from "./open"
+import { odsWriter } from "./write/writer"
 
 // An OpenDocument spreadsheet as a session of the xlsx document: every sheet read at open (content.xml is one
 // stream), view-only. An encrypted package is refused as core/odf refuses it.
@@ -35,7 +36,8 @@ export async function openOdsSession(
 	const styles = new RenderStyleTable()
 	const document = new XlsxDocument(opened.workbook, styles, {
 		kind: options.kind,
-		...(options.settings !== undefined && { settings: options.settings })
+		...(options.settings !== undefined && { settings: options.settings }),
+		writer: odsWriter(opened.workbook, inflate)
 	})
 	const session = new SheetSession(
 		document,

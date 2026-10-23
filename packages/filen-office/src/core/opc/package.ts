@@ -98,6 +98,11 @@ export class OpcPackage {
 		return this.archive
 	}
 
+	// Every part's entry, in the archive's order (a package held in memory has entries too).
+	entries(): IterableIterator<ZipEntry> {
+		return this.parts.values()
+	}
+
 	// The zip entry of a part, matched as OPC compares names (case-insensitive, percent-decoded).
 	entry(partName: string): ZipEntry | undefined {
 		return this.parts.get(partKey(partName))

@@ -781,6 +781,9 @@ export interface SheetLocale {
 	// Between function arguments as typed ("," or ";").
 	readonly argument: string
 	readonly dateOrder: "mdy" | "dmy" | "ymd"
+	// The currency symbols text reads as a number with ("$4.00"+1, "5 €"*1). Without them, "$" where "." is the
+	// decimal point.
+	readonly currencies?: readonly string[]
 }
 
 export interface SheetSessionSettings {

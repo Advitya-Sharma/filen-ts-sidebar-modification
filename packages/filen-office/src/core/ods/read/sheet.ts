@@ -138,6 +138,9 @@ export interface OdsBuiltSheet {
 	readonly rowBreaks: readonly number[]
 	readonly colBreaks: readonly number[]
 	readonly recalculate: ReadonlySet<number>
+	// The rows the table's row elements give (their repeats), and the columns its column elements declare.
+	readonly rowCount: number
+	readonly columnCount: number
 }
 
 // Text as the store keeps it (ST_Xstring escapes), at no cost for text that needs none: control characters XML
@@ -161,10 +164,12 @@ interface PropertyRun {
 	repeat: number
 	readonly heightPt: number
 	readonly flags: number
+	// The rows' style gave no height (the default's taken).
+	readonly implicit: boolean
 }
 
 // LibreOffice's default row height (0.178 in) and column width (2.258 cm), for a file whose styles give none.
-const DEFAULT_ROW_PT = 12.8
+export const DEFAULT_ROW_PT = 12.8
 const DEFAULT_COL_PX = 85
 
 export class OdsSheetBuilder {
@@ -427,7 +432,9 @@ export class OdsSheetBuilder {
 
 		if (style.pageBreak && first > 0) this.rowBreaks.push(first)
 
-		const height = style.heightPt
+		// A row whose style gives no height has LibreOffice's default (ODF 1.3 Part 3 §17.17.2 leaves it to the
+		// application), whatever the commonest height of the others.
+		const height = Number.isNaN(style.heightPt) ? DEFAULT_ROW_PT : style.heightPt
 		const flags =
 			(input.hidden ? RowFlag.HIDDEN : 0) |
 			(style.custom ? RowFlag.CUSTOM_HEIGHT : 0) |
@@ -439,7 +446,7 @@ export class OdsSheetBuilder {
 		if (this.runs.pending) this.runs.endRows(first, first + repeat)
 
 		if (this.cellsInRow === 0) {
-			if (flags !== 0 || !Number.isNaN(height)) this.propertyRun(first, repeat, height, flags)
+			if (flags !== 0 || !Number.isNaN(height)) this.propertyRun(first, repeat, height, flags, Number.isNaN(style.heightPt))
 
 			return
 		}
@@ -453,7 +460,7 @@ export class OdsSheetBuilder {
 		if (rows < repeat) {
 			this.issues.add("repeat", this.name, "row copies", repeat - rows)
 			// The rest keeps the row's properties.
-			this.propertyRun(first + rows, repeat - rows, height, flags)
+			this.propertyRun(first + rows, repeat - rows, height, flags, Number.isNaN(style.heightPt))
 		}
 
 		for (let r = 0; r < rows; r++) {
@@ -469,13 +476,14 @@ export class OdsSheetBuilder {
 
 	// Rows of properties alone, joined to the run before when alike and next to it. Each run is charged to the
 	// workbook's cell limit as one: it is one entry, however many rows it covers.
-	private propertyRun(row: number, repeat: number, heightPt: number, flags: number): void {
+	private propertyRun(row: number, repeat: number, heightPt: number, flags: number, implicit: boolean): void {
 		const last = this.propertyRuns[this.propertyRuns.length - 1]
 
 		if (
 			last !== undefined &&
 			last.row + last.repeat === row &&
 			last.flags === flags &&
+			last.implicit === implicit &&
 			(last.heightPt === heightPt || (Number.isNaN(last.heightPt) && Number.isNaN(heightPt)))
 		) {
 			last.repeat += repeat
@@ -485,7 +493,7 @@ export class OdsSheetBuilder {
 
 		if (--this.budget.left < 0) throw new OdsReadError("tooLarge", "The workbook holds more cells than the limit")
 
-		this.propertyRuns.push({ row, repeat, heightPt, flags })
+		this.propertyRuns.push({ row, repeat, heightPt, flags, implicit })
 	}
 
 	private place(cell: OdsCellInput, row: number): void {
@@ -607,7 +615,13 @@ export class OdsSheetBuilder {
 			// A user-set height (customHeight) changes nothing shown where it equals the default.
 			if ((run.flags & ~RowFlag.CUSTOM_HEIGHT) === 0 && (Number.isNaN(run.heightPt) || run.heightPt === defaultHeight)) continue
 
-			rowRuns.push({ first: run.row, last: run.row + run.repeat - 1, flags: run.flags, heightPt: run.heightPt })
+			// No height of their own, the default's: none.
+			rowRuns.push({
+				first: run.row,
+				last: run.row + run.repeat - 1,
+				flags: run.flags,
+				heightPt: run.implicit && run.heightPt === defaultHeight ? Number.NaN : run.heightPt
+			})
 		}
 
 		const store = new SheetStore(this.builder.finish(), this.strings, this.formulas)
@@ -668,7 +682,9 @@ export class OdsSheetBuilder {
 			headerCols: this.headerCols,
 			rowBreaks: this.rowBreaks,
 			colBreaks: this.colBreaks,
-			recalculate: this.recalculate
+			recalculate: this.recalculate,
+			rowCount: this.row,
+			columnCount: this.nextColumn
 		}
 	}
 }

@@ -105,3 +105,17 @@ export function numFmtLocaleFor(lcid: number): NumFmtLocale | undefined {
 export function lcidTag(lcid: number): string {
 	return `[$-${lcid.toString(16).toUpperCase()}]`
 }
+
+// The language and country of a locale id, as a data style names them (number:language, number:country); undefined
+// for one not listed.
+export function localeOfLcid(lcid: number): { readonly language: string; readonly country: string } | undefined {
+	for (const [tag, facts] of LOCALES) {
+		if (facts.lcid !== (lcid & 0xffff)) continue
+
+		const [language = "", country = ""] = tag.split("-")
+
+		return { language, country }
+	}
+
+	return undefined
+}

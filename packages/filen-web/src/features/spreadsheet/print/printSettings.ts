@@ -5,8 +5,13 @@ import { isTextSheetKind } from "@/features/spreadsheet/lib/sheetHosts"
 import type { PrintSheetSettings } from "@/features/spreadsheet/print/print.logic"
 
 // A sheet's print settings: the file's for a workbook (a chartsheet's with its chart), the defaults for a text file
-// (which holds none); null for a sheet that does not print (a dialog or macro sheet).
-export async function sheetSettings(model: SheetGridModel, kind: SheetFileKind, sheet: SheetSummary): Promise<PrintSheetSettings | null> {
+// (which holds none); null for a sheet that does not print (a dialog or macro sheet). `model`: the grid's (its
+// layouts already loaded are reused), or the session alone where no grid shows it.
+export async function sheetSettings(
+	model: Pick<SheetGridModel, "layout" | "session">,
+	kind: SheetFileKind,
+	sheet: SheetSummary
+): Promise<PrintSheetSettings | null> {
 	if (isTextSheetKind(kind)) {
 		const layout = model.layout(sheet.id) ?? (await model.session.layout(sheet.id))
 		const used =

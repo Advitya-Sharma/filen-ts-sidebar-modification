@@ -14,7 +14,7 @@ export interface LoadedStyles {
 export async function readStyleSheet(odf: OdfPackage, slicing?: Slicing): Promise<LoadedStyles> {
 	const styles = await odf.xml("styles.xml", slicing)
 	const entry = odf.archive.get("content.xml")
-	const prologue = entry === undefined ? undefined : readContentPrologue(await readUntilBody(odf.archive, entry))
+	const prologue = entry === undefined ? undefined : readContentPrologue(await readUntilBody(odf.archive, entry, slicing))
 
 	return { sheet: new OdfStyleSheet(styles, prologue), prologue }
 }

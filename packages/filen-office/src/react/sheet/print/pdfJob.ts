@@ -24,13 +24,14 @@ export function sheetPdfJob(assets: PdfFontAssets, slicing: Slicing = WORKER_SLI
 	return {
 		[SHEET_PDF_JOB]: async (args, context): Promise<SheetPdfJobResult> => {
 			let last = 0
-			const { request, password } = args as SheetPdfJobArgs
+			const { request, password, deterministic } = args as SheetPdfJobArgs
 			const result = await exportSheetPdf(request, {
 				session: context.session,
 				assets,
 				slicing,
 				signal: context.signal,
 				...(password !== undefined && { password }),
+				...(deterministic === true && { deterministic: true }),
 				progress: (done, total) => {
 					const now = slicing.now()
 
@@ -45,7 +46,7 @@ export function sheetPdfJob(assets: PdfFontAssets, slicing: Slicing = WORKER_SLI
 
 			return {
 				ok: true,
-				blob: new Blob(result.output.parts as BlobPart[], { type: "application/pdf" }),
+				blob: new Blob(result.output.parts as ConstructorParameters<typeof Blob>[0], { type: "application/pdf" }),
 				pages: result.pages,
 				missingImages: result.missingImages,
 				missingGlyphs: result.missingGlyphs,

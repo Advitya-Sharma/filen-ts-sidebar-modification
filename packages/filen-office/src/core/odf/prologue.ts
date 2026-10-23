@@ -1,9 +1,10 @@
-import { Namespaces, encodeUtf8, parseXml, XmlError, type XmlDocument } from "../xml/index"
+import type { Slicing } from "../slicing"
+import { Namespaces, encodeUtf8, parseXml, parseXmlSliced, XmlError, type XmlDocument } from "../xml/index"
 import { OdfNs } from "./namespaces"
 import { elementName } from "./tree"
 
 // What comes before office:body in content.xml: office:scripts, office:font-face-decls and
-// office:automatic-styles (Part 3 §3.1.3). Style resolution needs only this, so the body (the bulk of the
+// office:automatic-styles (Part 3 §3.15.3). Style resolution needs only this, so the body (the bulk of the
 // stream) is not parsed into a tree here: readers stream it from `bodyStart`.
 export interface ContentPrologue {
 	// The prologue as a document of its own: the root's start tag, everything up to office:body, the root's end tag.
@@ -180,6 +181,25 @@ export function readContentPrologue(bytes: Uint8Array): ContentPrologue {
 		return { document, namespaces, root, bodyStart: located.bodyStart, sliced: true }
 	} catch (error) {
 		// The match sat inside a comment or CDATA section of the prologue: parse the whole stream.
+		if (error instanceof XmlError) return fullPrologue(bytes)
+
+		throw error
+	}
+}
+
+// readContentPrologue with the parse in slices (a long prologue holds thousands of automatic styles).
+export async function readContentPrologueSliced(bytes: Uint8Array, slicing: Slicing): Promise<ContentPrologue> {
+	const located = locateBody(bytes)
+
+	if (located === undefined) return fullPrologue(bytes)
+
+	try {
+		const document = await parseXmlSliced(closeRoot(bytes, located.rootStart, located.bodyStart), slicing)
+		const namespaces = new Namespaces(document)
+		const root = document.documentElement()
+
+		return { document, namespaces, root, bodyStart: located.bodyStart, sliced: true }
+	} catch (error) {
 		if (error instanceof XmlError) return fullPrologue(bytes)
 
 		throw error

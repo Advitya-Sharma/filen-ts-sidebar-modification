@@ -157,6 +157,10 @@ export class OdsCellStyles {
 	private readonly rows = new Map<string, OdsRowStyle>()
 	private readonly tables = new Map<string, OdsTableStyle>()
 	private readonly textFonts = new Map<string, XlsxFont>()
+	// The first style name the body gave each cell format, and the data style each number format came from: what
+	// the writer names them by again.
+	private readonly names = new Map<number, string>()
+	private readonly dataStyles = new Map<number, string>()
 	// The cell style a cell without one takes: "Default" when the file has it (LibreOffice writes it).
 	private readonly fallback: string | undefined
 	// The default cell style's style:decimal-places (§20.258): how many decimals General shows, -1 for no limit.
@@ -203,9 +207,30 @@ export class OdsCellStyles {
 
 			index = this.table.appendXf(this.build(resolved))
 			this.xfs.set(key, index)
+
+			if (name !== undefined && !this.names.has(index)) this.names.set(index, name)
 		}
 
 		return index
+	}
+
+	// The style name a cell format was read from (the first, when several give it), undefined for none.
+	sourceName(xf: number): string | undefined {
+		return this.names.get(xf)
+	}
+
+	// The data style a number format was read from, undefined for none.
+	dataStyleName(numFmtId: number): string | undefined {
+		return this.dataStyles.get(numFmtId)
+	}
+
+	get styleSheet(): OdfStyleSheet {
+		return this.sheet
+	}
+
+	// The common style a cell without one takes ("Default"), undefined when the file has none.
+	get defaultStyle(): string | undefined {
+		return this.fallback
 	}
 
 	// A cell format for a dxf-like look: the cell style's font, fill and border alone (conditional formats).
@@ -350,7 +375,13 @@ export class OdsCellStyles {
 
 		for (const held of converted.held) this.issues.add("dataStyle", undefined, held)
 
-		return converted.code === "General" ? 0 : this.table.numFmtId(converted.code)
+		if (converted.code === "General") return 0
+
+		const id = this.table.numFmtId(converted.code)
+
+		if (converted.held.length === 0 && !this.dataStyles.has(id)) this.dataStyles.set(id, name)
+
+		return id
 	}
 
 	private build(style: ResolvedOdfStyle): XlsxXf {

@@ -32,6 +32,7 @@ export type BulkActionDescriptor = ActionDescriptor<
 	| "restoreSelected"
 	| "delete"
 	| "download"
+	| "downloadAs"
 	| "disableLink",
 	BulkDialogActionKind
 >
@@ -107,6 +108,12 @@ export function driveBulkActions(variant: DriveVariant, flags: DriveSelectionFla
 		// (isBulkDownloadEnabled below) — this only controls presence, mirroring itemMenu.logic.ts's
 		// downloadDescriptor.
 		descriptors.push({ id: "download", ...ACTION_DEFS.download, run: "direct" })
+
+		// A submenu of the formats every selected file exports to, as Extract is offered only when every one is an
+		// archive; exported one after another under one toast.
+		if (flags.everyDownloadAs) {
+			descriptors.push({ id: "downloadAs", ...ACTION_DEFS.downloadAs, run: "direct" })
+		}
 	}
 
 	// Trash is NOT gated by undecryptable (pure uuid, same as restore/delete above) and is never
@@ -157,6 +164,7 @@ const OFFLINE_GATED_BULK_IDS: ReadonlySet<BulkActionDescriptor["id"]> = new Set(
 	"restoreSelected",
 	"delete",
 	"download",
+	"downloadAs",
 	"disableLink"
 ])
 
@@ -184,6 +192,11 @@ export function runBulkDescriptor(
 ): void {
 	if (descriptor.id === "download") {
 		void startDownloads(items)
+		return
+	}
+
+	// A submenu on every surface (downloadAsSubmenu.tsx): its entries start the export.
+	if (descriptor.id === "downloadAs") {
 		return
 	}
 

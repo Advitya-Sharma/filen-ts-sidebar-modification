@@ -1,5 +1,4 @@
 import { useDeferredValue, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react"
-import { flushSync } from "react-dom"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { bytesSource } from "@filen/office/core/opc"
@@ -123,8 +122,8 @@ import { useLatestRef } from "@/lib/useLatestRef"
 // selection, and the overlay's save path (`saveRef`, idle autosave). Opened only for a file the user may
 // edit in their drive; everything else is shown by the viewer in its worker.
 
-// The overlay's handle on the edited document: writes it (read-only meanwhile) and returns the file with
-// the call that marks what it holds saved once stored.
+// The overlay's handle on the edited document: writes it (still editable meanwhile: the writer reads it as it
+// starts) and returns the file with the call that marks what it holds saved once stored.
 // `auto`: an idle autosave (a refusal holds autosave and is not shown as a failure; only an explicit save
 // looks for the blocks to write as last saved).
 export type DocxSaveSource = (options?: { auto?: boolean }) => Promise<DocxSaveSnapshot>
@@ -238,7 +237,6 @@ interface SaveSourceOptions {
 	editor: PagedEditor
 	// Opened with its password: what is handed to the upload must be sealed.
 	encrypted: boolean
-	setWriting: (writing: boolean) => void
 	// The file was stored: what it holds is saved.
 	onSaved: () => void
 	// The writer refused (an autosave, or an explicit save nothing resolved): autosave holds until a save.
@@ -268,29 +266,17 @@ function documentText(editor: PagedEditor): string {
 	return parts.join("\n\n")
 }
 
-// Writes the document for the overlay's save: read-only while the writer reads it (synchronously, so no edit
-// lands halfway through). Blocks the writer refuses on an explicit save are written as last saved and taken
-// back once the file is stored (the user is told then); a refusal nothing resolves keeps the document open
-// and unsaved, with its text to copy. An autosave never searches: a refusal holds autosave, quietly.
-function docxSaveSource({
-	host,
-	editor,
-	encrypted,
-	setWriting,
-	onSaved,
-	onRefused,
-	onLocked,
-	onSearch
-}: SaveSourceOptions): DocxSaveSource {
+// Writes the document for the overlay's save. The writer reads the documents once, as it starts, so the editor
+// stays editable: what is typed meanwhile is not in this file, stays unsaved, and goes with the next save. Blocks
+// the writer refuses on an explicit save are written as last saved and taken back once the file is stored (the
+// user is told then); a refusal nothing resolves keeps the document open and unsaved, with its text to copy. An
+// autosave never searches: a refusal holds autosave, quietly.
+function docxSaveSource({ host, editor, encrypted, onSaved, onRefused, onLocked, onSearch }: SaveSourceOptions): DocxSaveSource {
 	return async (options = {}) => {
 		const auto = options.auto === true
 
 		// Set from writeDocx's callback.
 		const search = { started: false }
-
-		flushSync(() => {
-			setWriting(true)
-		})
 
 		try {
 			const written = await writeDocx(host, {
@@ -342,8 +328,6 @@ function docxSaveSource({
 			if (search.started) {
 				onSearch(false)
 			}
-
-			setWriting(false)
 		}
 	}
 }
@@ -484,16 +468,6 @@ export function DocxEditView({
 	const [wrapper, setWrapper] = useState<HTMLDivElement | null>(null)
 	const rootRef = useRef<HTMLDivElement | null>(null)
 	const { width } = useElementSize(wrapper)
-	const [writing, setWriting] = useState(false)
-	// The editing area had focus as a save started: read-only while it writes drops it, so it is given back.
-	const refocusRef = useRef(false)
-	const [setWritingKeepingFocus] = useState(() => (next: boolean): void => {
-		if (next) {
-			refocusRef.current = rootRef.current?.contains(window.document.activeElement) === true
-		}
-
-		setWriting(next)
-	})
 	// The writer refused the document: autosave waits for an explicit save (which can resolve it).
 	const [autosaveHeld, setAutosaveHeld] = useState(false)
 	const [zoomMode, setZoomMode] = useState<"fit" | number>("fit")
@@ -532,7 +506,7 @@ export function DocxEditView({
 	const [writeUnlocked, setWriteUnlocked] = useState(false)
 	// Write protection keeps the document view-only until then (a password gates the editor itself too).
 	const writeProtection = writable && !writeUnlocked ? current?.writeProtection : undefined
-	const readOnly = writing || !writable || writeProtection !== undefined
+	const readOnly = !writable || writeProtection !== undefined
 	const pageWidth = document.pages[0]?.width ?? document.info?.pageWidth ?? 816
 	const sessions = editor?.sessions
 	const dirty = sessions?.some(session => session.snapshot().dirty) === true
@@ -669,23 +643,6 @@ export function DocxEditView({
 		onDirtyChange(dirty)
 	}, [dirty, onDirtyChange])
 
-	// Only where focus fell out of the editor to the page or the overlay around it, not where the user moved it.
-	useEffect(() => {
-		const root = rootRef.current
-
-		if (writing || !refocusRef.current || root === null) {
-			return
-		}
-
-		refocusRef.current = false
-
-		const active = window.document.activeElement
-
-		if (active === null || (!root.contains(active) && active.contains(root))) {
-			handleRef.current?.focus()
-		}
-	}, [writing])
-
 	// The overlay saves through this while the document can be saved.
 	useEffect(() => {
 		if (editor === undefined || !writable) {
@@ -696,7 +653,6 @@ export function DocxEditView({
 			host: opened.editing,
 			editor,
 			encrypted: encryption !== undefined,
-			setWriting: setWritingKeepingFocus,
 			onSaved: () => {
 				setAutosaveHeld(false)
 			},
@@ -729,7 +685,7 @@ export function DocxEditView({
 		return () => {
 			saveRef.current = null
 		}
-	}, [editor, writable, opened, saveRef, t, encryption, setWritingKeepingFocus])
+	}, [editor, writable, opened, saveRef, t, encryption])
 
 	// Idle autosave: a pause this long after the last edit saves once (selection moves are not edits), once
 	// the user's setting is known (never on the default before the file was read). A document a save started

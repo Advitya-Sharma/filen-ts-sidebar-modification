@@ -37,6 +37,7 @@ import {
 	type SheetAbortSignal,
 	type SheetAxisLayout,
 	type SheetCell,
+	type SheetCommand,
 	type SheetEncryption,
 	type SheetFileKind,
 	type SheetFileSharing,
@@ -51,6 +52,7 @@ import {
 	type SheetSaveResult,
 	type SheetSessionSettings,
 	type SheetSummary,
+	type SheetViewOnlyReason,
 	type SheetWorkbookProtection,
 	type SheetWritability
 } from "../../sheet/protocol"
@@ -59,6 +61,7 @@ import type { AxisEdit } from "../../sheet/model/edits"
 import { DEFAULT_DIGIT_PX, colWidthToPx, defaultColPx, rowHeightToPx } from "../../sheet/sizes/sizes"
 import {
 	absoluteCell,
+	calledFunctions,
 	engineArrayFormula,
 	engineCellFormula,
 	engineFormula,
@@ -98,6 +101,7 @@ import { withRuns, type AxisRun } from "../../sheet/axisRuns"
 import { XlsxReadError, decodeXstring, parseRange, type XlsxWorkbook } from "../read/index"
 import { saveXlsx, seedImpliedStyles } from "../write/index"
 import type { XlsxClip } from "./clipboard"
+import { readEntry } from "./cells"
 import type { ChangeLog } from "../model/changes"
 import { RefRefused } from "../refs/catalogue"
 import { refState } from "../refs/state"
@@ -127,6 +131,27 @@ export interface XlsxDocumentOptions {
 	readonly settings?: SheetSessionSettings
 	readonly writeUnlocked?: boolean
 	readonly encryption?: SheetEncryption
+	// The writer of the format a workbook not read from SpreadsheetML was (an OpenDocument spreadsheet).
+	readonly writer?: XlsxFormatWriter
+}
+
+// A writer of the format the workbook was read from, in place of the SpreadsheetML writer.
+export interface XlsxFormatWriter {
+	// Why the workbook can never be written (known at open), null when it can.
+	readonly viewOnly: SheetViewOnlyReason | null
+	// Why an edit just made cannot be written (SheetSessionDocument.checkEdit), null when it can.
+	// Before each edit runs (SheetSessionDocument.beginEdit).
+	begin?(document: XlsxDocument, command: SheetCommand): void
+	// The edit checked last was refused and undone (SheetSessionDocument.editUndone).
+	refused?(document: XlsxDocument): void
+	check?(document: XlsxDocument, touched: ReadonlyMap<SheetId, readonly SheetRange[]>, command: SheetCommand): SheetRefusal | null
+	save(
+		document: XlsxDocument,
+		options: { readonly slicing?: Slicing; readonly signal?: SheetAbortSignal; readonly untouched: boolean }
+	): Promise<
+		| { readonly ok: true; readonly bytes: Uint8Array; readonly changedParts: readonly string[] }
+		| { readonly ok: false; readonly message: string }
+	>
 }
 
 const LEGACY_KINDS: ReadonlySet<SheetFileKind> = new Set(["xls", "xlt"])
@@ -441,6 +466,7 @@ export class XlsxDocument {
 	readonly styles: SheetStyles
 	readonly encryption: SheetEncryption | undefined
 	readonly writeUnlocked: boolean
+	readonly writer: XlsxFormatWriter | undefined
 	private ownSettings: SheetSessionSettings
 	// Formula results the session shows that the file keeps none for, by sheet and cell (cellKeyOf).
 	readonly shownResults = new Map<SheetId, Map<number, ShownResult>>()
@@ -474,6 +500,7 @@ export class XlsxDocument {
 		this.dateBase = (workbook.strict || workbook.format === "ods") && !workbook.date1904 ? ISO_1900 : workbook.date1904
 		this.encryption = options.encryption
 		this.writeUnlocked = options.writeUnlocked === true
+		this.writer = options.writer
 		this.ownSettings = options.settings ?? {}
 		this.interner = interner
 		// A workbook without a styles part implies Excel's defaults: they come first, before any format an edit adds.
@@ -486,8 +513,8 @@ export class XlsxDocument {
 		return this.ownSettings
 	}
 
-	// New settings: the locale's separators show in every tile built from now on. Text dates in formulas read in the
-	// locale's order: an engine built for another is dropped (built again when next needed).
+	// New settings: the locale's separators show in every tile built from now on. Text dates and numbers in formulas
+	// read in the locale: an engine built for another is dropped (built again when next needed).
 	set settings(settings: SheetSessionSettings) {
 		const before = this.ownSettings.locale
 		const after = settings.locale
@@ -495,7 +522,13 @@ export class XlsxDocument {
 		this.ownSettings = settings
 		this.numFmtOptions = this.formatOptions()
 
-		if (before?.dateOrder !== after?.dateOrder || before?.decimal !== after?.decimal) this.dropEngine()
+		if (
+			before?.dateOrder !== after?.dateOrder ||
+			before?.decimal !== after?.decimal ||
+			before?.group !== after?.group ||
+			before?.currencies?.join("\u0000") !== after?.currencies?.join("\u0000")
+		)
+			this.dropEngine()
 	}
 
 	// The app's locale gives the separators; month and day names stay en-US until the app injects a NumFmtLocale.
@@ -812,8 +845,12 @@ export class XlsxDocument {
 	// What is known at open: legacy formats, signatures and the author's sharing settings make it view-only; anything
 	// else waits for the proof.
 	initialWritability(): SheetWritability {
-		// An OpenDocument spreadsheet is shown, not written: it saves through no writer of its format yet.
-		if (LEGACY_KINDS.has(this.kind) || this.workbook.format === "ods") return { state: "viewOnly", reason: "legacyFormat" }
+		// An OpenDocument spreadsheet saves through its own writer, without which it is shown only.
+		if (LEGACY_KINDS.has(this.kind) || (this.workbook.format === "ods" && this.writer === undefined))
+			return { state: "viewOnly", reason: "legacyFormat" }
+		const refusal = this.writer?.viewOnly ?? null
+
+		if (refusal !== null) return { state: "viewOnly", reason: refusal }
 		if (this.workbook.signatures > 0) return { state: "viewOnly", reason: "signed" }
 
 		const sharing = this.fileSharing()
@@ -1033,6 +1070,12 @@ export class XlsxDocument {
 			shown.input = format.isDate ? typedSerial(value, this.dateBase) : localizedInput(String(value), this.ownSettings.locale)
 	}
 
+	// Text an OpenDocument cell holds that typed again would be no text (a number, a date, a formula): its entry
+	// starts with an apostrophe, as LibreOffice shows it (an ODF cell has no quote-prefix flag to carry it).
+	private quotedText(format: NumFmt, text: string): boolean {
+		return this.workbook.format === "ods" && text !== "" && readEntry(text, format.isText, this.dateBase).type !== "text"
+	}
+
 	private showText(format: NumFmt, text: string, formula: boolean, quoted: boolean, rich = false): void {
 		const shown = this.shown
 
@@ -1115,7 +1158,7 @@ export class XlsxDocument {
 					format,
 					this.stringOf(model, kind, value),
 					hasFormula,
-					!hasFormula && this.styles.quotePrefix(xf),
+					!hasFormula && (this.styles.quotePrefix(xf) || this.quotedText(format, this.stringOf(model, kind, value))),
 					kind === CellKind.SHARED_STRING && this.workbook.sharedStrings.isRich(value)
 				)
 				break
@@ -2556,7 +2599,8 @@ export class XlsxDocument {
 			if (this.holdsResult(sheet, result)) continue
 
 			const kind = store.kind(slot)
-			const unsupported = FormulaEngine.unsupported(result.value) && !(spilling && result.value === "#SPILL!")
+			const unsupported =
+				FormulaEngine.unsupported(result.value) && !(spilling && result.value === "#SPILL!") && !this.shownFailure(result)
 
 			if (unsupported && result.value !== CYCLE && kind !== CellKind.EMPTY) continue
 
@@ -2608,6 +2652,43 @@ export class XlsxDocument {
 		}
 
 		for (const [sheet, writes] of spilled) this.writeCells(sheet, writes)
+	}
+
+	// A #NAME? that comes from another cell's formula which shows it (holding no result of the file's in its place),
+	// over a name the workbook does not define or a function Excel does not have: that formula's own error, which a
+	// formula reading it gives too, as Excel does; not the engine failing (a name kept from it, a function it lacks).
+	private shownFailure(result: RecalculatedCell): boolean {
+		if (result.value !== "#NAME?" || result.root === undefined) return false
+
+		const sheet = this.engineSheets[result.root.sheet]
+		const model = sheet === undefined ? null : this.model(sheet)
+
+		if (model === null) return false
+
+		const store = model.store as SheetStore
+		const slot = store.locate(result.root.row, result.root.col)
+		const formula = slot < 0 ? -1 : store.formula(slot)
+
+		if (formula < 0 || store.kind(slot) !== CellKind.EMPTY) return false
+
+		// What Excel would not know either: the name the engine reports, else a function the formula calls.
+		const unknown = result.unknown
+
+		if (unknown !== undefined) return unknown.kind === "function" ? !this.excelCalls(unknown.name) : !this.definesName(unknown.name)
+
+		return calledFunctions(store.formulas.formula(formula).text).some(name => !this.excelCalls(name))
+	}
+
+	// A function Excel calculates: one of its worksheet functions, an add-in's or macro's (_xludf.), or a LAMBDA the
+	// workbook names.
+	private excelCalls(name: string): boolean {
+		return sheetFunction(name) !== undefined || /^_xludf\./iu.test(name) || this.definesName(name)
+	}
+
+	private definesName(name: string): boolean {
+		const wanted = name.toUpperCase()
+
+		return this.workbook.definedNames.some(defined => defined.name.toUpperCase() === wanted)
 	}
 
 	// Whether the cell's formula is a dynamic array of its own cell.
@@ -2704,9 +2785,35 @@ export class XlsxDocument {
 	async save(options: {
 		readonly slicing?: Slicing
 		readonly signal?: SheetAbortSignal
+		readonly untouched?: boolean
 	}): Promise<Exclude<SheetSaveResult, { ok: true }> | { ok: true; bytes: Uint8Array; changedParts: readonly string[] }> {
 		if (this.closed) return { ok: false, reason: "closed", message: "The session is closed" }
-		if (this.workbook.format === "ods") return { ok: false, reason: "gate", message: "An OpenDocument spreadsheet is not saved here" }
+
+		if (this.workbook.format === "ods") {
+			const writer = this.writer
+
+			if (writer === undefined) return { ok: false, reason: "gate", message: "An OpenDocument spreadsheet is not saved here" }
+
+			const signal = options.signal
+			// A close meanwhile ends the save at its next slice, as an abort does.
+			const stop = { aborted: () => this.closed || signal?.aborted === true }
+			const saved = await writer.save(this, {
+				untouched: options.untouched === true,
+				...(options.slicing !== undefined && { slicing: options.slicing }),
+				signal: {
+					get aborted(): boolean {
+						return stop.aborted()
+					}
+				}
+			})
+
+			if (this.closed) return { ok: false, reason: "closed", message: "The session is closed" }
+			if (options.signal?.aborted === true) return { ok: false, reason: "aborted", message: "The save was aborted" }
+
+			return saved.ok
+				? { ok: true, bytes: saved.bytes, changedParts: saved.changedParts }
+				: { ok: false, reason: "gate", message: saved.message }
+		}
 
 		const encryption = this.encryption
 
@@ -2805,6 +2912,19 @@ export class XlsxDocument {
 		const view = this.cellView(cell.sheet, cell.row, cell.col)
 
 		return { input: view.input ?? view.text, numFmt: this.styles.numFmtCode(view.xf), style: view.style, flags: view.flags }
+	}
+
+	// Whether the format's writer can hold what an edit just did (an OpenDocument spreadsheet's).
+	beginEdit(command: SheetCommand): void {
+		this.writer?.begin?.(this, command)
+	}
+
+	editUndone(): void {
+		this.writer?.refused?.(this)
+	}
+
+	checkEdit(touched: ReadonlyMap<SheetId, readonly SheetRange[]>, command: SheetCommand): SheetRefusal | null {
+		return this.writer?.check?.(this, touched, command) ?? null
 	}
 
 	// What only edits and saving need goes: the engine.

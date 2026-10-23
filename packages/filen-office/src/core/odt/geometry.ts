@@ -1,4 +1,4 @@
-// Custom shape geometry (ODF 1.3 Part 3 §19.140–§19.148 draw:enhanced-path, §19.171 draw:formula, §9.5
+// Custom shape geometry (ODF 1.3 Part 3 §19.145 draw:enhanced-path, §19.171 draw:formula, §10.6.2
 // draw:enhanced-geometry) and SVG path data (svg:d, draw:points) evaluated to absolute moves, lines, cubic
 // curves and closes, then written as DrawingML custGeom (ECMA-376 Part 1 §20.1.9.8). Every arc becomes cubic
 // Béziers of at most a quarter turn each, so no angle convention leaks into the output.

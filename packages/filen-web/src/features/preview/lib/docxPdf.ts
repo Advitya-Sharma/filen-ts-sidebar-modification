@@ -8,14 +8,16 @@ import {
 	exportDocxPdfInWorker,
 	type DocxPdfInput,
 	type DocxPdfLive,
-	type DocxPdfProgress
+	type DocxPdfProgress,
+	type DocxPdfResultData
 } from "@filen/office/dom/docx/pdfClient"
 import { pdfDownloadName, pdfErrorKey, pdfProgressText, pdfReportKey, pdfTitle } from "@/features/preview/lib/docxPdf.logic"
 import { DOCX_FONT_URLS, docxProtection } from "@/features/preview/lib/docxEngine"
+import { PDF_DETERMINISTIC } from "@/features/office/lib/pdfTestMode"
 import DocxPdfWorker from "@/features/preview/workers/docxPdf.worker.ts?worker"
 import { recoverIfNewerBuild } from "@/lib/appUpdate"
 import { downloadBlob } from "@/lib/downloadBlob"
-import { i18n } from "@/lib/i18n"
+import { i18n, type PreviewKey } from "@/lib/i18n"
 import { log } from "@/lib/log"
 
 // Download as PDF for a Word document: made in a worker of its own (ended with the export), with a toast that
@@ -25,7 +27,8 @@ import { log } from "@/lib/log"
 
 export type DocxPdfSource =
 	// The file as downloaded (not password-protected); an OpenDocument text file is laid out as the viewer does.
-	| { readonly kind: "file"; readonly bytes: Uint8Array; readonly format?: "docx" | "odt" }
+	// `owned`: a buffer nothing else holds, handed to the worker as it is (else a copy is).
+	| { readonly kind: "file"; readonly bytes: Uint8Array; readonly format?: "docx" | "odt"; readonly owned?: boolean }
 	// A password-protected file's decrypted package, unlocked for this export.
 	| { readonly kind: "unlocked"; readonly document: DocxUnlockedDocument }
 	// The editor's document, unsaved edits included, in the Final view; `markup`: the editor shows tracked changes or
@@ -71,8 +74,8 @@ function snapshotSlicing(): Slicing {
 async function inputOf(source: DocxPdfSource, fileName: string, signal: AbortSignal): Promise<DocxPdfInput> {
 	switch (source.kind) {
 		case "file":
-			// A copy of its own: the preview cache keeps the file's buffer.
-			return { kind: "bytes", bytes: source.bytes.slice(), fontUrls: DOCX_FONT_URLS }
+			// A copy of its own unless the caller's is: the preview cache keeps the file's buffer.
+			return { kind: "bytes", bytes: source.owned === true ? source.bytes : source.bytes.slice(), fontUrls: DOCX_FONT_URLS }
 		case "unlocked":
 			return { kind: "bytes", bytes: (await source.document.take({ signal })).bytes, fontUrls: DOCX_FONT_URLS }
 		case "editor": {
@@ -88,6 +91,56 @@ async function inputOf(source: DocxPdfSource, fileName: string, signal: AbortSig
 			}
 		}
 	}
+}
+
+export interface DocxPdfMake {
+	readonly signal: AbortSignal
+	readonly onProgress: (progress: DocxPdfProgress | null) => void
+	// Encrypts the PDF (a protected document's own password).
+	readonly password?: string | undefined
+}
+
+// Makes the PDF in a worker of its own (ended with the export); rejects with a DocxPdfExportError. An unlocked
+// source is released once done, whatever the outcome.
+export async function makeDocxPdf(source: DocxPdfSource, fileName: string, make: DocxPdfMake): Promise<DocxPdfResultData> {
+	try {
+		const input = await inputOf(source, fileName, make.signal)
+
+		return await exportDocxPdfInWorker(worker, {
+			input,
+			options: {
+				title: pdfTitle(fileName),
+				lang: i18n.language,
+				...(source.kind === "file" && source.format !== undefined ? { format: source.format } : {}),
+				...(make.password === undefined ? {} : { password: make.password }),
+				...(PDF_DETERMINISTIC ? { deterministic: true } : {})
+			},
+			signal: make.signal,
+			onProgress: make.onProgress
+		})
+	} finally {
+		if (source.kind === "unlocked") source.document.release()
+	}
+}
+
+// What a made PDF tells the user beside its download: what it had to leave out or simplify (once, logged).
+export function reportDocxPdf(result: DocxPdfResultData): PreviewKey | null {
+	const key = pdfReportKey(result.report)
+
+	if (key !== null) {
+		log.warn("docx", "pdf export simplified", { missing: result.report.missing, refused: result.report.refused })
+	}
+
+	return key
+}
+
+// What a failed export tells the user (logged when it is not one the user caused); null: their own Cancel.
+export function docxPdfFailure(error: unknown, aborted: boolean): PreviewKey | null {
+	const reason = error instanceof DocxPdfExportError ? error.reason : aborted ? "aborted" : "failed"
+
+	if (reason === "failed" || reason === "workerFailed" || reason === "openFailed") log.error("docx", "pdf export failed", error)
+
+	return pdfErrorKey(reason)
 }
 
 let exports = 0
@@ -121,44 +174,24 @@ export async function downloadDocxPdf(source: DocxPdfSource, fileName: string, p
 	show(null)
 
 	try {
-		const input = await inputOf(source, fileName, controller.signal)
-		const result = await exportDocxPdfInWorker(worker, {
-			input,
-			options: {
-				title: pdfTitle(fileName),
-				lang: i18n.language,
-				...(source.kind === "file" && source.format !== undefined ? { format: source.format } : {}),
-				...(password === undefined ? {} : { password })
-			},
-			signal: controller.signal,
-			onProgress: show
-		})
+		const result = await makeDocxPdf(source, fileName, { signal: controller.signal, onProgress: show, password })
 
 		downloadBlob(pdfDownloadName(fileName), result.blob as Blob)
 		toast.dismiss(id)
 
-		const reportKey = pdfReportKey(result.report)
+		const reportKey = reportDocxPdf(result)
 
 		if (reportKey !== null) {
-			log.warn("docx", "pdf export simplified", { missing: result.report.missing, refused: result.report.refused })
 			toast.warning(i18n.t(`preview:${reportKey}`))
 		}
 	} catch (error) {
-		const reason = error instanceof DocxPdfExportError ? error.reason : controller.signal.aborted ? "aborted" : "failed"
-		const key = pdfErrorKey(reason)
-
-		if (key === null) {
-			toast.dismiss(id)
-
-			return
-		}
-
-		if (reason === "failed" || reason === "workerFailed" || reason === "openFailed") log.error("docx", "pdf export failed", error)
+		const key = docxPdfFailure(error, controller.signal.aborted)
 
 		toast.dismiss(id)
-		toast.error(i18n.t(`preview:${key}`))
-	} finally {
-		if (source.kind === "unlocked") source.document.release()
+
+		if (key !== null) {
+			toast.error(i18n.t(`preview:${key}`))
+		}
 	}
 }
 

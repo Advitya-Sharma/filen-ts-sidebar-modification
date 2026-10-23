@@ -2,16 +2,64 @@ import { bytesSource } from "../../core/opc/index"
 import type { Slicing } from "../../core/slicing"
 import { isRtf } from "../../core/rtf/reader"
 import { RtfWriteRefusal } from "../../core/rtf/write/out"
-import { RtfAborted, openRtfSource, proveRtf, writeRtf, type RtfSource, type RtfTurns } from "../../core/rtf/write/writer"
+import { RtfAborted, openRtfSource, proveRtf, writeRtf, type RtfTurns } from "../../core/rtf/write/writer"
+import { openOdtSource } from "../../core/odt/write/source"
+import { OdtWriteRefusal, proveOdt, writeOdt } from "../../core/odt/write/writer"
 import type { DocxEngineServices } from "./engine"
 import { inThreadDocxHost, macrotaskYield } from "./host"
 import { heldSource } from "./protection"
 import type { DocxOpenOptions } from "./protocol"
 import { DocxRtfRefusal, type DocxRtf, type DocxRtfEdits, type RtfLockedBlock } from "./rtf"
 
-// The RTF documents held where the engine runs: each one's source, read once into its translation (the reader keeps
-// every block's source range), proved on request and written back on each save. A document's requests run in turn,
-// in slices: closing it ends the one running (RtfAborted) and those still queued.
+// The RTF and OpenDocument text documents held where the engine runs: each one's source, read once into its
+// translation (the reader keeps every block's source range), proved on request and written back on each save in its
+// own format. A document's requests run in turn, in slices: closing it ends the one running (RtfAborted) and those
+// still queued.
+
+// A document format the server reads and writes losslessly.
+export type DocxSourceFormat = "rtf" | "odt"
+
+// A held document as its format's reader and writer see it.
+interface SourceDocument {
+	// The translation's package.
+	readonly docx: Uint8Array
+	prove(turns: RtfTurns): Promise<readonly RtfLockedBlock[]>
+	// The file as edited; `bytes` is the source itself for an untouched one.
+	write(edits: DocxRtfEdits, turns: RtfTurns): Promise<Uint8Array>
+	readonly bytes: Uint8Array
+}
+
+async function openSource(format: DocxSourceFormat, bytes: Uint8Array, turns: RtfTurns): Promise<SourceDocument | undefined> {
+	if (format === "rtf") {
+		if (!isRtf(bytes)) return undefined
+
+		const source = await openRtfSource(bytes, turns)
+
+		return source === undefined
+			? undefined
+			: {
+					docx: source.read.docx,
+					bytes: source.bytes,
+					prove: async proofTurns => (await proveRtf(source, proofTurns)).locked.map(({ part, offset }) => ({ part, offset })),
+					write: async (edits, writeTurns) =>
+						(await writeRtf(source, { parts: new Map(edits.parts), removed: edits.removed }, { turns: writeTurns })).bytes
+				}
+	}
+
+	const opened = await openOdtSource(bytes, turns)
+
+	if (!opened.ok) return undefined
+
+	const source = opened.source
+
+	return {
+		docx: source.docx,
+		bytes: source.bytes,
+		prove: async proofTurns => (await proveOdt(source, proofTurns)).locked,
+		write: async (edits, writeTurns) =>
+			(await writeOdt(source, { parts: new Map(edits.parts), removed: edits.removed }, { turns: writeTurns })).bytes
+	}
+}
 
 export type DocxRtfOpened = { readonly ok: true; readonly size: number } | { readonly ok: false; readonly notRtf: boolean }
 
@@ -19,7 +67,7 @@ export type DocxRtfWritten =
 	{ readonly ok: true; readonly bytes: Uint8Array } | { readonly ok: false; readonly reason: string; readonly message: string }
 
 export interface DocxRtfServer {
-	open(id: number, bytes: Uint8Array): Promise<DocxRtfOpened>
+	open(id: number, bytes: Uint8Array, format?: DocxSourceFormat): Promise<DocxRtfOpened>
 	// The translation of an open document, for an engine session opened on it.
 	package(id: number): Uint8Array | undefined
 	take(id: number): Uint8Array
@@ -30,7 +78,7 @@ export interface DocxRtfServer {
 }
 
 interface Held {
-	source: RtfSource | undefined
+	source: SourceDocument | undefined
 	queue: Promise<unknown>
 	readonly turns: RtfTurns
 	closed: boolean
@@ -72,24 +120,24 @@ export function docxRtfServer(slicing?: Slicing): DocxRtfServer {
 
 		return run
 	}
-	const sourceOf = (document: Held): RtfSource => {
+	const sourceOf = (document: Held): SourceDocument => {
 		if (document.source === undefined) throw new Error("The document did not open")
 
 		return document.source
 	}
 
 	return {
-		async open(id, bytes) {
-			if (!isRtf(bytes)) return { ok: false, notRtf: true }
+		async open(id, bytes, format = "rtf") {
+			if (format === "rtf" && !isRtf(bytes)) return { ok: false, notRtf: true }
 
 			const opening = holding()
 
 			held.set(id, opening)
 
-			let source: RtfSource | undefined
+			let source: SourceDocument | undefined
 
 			try {
-				source = await openRtfSource(bytes, opening.turns)
+				source = await openSource(format, bytes, opening.turns)
 			} catch (error) {
 				if (!(error instanceof RtfAborted)) throw error
 			}
@@ -105,10 +153,10 @@ export function docxRtfServer(slicing?: Slicing): DocxRtfServer {
 
 			document.source = source
 
-			return { ok: true, size: source.read.docx.length }
+			return { ok: true, size: source.docx.length }
 		},
 		package(id) {
-			return held.get(id)?.source?.read.docx
+			return held.get(id)?.source?.docx
 		},
 		take(id) {
 			const document = held.get(id)
@@ -116,28 +164,23 @@ export function docxRtfServer(slicing?: Slicing): DocxRtfServer {
 			if (document === undefined) throw new Error("The document is not open")
 
 			// The reader's package is already deflated; the copy crosses to the page, the held one stays.
-			return sourceOf(document).read.docx.slice()
+			return sourceOf(document).docx.slice()
 		},
 		prove(id) {
-			return inTurn(id, async document =>
-				(await proveRtf(sourceOf(document), document.turns)).locked.map(({ part, offset }) => ({ part, offset }))
-			)
+			return inTurn(id, async document => sourceOf(document).prove(document.turns))
 		},
 		write(id, edits) {
 			return inTurn(id, async document => {
 				const source = sourceOf(document)
 
 				try {
-					const written = await writeRtf(
-						source,
-						{ parts: new Map(edits.parts), removed: edits.removed },
-						{ turns: document.turns }
-					)
+					const written = await source.write(edits, document.turns)
 
 					// An untouched file is the source itself: a copy goes, the source stays.
-					return { ok: true, bytes: written.bytes === source.bytes ? written.bytes.slice() : written.bytes }
+					return { ok: true, bytes: written === source.bytes ? written.slice() : written }
 				} catch (error) {
-					if (error instanceof RtfWriteRefusal) return { ok: false, reason: error.reason, message: error.message }
+					if (error instanceof RtfWriteRefusal || error instanceof OdtWriteRefusal)
+						return { ok: false, reason: error.reason, message: error.message }
 
 					throw error
 				}
@@ -156,7 +199,7 @@ export function docxRtfServer(slicing?: Slicing): DocxRtfServer {
 }
 
 // The same on the calling thread (tests, a host without workers).
-export function inThreadDocxRtf(services: (options: DocxOpenOptions) => DocxEngineServices): DocxRtf {
+export function inThreadDocxRtf(services: (options: DocxOpenOptions) => DocxEngineServices, format: DocxSourceFormat = "rtf"): DocxRtf {
 	const engines = inThreadDocxHost(services)
 
 	return {
@@ -164,7 +207,7 @@ export function inThreadDocxRtf(services: (options: DocxOpenOptions) => DocxEngi
 			if (options.signal?.aborted === true) return { kind: "aborted" }
 
 			const server = docxRtfServer()
-			const opened = await server.open(0, bytes.slice())
+			const opened = await server.open(0, bytes.slice(), format)
 
 			if (!opened.ok) return opened.notRtf ? { kind: "notRtf" } : { kind: "aborted" }
 

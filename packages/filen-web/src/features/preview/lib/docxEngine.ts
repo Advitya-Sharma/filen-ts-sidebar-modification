@@ -45,6 +45,9 @@ export const docxLegacy = pool.legacy
 // proves it for the editor (which takes a copy) and writes each save back as RTF.
 export const docxRtf = pool.rtf
 
+// OpenDocument text documents opened for editing: the same, saved as ODT (the source-preserving ODT writer).
+export const docxOdt = pool.odt
+
 // Starts the worker while a document still downloads, so its script is parsed by the time the bytes arrive.
 export function prewarmDocxWorker(): void {
 	pool.prewarm()

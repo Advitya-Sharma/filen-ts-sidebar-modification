@@ -1,6 +1,7 @@
 import { driveItemName } from "@filen/shared"
 import { isDirectoryItem, isSharedRootDriveItem, type DriveItem } from "@/features/drive/lib/item"
 import { isArchiveCandidateName } from "@/features/drive/lib/archiveFormats"
+import { downloadAsSource } from "@/features/drive/lib/downloadAs.logic"
 
 // Aggregated flags for a Drive multi-selection, computed in a single pass — the bulk-action bar's
 // only source of gating truth (directoryListing.tsx computes this once per render from
@@ -25,6 +26,9 @@ export interface DriveSelectionFlags {
 	// True iff every selected item is a file (shared arms included) whose name looks like an archive —
 	// the bulk Extract gate. The SDK decides the real format once a job runs.
 	everyArchive: boolean
+	// True iff every selected item is a document or spreadsheet the item menus export (downloadAsSource) — the bulk
+	// Download as gate.
+	everyDownloadAs: boolean
 }
 
 // Returned by reference (not rebuilt) for an empty selection, mirroring mobile's EMPTY_DRIVE_FLAGS —
@@ -36,7 +40,8 @@ const EMPTY_DRIVE_SELECTION_FLAGS: DriveSelectionFlags = Object.freeze({
 	everyDirectory: false,
 	includesUndecryptable: false,
 	everySharedRoot: false,
-	everyArchive: false
+	everyArchive: false,
+	everyDownloadAs: false
 })
 
 // The set a "select all" builds — every item except the undecryptable ones. Bulk actions gate
@@ -59,6 +64,7 @@ export function aggregateDriveSelectionFlags(items: readonly DriveItem[]): Drive
 	let includesUndecryptable = false
 	let everySharedRoot = true
 	let everyArchive = true
+	let everyDownloadAs = true
 
 	for (const item of items) {
 		if (item.data.favorited) {
@@ -85,7 +91,20 @@ export function aggregateDriveSelectionFlags(items: readonly DriveItem[]): Drive
 		if (everyArchive && (isDirectoryItem(item) || !isArchiveCandidateName(driveItemName(item)))) {
 			everyArchive = false
 		}
+
+		if (everyDownloadAs && downloadAsSource(item) === null) {
+			everyDownloadAs = false
+		}
 	}
 
-	return { count: items.length, includesFavorited, everyFile, everyDirectory, includesUndecryptable, everySharedRoot, everyArchive }
+	return {
+		count: items.length,
+		includesFavorited,
+		everyFile,
+		everyDirectory,
+		includesUndecryptable,
+		everySharedRoot,
+		everyArchive,
+		everyDownloadAs
+	}
 }

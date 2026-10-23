@@ -33,6 +33,7 @@ import {
 } from "@/features/drive/components/directoryTreeSubmenu"
 import { TransferSubmenu } from "@/features/drive/components/transferSubmenu"
 import { CompressSubmenu, ExtractSubmenu } from "@/features/drive/components/archiveSubmenus"
+import { DownloadAsSubmenu } from "@/features/drive/components/downloadAsSubmenu"
 import { DirectoryDestinationEntries, type DestinationActions } from "@/features/drive/components/destinationMenu"
 import { ContextMenuContent } from "@/components/ui/context-menu"
 import { DropdownMenuContent } from "@/components/ui/dropdown-menu"
@@ -229,6 +230,12 @@ function ItemMenuEntries({
 							onMoreOptions={() => {
 								onItemAction("compress", item)
 							}}
+						/>
+					) : descriptor.id === "downloadAs" ? (
+						<DownloadAsSubmenu
+							family={family}
+							disabled={descriptor.enabled === false}
+							items={[item]}
 						/>
 					) : descriptor.id === "extract" ? (
 						<ExtractSubmenu

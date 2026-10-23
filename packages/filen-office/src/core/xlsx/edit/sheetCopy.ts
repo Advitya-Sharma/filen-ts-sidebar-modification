@@ -14,7 +14,9 @@ import {
 	CellKind,
 	NO_SPAN,
 	RowFlag,
+	ROW_MARKS,
 	SLOT_BLOCK,
+	rowRunAt,
 	type XlsxDefinedName,
 	type XlsxSection,
 	type XlsxSheetEntry,
@@ -527,8 +529,7 @@ export async function duplicateSheet(
 
 		const flags = new Uint16Array(block.rowCount)
 
-		for (let i = 0; i < block.rowCount; i++)
-			flags[i] = ((block.rowFlags[i] ?? 0) & ~(RowFlag.DIRTY | RowFlag.NEW)) | RowFlag.DIRTY | RowFlag.NEW
+		for (let i = 0; i < block.rowCount; i++) flags[i] = ((block.rowFlags[i] ?? 0) & ~ROW_MARKS) | RowFlag.DIRTY | RowFlag.NEW
 
 		const origins = new Uint32Array(kinds.length)
 
@@ -638,6 +639,16 @@ export async function duplicateSheet(
 	copy.view = { ...model.view, tabSelected: false }
 	copy.protection = model.protection
 	copy.tabColor = model.tabColor
+
+	// An OpenDocument sheet's formats of empty cells and runs of rows are its copy's too (immutable, so shared).
+	const runs: XlsxSheetModel = copy
+
+	if (model.styleRuns !== undefined) runs.styleRuns = model.styleRuns
+
+	if (model.rowRuns !== undefined) {
+		runs.rowRuns = model.rowRuns
+		store.rowBase = row => rowRunAt(runs.rowRuns, row)
+	}
 
 	if (model.fitToPage !== undefined) {
 		const copied: XlsxSheetModel = copy

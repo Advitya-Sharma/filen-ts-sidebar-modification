@@ -21,7 +21,7 @@ const PERCENT = /^\s*(-?(?:\d+(?:\.\d*)?|\.\d+))%\s*$/
 const RELATIVE = /^\s*(\d+(?:\.\d*)?)\*\s*$/
 // §18.3.1 angle: a double with an optional unit (degrees when none).
 const ANGLE = /^\s*(-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*(deg|grad|rad)?\s*$/
-// §18.3.8 color.
+// §18.3.9 color.
 const COLOR = /^#([0-9a-fA-F]{6})$/
 
 // A length in points (1 pt = 1/72 in).
@@ -100,7 +100,7 @@ export function parseColor(value: string | undefined): number | undefined {
 	return match === null ? undefined : parseInt(match[1] ?? "0", 16)
 }
 
-// §18.3.2 boolean: exactly "true" or "false".
+// §18.3.3 boolean: exactly "true" or "false".
 export function parseBoolean(value: string | undefined): boolean | undefined {
 	return value === "true" ? true : value === "false" ? false : undefined
 }

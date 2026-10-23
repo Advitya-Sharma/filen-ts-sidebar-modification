@@ -5,7 +5,10 @@ import { checkSheetPassword, sheetJobs, sheetWorkerHost, type SheetWorkerLike } 
 import { sheetPasswordJob } from "../dom/sheet/jobs"
 import { workbookOpener } from "../dom/sheet/host"
 import { serveSheetWorker, type SheetWorkerJob } from "../dom/sheet/worker"
-import { SHEET_PDF_JOB, sheetPdf } from "../react/sheet/print/pdfClient"
+import { SHEET_PDF_JOB, sheetPdf, type SheetPdfRequest } from "../react/sheet/print/pdfClient"
+import { sheetPdfJob } from "../react/sheet/print/pdfJob"
+import { DEFAULT_PAGE_SETUP } from "../core/sheet/print/setup"
+import { nodeFontAssets } from "./sheetPdfFixtures"
 import { agileStreams, encryptedOfficeFile } from "./encryption/testing"
 import { BASIC, buildFixture, firstTile } from "./sheetSessionFixtures"
 
@@ -167,5 +170,37 @@ describe("sheet worker jobs", () => {
 			host.dispose()
 			close()
 		}
+	})
+	it("makes the same PDF twice when asked for a deterministic one, and a new file identifier otherwise", async () => {
+		const { host, close } = workerPair(sheetPdfJob(nodeFontAssets))
+		const result = await host.open(buildFixture(BASIC), { kind: "xlsx" }, () => undefined)
+
+		if (result.kind !== "opened") throw new Error(`expected an open, got ${result.kind}`)
+
+		const used = { startRow: 0, startCol: 0, endRow: 2, endCol: 1 }
+		const request: SheetPdfRequest = {
+			sheets: [{ sheet: result.info.activeSheet, name: "Sheet1", setup: DEFAULT_PAGE_SETUP, used, ranges: [used] }],
+			values: { file: "book.xlsx", path: "", date: "", time: "" },
+			title: "book",
+			lang: "en",
+			kind: "xlsx",
+			summaries: result.info.sheets,
+			date1904: false,
+			showFormulas: false
+		}
+		const bytes = async (deterministic: boolean): Promise<Uint8Array> => {
+			const pdf = await sheetPdf(result.session, request, { deterministic })
+
+			if (!pdf.ok) throw new Error(`expected a PDF, got ${pdf.reason}`)
+
+			return new Uint8Array(await pdf.blob.arrayBuffer())
+		}
+
+		const first = await bytes(true)
+
+		expect(await bytes(true)).toEqual(first)
+		expect(await bytes(false)).not.toEqual(first)
+		host.dispose()
+		close()
 	})
 })

@@ -1,3 +1,4 @@
+import type { Node } from "prosemirror-model"
 import { findUnsavableBlocks, type DocxEditorSession } from "@filen/office/core/docx/edit"
 import { DocxSaveError, prepareDocxSave, writerProof } from "@filen/office/core/docx/write"
 import { fetchFontAssets, windowServices, type DocxUnlockedDocument } from "@filen/office/dom/docx"
@@ -168,6 +169,7 @@ async function writeOnce(
 	started: number
 ): Promise<DocxSaveSnapshot> {
 	const written = write.map(session => session.state.doc)
+	const tracking = live[0]?.context.review.tracking
 	const result = await host.save(write)
 
 	return {
@@ -177,7 +179,7 @@ async function writeOnce(
 				const doc = written[index]
 
 				if (doc !== undefined) {
-					session.markSaved(doc)
+					session.markSaved(doc, tracking)
 				}
 			})
 		},
@@ -222,6 +224,10 @@ export async function writeDocx(host: DocxEditingHost, options: WriteDocxOptions
 		throw refused.error
 	}
 
+	// The editor stays editable while the file is written: the writer reads the documents once, as it starts, and
+	// the search below works on them as they were then (stand-ins), so typing meanwhile moves nothing it found.
+	const frozen = sessions.map(session => session.withTransaction(session.state.tr))
+
 	try {
 		return await writeOnce(host, sessions, sessions, started)
 	} catch (error) {
@@ -231,7 +237,7 @@ export async function writeDocx(host: DocxEditingHost, options: WriteDocxOptions
 
 		options.onSearch?.()
 
-		const found = await findUnsavableBlocks(sessions, trial => writerAccepts(host, trial), {
+		const found = await findUnsavableBlocks(frozen, trial => writerAccepts(host, trial), {
 			maxAttempts: SEARCH_RUNS,
 			budgetMs: SEARCH_BUDGET_MS,
 			refused: !ZIP_REASONS.has(error.reason),
@@ -244,13 +250,25 @@ export async function writeDocx(host: DocxEditingHost, options: WriteDocxOptions
 			throw error
 		}
 
-		const blocks = new Map(found.map(({ session, positions }) => [session, positions.map(pos => session.state.doc.nodeAt(pos))]))
+		// The blocks as the save found them, taken back in the live session wherever they still are.
+		const blocks = new Map<DocxEditorSession, (Node | null)[]>()
+
+		for (const { session, positions } of found) {
+			const live = sessions[frozen.indexOf(session)]
+
+			if (live !== undefined) {
+				blocks.set(
+					live,
+					positions.map(pos => session.state.doc.nodeAt(pos))
+				)
+			}
+		}
 		const text = found
 			.flatMap(({ session, positions }) =>
 				positions.map(pos => plainText(session.state.doc, pos, pos + (session.state.doc.nodeAt(pos)?.nodeSize ?? 0), () => ""))
 			)
 			.join("\n")
-		const write = sessions.map(session => {
+		const write = frozen.map(session => {
 			const positions = found.find(entry => entry.session === session)?.positions
 
 			return positions === undefined ? session : session.withReverted(positions)

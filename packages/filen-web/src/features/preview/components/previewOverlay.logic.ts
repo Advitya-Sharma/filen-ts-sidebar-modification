@@ -10,9 +10,14 @@ import type { DriveVariant } from "@/features/drive/lib/preferences"
 // button right next to the menu's own trigger (previewOverlay.tsx).
 export const PREVIEW_MENU_HIDDEN_ACTION_IDS = new Set<ItemActionId>(["download"])
 
-// Download, plus whatever the opening surface leaves out of its own menus (Photos: Move).
-export function previewMenuHiddenActionIds(extra?: ReadonlySet<ItemActionId>): ReadonlySet<ItemActionId> {
-	return extra === undefined ? PREVIEW_MENU_HIDDEN_ACTION_IDS : new Set([...PREVIEW_MENU_HIDDEN_ACTION_IDS, ...extra])
+// Download, plus whatever the opening surface leaves out of its own menus (Photos: Move), plus Download as where the
+// file may not be downloaded (previewDownloadable): it is a download too.
+export function previewMenuHiddenActionIds(extra?: ReadonlySet<ItemActionId>, downloadable = true): ReadonlySet<ItemActionId> {
+	if (extra === undefined && downloadable) {
+		return PREVIEW_MENU_HIDDEN_ACTION_IDS
+	}
+
+	return new Set<ItemActionId>([...PREVIEW_MENU_HIDDEN_ACTION_IDS, ...(extra ?? []), ...(downloadable ? [] : ["downloadAs" as const])])
 }
 
 // True while `target` sits inside a CodeMirror surface (editable OR read-only alike) — CodeMirror's

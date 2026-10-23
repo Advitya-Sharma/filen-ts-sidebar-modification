@@ -1,4 +1,4 @@
-import { encodeUtf8, escapeAttribute } from "../xml/index"
+import { encodeUtf8, escapeAttribute, escapeText } from "../xml/index"
 
 // Markup helpers for the WordprocessingML the translator writes.
 
@@ -19,9 +19,14 @@ export const PART_NAMESPACES = [
 
 export const XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
 
-// Text or an attribute value, safe in either place.
+// An attribute value.
 export function esc(text: string): string {
 	return escapeAttribute(text)
+}
+
+// Character data: ">" escaped too, so "]]>" never reaches content (XML 1.0 §2.4).
+export function escText(text: string): string {
+	return escapeText(text)
 }
 
 // Points to twentieths of a point, eighths (border widths) and EMUs.

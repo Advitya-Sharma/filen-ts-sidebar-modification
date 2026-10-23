@@ -22,6 +22,11 @@ const RENAMED: ReadonlyMap<string, string> = new Map([
 	["LEGACY.TINV", "TINV"],
 	["CHISQINV", "CHISQ.INV"],
 	["ERRORTYPE", "ERROR.TYPE"],
+	// Part 4's FDIST and FINV are the left tail with a Cumulative flag (§6.18.22, §6.18.24), Excel's F.DIST and F.INV;
+	// LEGACY.FDIST and LEGACY.FINV are Excel's FDIST and FINV. SKEWP is SKEW.P (§6.18.68).
+	["FDIST", "F.DIST"],
+	["FINV", "F.INV"],
+	["SKEWP", "SKEW.P"],
 	// Part 4 §6.17.1, §6.17.3: an optional significance and a Mode. LibreOffice writes them as these in SpreadsheetML
 	// (Excel's own CEILING and FLOOR come as COM.MICROSOFT.CEILING and COM.MICROSOFT.FLOOR). Their arguments' signs
 	// are read apart (signGuarded): Part 4's are an error where they differ, Excel's take the significance's size.
@@ -207,6 +212,9 @@ interface SignedCall {
 interface Frame {
 	// Whether it is a function's argument list (else a group, or the formula itself).
 	readonly call: boolean
+	// FDIST's call: Part 4's Cumulative defaults to TRUE (§6.18.22), Excel's F.DIST has no default. Its arguments so far.
+	readonly cumulative: boolean
+	args: number
 	readonly signed: SignedCall | null
 	// Where its content starts in the output, and where the reference expression under way starts: a union's
 	// operands are references, joined tighter than any other operator (Part 4 §5.5, Table 1).
@@ -276,15 +284,16 @@ export function translateExpression(source: string): Translated {
 		return true
 	}
 	let braces = 0
-	const frames: Frame[] = [{ call: false, signed: null, start: 0, chainStart: 0, union: false }]
+	const frames: Frame[] = [{ call: false, cumulative: false, args: 1, signed: null, start: 0, chainStart: 0, union: false }]
 	// The output so far, in characters: a guard repeats arguments, so its length is checked as it grows.
 	let length = 0
 	// Whether the output ends with what a union may join (a reference, a name, or a parenthesis closed), and whether
 	// a union's "~" waits for its right operand.
 	let referenceEnd = false
 	let unionOpen = false
-	// The CEILING or FLOOR whose "(" comes next.
+	// The CEILING or FLOOR whose "(" comes next, and whether the call whose "(" comes next is FDIST.
 	let signedNext: { name: string; at: number } | null = null
+	let cumulativeNext = false
 	// Excel's union is "," and needs parentheses of its own around its operands, unless a group's are exactly those.
 	const endChain = (frame: Frame, closing: boolean): void => {
 		if (!frame.union) return
@@ -351,6 +360,7 @@ export function translateExpression(source: string): Translated {
 
 			if (braces === 0 && frame !== undefined) {
 				endChain(frame, false)
+				frame.args++
 				push(",")
 				frame.chainStart = out.length
 				frame.signed?.outputs.push(out.length)
@@ -370,11 +380,14 @@ export function translateExpression(source: string): Translated {
 			const call = namesFunction(last)
 			const signed = call && signedNext !== null ? { ...signedNext, outputs: [out.length + 1], sources: [i + 1] } : null
 
+			const cumulative = call && cumulativeNext
+
 			signedNext = null
+			cumulativeNext = false
 
 			if (!operand(c, false)) return { refused: "union" }
 
-			frames.push({ call, signed, start: out.length, chainStart: out.length, union: false })
+			frames.push({ call, cumulative, args: 1, signed, start: out.length, chainStart: out.length, union: false })
 			i++
 		} else if (c === ")") {
 			const frame = frames[frames.length - 1]
@@ -390,6 +403,8 @@ export function translateExpression(source: string): Translated {
 			if (signed !== null && "refused" in signed) return signed
 
 			if (signed === null) {
+				if (frame.cumulative && frame.args === 3) push(",TRUE")
+
 				push(c)
 			} else {
 				for (let k = frame.signed?.at ?? out.length; k < out.length; k++) length -= out[k]?.length ?? 0
@@ -454,6 +469,8 @@ export function translateExpression(source: string): Translated {
 
 				if (name === null) return { refused: `function ${word}` }
 				if (braces === 0 && (upper === "CEILING" || upper === "FLOOR")) signedNext = { name, at: out.length }
+
+				cumulativeNext = upper === "FDIST"
 				// A call may give a reference (INDEX, OFFSET): the ")" it ends with is one a union takes.
 				if (!operand(name, true)) return { refused: "union" }
 

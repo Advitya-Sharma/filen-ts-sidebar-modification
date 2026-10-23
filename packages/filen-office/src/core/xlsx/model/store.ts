@@ -290,13 +290,28 @@ function blockOf(records: readonly RowRecord[], firstRow: number, sourceFirstRow
 	)
 }
 
-function emptyRecord(row: number): RowRecord {
+// What a row the store does not hold has of its own (an OpenDocument sheet's runs of hidden or resized rows): a row
+// the store adds there starts with it.
+export type RowBase = (row: number) => { readonly heightPt: number; readonly flags: number } | undefined
+
+// Row flags a row takes from its base.
+// A row whose cells only moved along it (columns inserted or deleted): SHIFTED as well where no edit marked it
+// before; an edit since takes SHIFTED off.
+function shiftedFlags(flags: number): number {
+	return (flags & RowFlag.DIRTY) === 0 ? flags | RowFlag.DIRTY | RowFlag.SHIFTED : flags | RowFlag.DIRTY
+}
+
+const BASE_FLAGS = RowFlag.HIDDEN | RowFlag.CUSTOM_HEIGHT | RowFlag.COLLAPSED | RowFlag.OUTLINE_MASK
+
+function emptyRecord(row: number, base?: RowBase): RowRecord {
+	const inherited = base?.(row)
+
 	return {
 		row,
 		spanStart: NO_SPAN,
 		spanEnd: NO_SPAN,
-		flags: RowFlag.NEW | RowFlag.DIRTY,
-		height: Number.NaN,
+		flags: RowFlag.NEW | RowFlag.DIRTY | ((inherited?.flags ?? 0) & BASE_FLAGS),
+		height: inherited?.heightPt ?? Number.NaN,
 		style: -1,
 		cols: [],
 		kinds: [],
@@ -322,7 +337,7 @@ function isVacant(record: RowRecord): boolean {
 // (no object per row): the rows in order, each row's cells merged with the batch's, rows a write adds new and dirty,
 // rows that end up vacant gone. Rows before the block go into blocks of their own; the rest are cut where a block
 // would outgrow its limits, each based at its first row with the source shift of the block it came from (edit).
-function writtenBlocks(block: RowBlock | undefined, writes: readonly CellWrite[]): RowBlock[] {
+function writtenBlocks(block: RowBlock | undefined, writes: readonly CellWrite[], base?: RowBase): RowBlock[] {
 	const count = writes.length
 	const order = sortedWrites(writes)
 	const rowCount = block?.rowCount ?? 0
@@ -365,7 +380,7 @@ function writtenBlocks(block: RowBlock | undefined, writes: readonly CellWrite[]
 		} else {
 			rowSpans[outRows * 2] = NO_SPAN
 			rowSpans[outRows * 2 + 1] = NO_SPAN
-			rowHeights[outRows] = Number.NaN
+			rowHeights[outRows] = base?.(row)?.heightPt ?? Number.NaN
 			rowStyles[outRows] = -1
 		}
 
@@ -390,7 +405,7 @@ function writtenBlocks(block: RowBlock | undefined, writes: readonly CellWrite[]
 
 				// Removing a cell that is not there changes nothing (as setCell).
 				if (remove) {
-					if (exists) flags |= RowFlag.DIRTY
+					if (exists) flags = (flags | RowFlag.DIRTY) & ~RowFlag.SHIFTED
 
 					exists = false
 
@@ -399,10 +414,10 @@ function writtenBlocks(block: RowBlock | undefined, writes: readonly CellWrite[]
 
 				if (!present) {
 					present = true
-					flags = RowFlag.NEW
+					flags = RowFlag.NEW | ((base?.(row)?.flags ?? 0) & BASE_FLAGS)
 				}
 
-				flags |= RowFlag.DIRTY
+				flags = (flags | RowFlag.DIRTY) & ~RowFlag.SHIFTED
 				cols[outCells] = col
 				kinds[outCells] = cell.kind
 				values[outCells] = cell.value
@@ -562,6 +577,8 @@ export class SheetStore implements XlsxSheetStore {
 	version = 0
 	// Blocks undo snapshots hold (edit/history.ts StoreSnapshot): an in-place write copies one first.
 	readonly held = new WeakSet<RowBlock>()
+	// What rows the store does not hold have of their own, for one it adds (none for a SpreadsheetML sheet).
+	rowBase: RowBase | undefined = undefined
 
 	// Source cells holding markup the model does not (sourceKey), as the reader found them.
 	private readonly marked: ReadonlySet<number>
@@ -765,7 +782,7 @@ export class SheetStore implements XlsxSheetStore {
 
 				if (target.formulas !== null) target.formulas[cell] = formula
 
-				target.rowFlags[index] = (target.rowFlags[index] ?? 0) | RowFlag.DIRTY
+				target.rowFlags[index] = ((target.rowFlags[index] ?? 0) | RowFlag.DIRTY) & ~RowFlag.SHIFTED
 
 				if (origin >= 0 && blockOrigin(target, index, cell) !== origin) this.blocks[b] = withOrigin(target, cell, origin)
 
@@ -807,7 +824,7 @@ export class SheetStore implements XlsxSheetStore {
 			(this.blocks[b + 1]?.firstRow ?? Infinity) > row
 		) {
 			// A new row inside or just after the block: the row arrays copied once, then the cell as above.
-			this.blocks[b] = spliceRow(block, row)
+			this.blocks[b] = spliceRow(block, row, this.rowBase)
 			this.setCell(row, col, kind, value, style, formula, origin)
 
 			return
@@ -817,12 +834,12 @@ export class SheetStore implements XlsxSheetStore {
 			let record = records.find(candidate => candidate.row === row)
 
 			if (record === undefined) {
-				record = emptyRecord(row)
+				record = emptyRecord(row, this.rowBase)
 				records.push(record)
 				records.sort((a, z) => a.row - z.row)
 			}
 
-			record.flags |= RowFlag.DIRTY
+			record.flags = (record.flags | RowFlag.DIRTY) & ~RowFlag.SHIFTED
 
 			let at = 0
 
@@ -884,7 +901,7 @@ export class SheetStore implements XlsxSheetStore {
 			if (block !== undefined && this.writeInPlace(index, block, group)) continue
 
 			this.version++
-			this.blocks.splice(index, block === undefined ? 0 : 1, ...writtenBlocks(block, group))
+			this.blocks.splice(index, block === undefined ? 0 : 1, ...writtenBlocks(block, group, this.rowBase))
 			this.measure()
 		}
 	}
@@ -935,7 +952,7 @@ export class SheetStore implements XlsxSheetStore {
 
 			if (target.formulas !== null) target.formulas[k] = cell.formula
 
-			target.rowFlags[index] = (target.rowFlags[index] ?? 0) | RowFlag.DIRTY
+			target.rowFlags[index] = ((target.rowFlags[index] ?? 0) | RowFlag.DIRTY) & ~RowFlag.SHIFTED
 		}
 
 		this.blocks[b] = target
@@ -1135,7 +1152,7 @@ export class SheetStore implements XlsxSheetStore {
 						}
 					}
 
-					if (moved) block.rowFlags[i] = (block.rowFlags[i] ?? 0) | RowFlag.DIRTY
+					if (moved) block.rowFlags[i] = shiftedFlags(block.rowFlags[i] ?? 0)
 				}
 
 				block.measureCols()
@@ -1167,7 +1184,7 @@ export class SheetStore implements XlsxSheetStore {
 					}
 				}
 
-				if (moved) record.flags |= RowFlag.DIRTY
+				if (moved) record.flags = shiftedFlags(record.flags)
 			}
 
 			this.blocks[b] = blockOf(records, block.firstRow, block.sourceFirstRow)
@@ -1278,7 +1295,7 @@ function spliceCell(
 
 	const rowFlags = block.rowFlags.slice()
 
-	rowFlags[index] = (rowFlags[index] ?? 0) | RowFlag.DIRTY
+	rowFlags[index] = ((rowFlags[index] ?? 0) | RowFlag.DIRTY) & ~RowFlag.SHIFTED
 
 	return new RowBlock(
 		block.firstRow,
@@ -1357,7 +1374,7 @@ function positionalOrigins(block: RowBlock): Uint32Array {
 }
 
 // The block with a new, empty row `row` (after its first row, not in it).
-function spliceRow(block: RowBlock, row: number): RowBlock {
+function spliceRow(block: RowBlock, row: number, base?: RowBase): RowBlock {
 	const relative = row - block.firstRow
 	let index = 0
 
@@ -1388,8 +1405,8 @@ function spliceRow(block: RowBlock, row: number): RowBlock {
 		insert(block.rows, size => new Uint32Array(size), 1, [relative]),
 		rowStarts,
 		insert(block.rowSpans, size => new Uint32Array(size), 2, [NO_SPAN, NO_SPAN]),
-		insert(block.rowFlags, size => new Uint16Array(size), 1, [RowFlag.NEW | RowFlag.DIRTY]),
-		insert(block.rowHeights, size => new Float64Array(size), 1, [Number.NaN]),
+		insert(block.rowFlags, size => new Uint16Array(size), 1, [RowFlag.NEW | RowFlag.DIRTY | ((base?.(row)?.flags ?? 0) & BASE_FLAGS)]),
+		insert(block.rowHeights, size => new Float64Array(size), 1, [base?.(row)?.heightPt ?? Number.NaN]),
 		insert(block.rowStyles, size => new Int32Array(size), 1, [-1]),
 		block.cols,
 		block.kinds,
@@ -1839,7 +1856,7 @@ export class StoreBuilder {
 					row,
 					NO_SPAN,
 					NO_SPAN,
-					(head.rowFlags[fi] ?? 0) | RowFlag.DIRTY | RowFlag.NEW,
+					((head.rowFlags[fi] ?? 0) | RowFlag.DIRTY | RowFlag.NEW) & ~RowFlag.SHIFTED,
 					head.rowHeights[fi] ?? Number.NaN,
 					head.rowStyles[fi] ?? -1
 				)

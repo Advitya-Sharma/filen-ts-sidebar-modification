@@ -705,11 +705,9 @@ export class DocxEditorSession {
 		return this.snapshot().enabled[type]
 	}
 
-	// Call after the document was written: it is no longer dirty. `doc` is the document as it was written
-	// (state.doc when the save read it), so edits made while the file was stored stay unsaved.
-	markSaved(doc: Node = this.current.doc): void {
-		const tracking = this.context.review.tracking
-
+	// Call after the document was written: it is no longer dirty. `doc` and `tracking` are the document and the
+	// track switch as the save read them, so edits made while the file was written or stored stay unsaved.
+	markSaved(doc: Node = this.current.doc, tracking: boolean = this.context.review.tracking): void {
 		if (doc === this.saved && tracking === this.savedTracking) return
 
 		this.saved = doc

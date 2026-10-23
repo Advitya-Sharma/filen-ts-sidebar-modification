@@ -906,6 +906,8 @@ describe("applyOfflineGate", () => {
 		info: "readOnly",
 		openContainingDirectory: "gated",
 		download: "gated",
+		// Exports read the file over the network as Download does.
+		downloadAs: "gated",
 		copy: "gated",
 		// Presets and quick extracts start SDK jobs at once; the submenus' triggers grey out.
 		compress: "gated",
@@ -930,7 +932,8 @@ describe("applyOfflineGate", () => {
 		() => dirItem({ meta: { type: "encrypted", data: "ciphertext" } }),
 		() => fileItem({ meta: { type: "encrypted", data: "ciphertext" } }),
 		() => unknownFileItem(),
-		() => unknownFileItem("backup.zip")
+		() => unknownFileItem("backup.zip"),
+		() => unknownFileItem("report.docx")
 	]
 	const EVERY_DESCRIPTOR = VARIANTS.flatMap(variant =>
 		ITEMS.flatMap(item => [true, false].flatMap(searchHit => driveItemActions(item(), variant, { searchHit, open: true })))

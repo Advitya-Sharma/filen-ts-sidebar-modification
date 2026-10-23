@@ -588,3 +588,241 @@ describe("SUBTOTAL and AGGREGATE over hidden rows", () => {
 		}
 	})
 })
+
+// Each formula alone in column A, its value by formula.
+function column(formulas: readonly string[]): Record<string, unknown> {
+	const values = rounded(calculate(formulas.map(formula => [`=${formula}`])))
+
+	return Object.fromEntries(formulas.map((formula, row) => [formula, values[`A${String(row + 1)}`]]))
+}
+
+// Each case's expected value beside its formula.
+function expectColumn(cases: Readonly<Record<string, unknown>>): void {
+	expect(column(Object.keys(cases))).toEqual(cases)
+}
+
+describe("rounding and remainders as Excel calculates them", () => {
+	it("rounds INT down and gives MOD the divisor's sign", () => {
+		// "INT function", "MOD function"; ECMA-376 Part 1 §18.17.7.169, §18.17.7.218.
+		expectColumn({
+			"INT(8.9)": 8,
+			"INT(-8.9)": -9,
+			"INT(-2.7)": -3,
+			"INT(-0.5)": -1,
+			"MOD(3,2)": 1,
+			"MOD(-3,2)": 1,
+			"MOD(3,-2)": -1,
+			"MOD(-3,-2)": -1,
+			"MOD(-1.5,1)": 0.5,
+			"MOD(6,-3)": 0,
+			"MOD(6.3,2.1)": 0,
+			"MOD(-6.3,2.1)": 0,
+			"MOD(0.7,0.1)": 0,
+			"MOD(5.1,1)": 0.1,
+			"MOD(3,0)": "!#DIV/0!"
+		})
+	})
+
+	it("rounds the decimal number Excel holds, with num_digits truncated", () => {
+		// The pages' examples ("ROUND function", "ROUNDUP function", "ROUNDDOWN function", "TRUNC function"), and values
+		// whose binary form is just below the decimal one.
+		expectColumn({
+			"ROUND(2.15,1)": 2.2,
+			"ROUND(2.149,1)": 2.1,
+			"ROUND(-1.475,2)": -1.48,
+			"ROUND(21.5,-1)": 20,
+			"ROUND(626.3,-3)": 1000,
+			"ROUND(1.98,-1)": 0,
+			"ROUND(-50.55,-2)": -100,
+			"ROUND(1.005,2)": 1.01,
+			"ROUND(2.675,2)": 2.68,
+			"ROUND(1.234,1.9)": 1.2,
+			"ROUNDUP(3.2,0)": 4,
+			"ROUNDUP(76.9,0)": 77,
+			"ROUNDUP(3.14159,3)": 3.142,
+			"ROUNDUP(-3.14159,1)": -3.2,
+			"ROUNDUP(31415.92654,-2)": 31500,
+			"ROUNDUP(0.1+0.2,1)": 0.3,
+			"ROUNDDOWN(3.14159,3)": 3.141,
+			"ROUNDDOWN(-3.14159,1)": -3.1,
+			"ROUNDDOWN(31415.92654,-2)": 31400,
+			"ROUNDDOWN(0.29,2)": 0.29,
+			"ROUNDDOWN(-0.29,2)": -0.29,
+			"ROUNDDOWN(8.94-8,2)": 0.94,
+			"TRUNC(8.9)": 8,
+			"TRUNC(-8.9)": -8,
+			"TRUNC(PI(),3)": 3.141,
+			"TRUNC(4.35,2)": 4.35
+		})
+	})
+
+	it("rounds EVEN and ODD away from zero, and truncates for ISEVEN and ISODD", () => {
+		// "EVEN function", "ODD function"; ECMA-376 Part 1 §18.17.7.177 and §18.17.7.183 (ISODD(-15) is TRUE).
+		expectColumn({
+			"EVEN(1.5)": 2,
+			"EVEN(3)": 4,
+			"EVEN(-1)": -2,
+			"EVEN(0)": 0,
+			"ODD(1.5)": 3,
+			"ODD(2)": 3,
+			"ODD(-1)": -1,
+			"ODD(-2)": -3,
+			"ODD(0)": 1,
+			"ISEVEN(12.456)": true,
+			"ISEVEN(-15)": false,
+			"ISODD(12.456)": false,
+			"ISODD(-15)": true,
+			"ISODD(-1.5)": true
+		})
+	})
+
+	it("keeps a number that is already a multiple of the significance", () => {
+		// "CEILING function": CEILING(1.5,0.1) is 1.5, a multiple kept as it is; the binary quotients of these are a step
+		// off the whole number. LibreOffice 7.5 gives each as it is.
+		expectColumn({
+			"CEILING(0.07,0.01)": 0.07,
+			"CEILING(2.1,0.3)": 2.1,
+			"CEILING(-0.3,0.1)": -0.3,
+			"CEILING.MATH(2.7,0.3)": 2.7,
+			"CEILING.MATH(0.07,0.01)": 0.07,
+			"FLOOR(0.3,0.1)": 0.3,
+			"FLOOR.MATH(0.3,0.1)": 0.3,
+			"FLOOR.MATH(0.6,0.2)": 0.6,
+			"CEILING.PRECISE(0.07,0.01)": 0.07,
+			"ISO.CEILING(0.07,0.01)": 0.07,
+			"FLOOR.PRECISE(0.3,0.1)": 0.3,
+			"FLOOR.PRECISE(2014.6,0.2)": 2014.6,
+			"MROUND(0.3,0.1)": 0.3
+		})
+	})
+
+	it("rounds to multiples as CEILING, FLOOR and their variants do", () => {
+		// The pages' examples; CEILING's significance of 0 as LibreOffice gives it; MROUND's page shows it on the binary
+		// value (6.05 is just below 6.05).
+		expectColumn({
+			"CEILING(2.5,1)": 3,
+			"CEILING(-2.5,-2)": -4,
+			"CEILING(-2.5,2)": -2,
+			"CEILING(1.5,0.1)": 1.5,
+			"CEILING(0.234,0.01)": 0.24,
+			"CEILING(2.5,-2)": "!#NUM!",
+			"CEILING(2.5,0)": 0,
+			"FLOOR(3.7,2)": 2,
+			"FLOOR(-2.5,-2)": -2,
+			"FLOOR(2.5,-2)": "!#NUM!",
+			"FLOOR(1.58,0.1)": 1.5,
+			"FLOOR(0.234,0.01)": 0.23,
+			"FLOOR(2.5,0)": "!#DIV/0!",
+			"CEILING.MATH(24.3,5)": 25,
+			"CEILING.MATH(6.7)": 7,
+			"CEILING.MATH(-8.1,2)": -8,
+			"CEILING.MATH(-5.5,2,-1)": -6,
+			"FLOOR.MATH(24.3,5)": 20,
+			"FLOOR.MATH(6.7)": 6,
+			"FLOOR.MATH(-8.1,2)": -10,
+			"FLOOR.MATH(-5.5,2,-1)": -4,
+			"CEILING.PRECISE(4.3)": 5,
+			"CEILING.PRECISE(-4.3)": -4,
+			"CEILING.PRECISE(4.3,-2)": 6,
+			"ISO.CEILING(-4.3,2)": -4,
+			"FLOOR.PRECISE(-3.2,-1)": -4,
+			"FLOOR.PRECISE(3.2,-1)": 3,
+			"MROUND(10,3)": 9,
+			"MROUND(-10,-3)": -9,
+			"MROUND(1.3,0.2)": 1.4,
+			"MROUND(5,-2)": "!#NUM!",
+			"MROUND(6.05,0.1)": 6
+		})
+	})
+})
+
+describe("date differences as Excel calculates them", () => {
+	it("counts DATEDIF in every unit, in either case", () => {
+		// "DATEDIF function" and ECMA-376 Part 1 §18.17.7.75; "MD" and "YD" where the page is silent as LibreOffice
+		// counts them, "MD" negative as the page's known issue says it can be.
+		expectColumn({
+			'DATEDIF(DATE(2001,1,1),DATE(2003,1,1),"Y")': 2,
+			'DATEDIF(DATE(2001,6,1),DATE(2002,8,15),"D")': 440,
+			'DATEDIF(DATE(2001,6,1),DATE(2002,8,15),"YD")': 75,
+			'DATEDIF(DATE(2020,1,1),DATE(2021,3,1),"m")': 14,
+			'DATEDIF(DATE(2001,6,1),DATE(2002,8,15),"md")': 14,
+			'DATEDIF(DATE(2001,6,1),DATE(2002,8,15),"ym")': 2,
+			'DATEDIF(DATE(2015,1,31),DATE(2015,3,1),"MD")': -2,
+			'DATEDIF(DATE(2001,8,15),DATE(2002,6,1),"YD")': 290,
+			'DATEDIF(DATE(2000,2,29),DATE(2001,2,28),"YD")': 365,
+			'DATEDIF(DATE(2000,2,29),DATE(2004,2,28),"Y")': 3,
+			'DATEDIF(DATE(2000,2,29),DATE(2001,2,28),"M")': 11,
+			'DATEDIF(DATE(2001,6,1)+0.9,DATE(2001,6,2)+0.1,"D")': 1,
+			'DATEDIF(1,61,"m")': 2,
+			'DATEDIF(DATE(2001,6,2),DATE(2001,6,1),"D")': "!#NUM!",
+			'DATEDIF(DATE(2001,6,1),DATE(2002,8,15),"X")': "!#NUM!"
+		})
+	})
+
+	it("moves a start on February's last day to the 30th in DAYS360's U.S. method", () => {
+		// "DAYS360 function": the start date on its month's last day becomes the 30th; then an end on the 31st after a
+		// start on the 30th becomes the 30th too.
+		expectColumn({
+			"DAYS360(DATE(2011,1,30),DATE(2011,12,31))": 330,
+			"DAYS360(DATE(2011,1,1),DATE(2011,1,30))": 29,
+			"DAYS360(DATE(2011,1,1),DATE(2011,12,31),TRUE)": 359,
+			"DAYS360(DATE(2011,2,28),DATE(2011,3,31))": 30,
+			"DAYS360(DATE(2011,2,28),DATE(2011,3,31),TRUE)": 32,
+			"DAYS360(DATE(2011,1,29),DATE(2011,3,31))": 62,
+			"DAYS360(DATE(2011,3,31),DATE(2011,2,28))": -32,
+			"DAYS360(DATE(2011,2,28),DATE(2011,2,28))": 0
+		})
+	})
+})
+
+describe("arguments Excel truncates", () => {
+	it("truncates positions, counts, offsets and flags rather than refusing them", () => {
+		// Each page's "truncated" remark (CHOOSE, EDATE, EOMONTH, YEARFRAC, the base conversions' places, BASE), ECMA-376
+		// Part 1 §18.17.7.344 for WEEKDAY, and LibreOffice for the text positions, DB and the cumulative payments where
+		// the pages are silent.
+		expectColumn({
+			'MID("Fluid Flow",1.9,5.9)': "Fluid",
+			'REPLACE("abcdefghijk",6.9,5.9,"*")': "abcde*k",
+			'FIND("M","Miriam McGovern",3.9)': 8,
+			'SEARCH("e","Statements",6.9)': 7,
+			'SUBSTITUTE("Quarter 1, 2011","1","2",3.9)': "Quarter 1, 2012",
+			'FIND("a","abc",0.5)': "!#VALUE!",
+			"CHOOSE(2.9,1,2,3)": 2,
+			"EDATE(DATE(2011,1,15),1.9)": 40589,
+			"EDATE(DATE(2011,1,15),-1.9)": 40527,
+			"EOMONTH(DATE(2011,1,1),1.9)": 40602,
+			"EOMONTH(DATE(2011,1,1),-1.9)": 40543,
+			"WEEKDAY(DATE(2008,2,14),2.9)": 4,
+			"WEEKNUM(DATE(2012,3,9),2.9)": 11,
+			"YEARFRAC(DATE(2012,1,1),DATE(2012,7,30),3.9)": 0.578082192,
+			"DEC2BIN(9.9)": "1001",
+			"DEC2BIN(-9.9)": "1111110111",
+			"DEC2HEX(100.7,4)": "0064",
+			"DEC2OCT(58.9,3.9)": "072",
+			'HEX2BIN("F",8.9)': "00001111",
+			'BIN2HEX("11111011",4.9)': "00FB",
+			"BASE(15.9,2,10.9)": "0000001111",
+			'DECIMAL("FF",16.9)': 255,
+			"DB(1000000,100000,6,1.9,7.9)": 186083.333333333,
+			"DB(1000000,100000,6.5,1,7)": 173833.333333333,
+			"CUMIPMT(0.0075,360,125000,13.9,24.9,0)": -11135.232130751,
+			"CUMPRINC(0.0075,360,125000,13.9,24.9,0)": -934.107123421,
+			// "BITRSHIFT function": shift_amount "must be an integer", and one outside the constraints is #NUM!.
+			"BITRSHIFT(13,2.9)": "!#NUM!",
+			"TDIST(1.959999998,60.9,2.9)": 0.05464493
+		})
+	})
+
+	it("gives ROMAN #VALUE! out of 0 to 3999 and nothing for 0", () => {
+		// "ROMAN function": negative and past 3999 are #VALUE!; LibreOffice gives "" for 0.
+		expectColumn({
+			"ROMAN(499,0)": "CDXCIX",
+			"ROMAN(499.9)": "CDXCIX",
+			"ROMAN(499,1)": "LDVLIV",
+			"ROMAN(3999.9)": "MMMCMXCIX",
+			"ROMAN(0)": "",
+			"ROMAN(-1)": "!#VALUE!",
+			"ROMAN(4000)": "!#VALUE!"
+		})
+	})
+})

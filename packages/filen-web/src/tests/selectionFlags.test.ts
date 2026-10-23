@@ -82,7 +82,8 @@ describe("aggregateDriveSelectionFlags", () => {
 			everyDirectory: false,
 			includesUndecryptable: false,
 			everySharedRoot: false,
-			everyArchive: false
+			everyArchive: false,
+			everyDownloadAs: false
 		})
 		expect(first).toBe(second) // same frozen constant, not a freshly-built object each call
 		expect(Object.isFrozen(first)).toBe(true)
@@ -155,7 +156,8 @@ describe("aggregateDriveSelectionFlags", () => {
 			everyDirectory: true,
 			includesUndecryptable: false,
 			everySharedRoot: false,
-			everyArchive: false
+			everyArchive: false,
+			everyDownloadAs: false
 		})
 	})
 
@@ -172,7 +174,8 @@ describe("aggregateDriveSelectionFlags", () => {
 			everyDirectory: false,
 			includesUndecryptable: true,
 			everySharedRoot: false,
-			everyArchive: false
+			everyArchive: false,
+			everyDownloadAs: false
 		})
 	})
 })

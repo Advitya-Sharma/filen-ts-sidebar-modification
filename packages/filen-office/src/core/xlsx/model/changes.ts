@@ -41,6 +41,10 @@ export class ChangeLog implements XlsxChangeLog {
 	// Every part written or given relationships since open, removed again or not (partKey).
 	private readonly named = new Set<string>()
 	private readonly relationshipsOf: (source: string) => Relationships | undefined
+	// What one edit marks (sections and parts, each once, re-marks too), from beginJournal to endJournal, and of
+	// those the ones it marked first (forgetJournal takes them back).
+	private journal: Set<string> | null = null
+	private fresh: string[] = []
 
 	constructor(relationshipsOf: (source: string) => Relationships | undefined) {
 		this.relationshipsOf = relationshipsOf
@@ -75,11 +79,56 @@ export class ChangeLog implements XlsxChangeLog {
 	}
 
 	sheetSection(sheet: SheetId, section: WorksheetSection | (string & {}), writer?: XlsxSectionWriter): void {
-		this.sheet(sheet).sections.set(section, writer ?? null)
+		const sections = this.sheet(sheet).sections
+
+		this.mark(sheetMark(sheet, section), sections.has(section))
+		sections.set(section, writer ?? null)
 	}
 
 	workbookSection(section: XlsxWorkbookSection | (string & {}), writer?: XlsxWorkbookSectionWriter): void {
+		this.mark(workbookMark(section), this.workbookSections.has(section))
 		this.workbookSections.set(section, writer ?? null)
+	}
+
+	private mark(key: string, known: boolean): void {
+		if (this.journal === null) return
+
+		if (!known && !this.journal.has(key)) this.fresh.push(key)
+
+		this.journal.add(key)
+	}
+
+	beginJournal(): void {
+		this.journal = new Set()
+		this.fresh = []
+	}
+
+	endJournal(): ReadonlySet<string> | null {
+		const journal = this.journal
+
+		this.journal = null
+
+		return journal
+	}
+
+	// The marks the last journal's edit made first, taken back: it was undone, and before it they were unmarked.
+	forgetJournal(): void {
+		for (const key of this.fresh) {
+			const [kind = "", first = "", second = ""] = key.split("\u0000")
+
+			if (kind === "w") this.workbookSections.delete(first)
+			if (kind === "p") this.parts.delete(first)
+
+			if (kind === "s") {
+				const changes = this.sheets.get(Number(first))
+
+				changes?.sections.delete(second)
+
+				if (changes !== undefined && !changes.rows && changes.sections.size === 0) this.sheets.delete(Number(first))
+			}
+		}
+
+		this.fresh = []
 	}
 
 	sharedStringsAppended(): void {
@@ -92,6 +141,7 @@ export class ChangeLog implements XlsxChangeLog {
 
 	writePart(name: string, write: XlsxPartWrite): void {
 		this.named.add(partKey(name))
+		this.mark(partMark(name), this.parts.has(name))
 		this.parts.set(name, write)
 	}
 
@@ -102,6 +152,7 @@ export class ChangeLog implements XlsxChangeLog {
 	}
 
 	removePart(name: string): void {
+		this.mark(partMark(name), this.parts.has(name))
 		this.parts.set(name, null)
 	}
 
@@ -215,3 +266,8 @@ export class ChangeLog implements XlsxChangeLog {
 function retiredKey(source: string, type: string, target: string, external: boolean): string {
 	return `${source}\n${type}\n${target}\n${external ? "1" : "0"}`
 }
+
+// A journal's entries: a sheet's section, a workbook section, a part.
+export const sheetMark = (sheet: SheetId, section: string): string => `s\u0000${sheet}\u0000${section}`
+export const workbookMark = (section: string): string => `w\u0000${section}`
+export const partMark = (name: string): string => `p\u0000${name}`

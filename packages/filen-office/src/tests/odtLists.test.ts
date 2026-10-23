@@ -81,4 +81,24 @@ describe("ODT lists", () => {
 			)
 		).toContain('<w:startOverride w:val="7"/>')
 	})
+
+	it("continues numbering only from the list just before, and only of the same style (ODF 1.3 Part 3 §19.786)", async () => {
+		const BULLETS =
+			'<text:list-style style:name="L2"><text:list-level-style-bullet text:level="1" text:bullet-char="•"><style:list-level-properties text:list-level-position-and-space-mode="label-alignment"><style:list-level-label-alignment text:label-followed-by="listtab" fo:text-indent="-0.5cm" fo:margin-left="2cm"/></style:list-level-properties></text:list-level-style-bullet></text:list-style>'
+		const item = (text: string): string => `<text:list-item><text:p>${text}</text:p></text:list-item>`
+		const ids = async (body: string): Promise<number[]> =>
+			[...(await documentXml({ styles: `${LIST}${BULLETS}`, body })).matchAll(/<w:numId w:val="(\d+)"\/>/g)].map(match =>
+				Number(match[1])
+			)
+		const interrupted = await ids(
+			`<text:list text:style-name="L1">${item("a")}</text:list><text:list text:style-name="L2">${item("b")}</text:list><text:list text:style-name="L1" text:continue-numbering="true">${item("c")}</text:list>`
+		)
+		const following = await ids(
+			`<text:list text:style-name="L1">${item("a")}</text:list><text:p>between</text:p><text:list text:style-name="L1" text:continue-numbering="true">${item("c")}</text:list>`
+		)
+
+		// LibreOffice 7.5 numbers c 1. after the bullet list, and 2. after a paragraph.
+		expect(interrupted[2]).not.toBe(interrupted[0])
+		expect(following[1]).toBe(following[0])
+	})
 })

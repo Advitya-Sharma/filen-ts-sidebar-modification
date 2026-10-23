@@ -26,11 +26,14 @@ describe("spreadsheet formats", () => {
 		expect(fileKind.spreadsheetSaveFormat("xlt")).toBe(fileKind.spreadsheetSaveFormat("xls"))
 	})
 
-	it("routes .ods and .ots as spreadsheets that open view-only, saying the format", () => {
+	it("routes .ods and .ots as editable spreadsheets, saying the format when a session cannot write one", () => {
 		for (const extension of ["ods", "ots"]) {
 			expect(preview.previewCategoryForExtension(extension), extension).toBe("spreadsheet")
-			expect(fileKind.isEditableSpreadsheetExtension(extension), extension).toBe(false)
+			expect(fileKind.isEditableSpreadsheetExtension(extension), extension).toBe(true)
 		}
+
+		// An .ods and its template open alike but save as different files (their mimetype entries differ).
+		expect(fileKind.spreadsheetSaveFormat("ots")).not.toBe(fileKind.spreadsheetSaveFormat("ods"))
 
 		expect(sheetKind.sheetKindOf("ots", new Uint8Array([0x50, 0x4b, 3, 4]), false)).toEqual({ kind: "ots", unnamed: false })
 		expect(saveAs.savesAsXlsx("ods")).toBe(false)

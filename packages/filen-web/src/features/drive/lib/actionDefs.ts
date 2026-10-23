@@ -4,6 +4,7 @@ import {
 	CopyPlusIcon,
 	DownloadIcon,
 	EyeIcon,
+	FileDownIcon,
 	FileTextIcon,
 	FolderInputIcon,
 	FolderOpenIcon,
@@ -48,6 +49,8 @@ export const ACTION_DEFS = {
 	info: { labelKey: "driveActionInfo", icon: InfoIcon },
 	openContainingDirectory: { labelKey: "driveActionOpenContainingDirectory", icon: FolderOpenIcon },
 	download: { labelKey: "driveActionDownload", icon: DownloadIcon },
+	// A submenu of export formats (downloadAsSubmenu.tsx), offered beside Download.
+	downloadAs: { labelKey: "driveActionDownloadAs", icon: FileDownIcon },
 	publicLink: { labelKey: "driveActionPublicLink", icon: LinkIcon },
 	copyLink: { labelKey: "driveActionCopyLink", icon: CopyIcon },
 	share: { labelKey: "driveActionShare", icon: UsersIcon },

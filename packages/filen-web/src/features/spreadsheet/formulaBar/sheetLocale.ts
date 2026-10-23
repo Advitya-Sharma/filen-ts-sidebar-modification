@@ -1,8 +1,9 @@
-import type { SheetLocale } from "@filen/office/core/sheet"
+import { territoryCurrency, type SheetLocale } from "@filen/office/core/sheet"
 
 // The locale entries are typed in, from the browser's formatting locale (the core reads no Intl locale; the app
-// injects it): its decimal point and grouping, its date order, and ";" between arguments where "," is the decimal
-// point, as Excel types formulas there. Files keep en-US syntax whatever it is.
+// injects it): its decimal point and grouping, its date order, ";" between arguments where "," is the decimal
+// point, as Excel types formulas there, and the currency symbols text in formulas reads as a number with. Files keep
+// en-US syntax whatever it is.
 export function sheetLocaleOf(language: string): SheetLocale {
 	let decimal = "."
 	let group = ","
@@ -26,7 +27,37 @@ export function sheetLocaleOf(language: string): SheetLocale {
 		// An unknown language tag: en-US's.
 	}
 
-	return { decimal, group, argument: decimal === "," ? ";" : ",", dateOrder }
+	const currencies = currencySymbols(language)
+
+	return { decimal, group, argument: decimal === "," ? ";" : ",", dateOrder, ...(currencies.length > 0 && { currencies }) }
+}
+
+// The symbols of the locale's region's currency (Unicode CLDR's territory currency, territoryCurrency): the one the
+// locale writes ("￥" in ja-JP) and the currency's narrow one ("¥"). Either may stand before or after the number, so
+// the side the locale writes it on is not needed.
+function currencySymbols(language: string): string[] {
+	try {
+		const region = new Intl.Locale(language).maximize().region
+		const currency = region === undefined ? undefined : territoryCurrency(region)
+
+		if (currency === undefined) return []
+
+		const symbols = new Set<string>()
+
+		for (const [tag, display] of [
+			[language, "symbol"],
+			[language, "narrowSymbol"],
+			["en", "narrowSymbol"]
+		] as const) {
+			for (const part of new Intl.NumberFormat(tag, { style: "currency", currency, currencyDisplay: display }).formatToParts(1)) {
+				if (part.type === "currency") symbols.add(part.value)
+			}
+		}
+
+		return [...symbols]
+	} catch {
+		return []
+	}
 }
 
 // The browser's formatting language.

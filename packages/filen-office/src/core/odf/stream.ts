@@ -2,16 +2,20 @@ import { Inflate } from "fflate"
 import { METHOD_DEFLATE, METHOD_STORED } from "../opc/zipReader"
 import { ZipError, type ZipArchive, type ZipEntry } from "../opc/index"
 import { locateBody } from "./prologue"
+import { sliceClock, type Slicing } from "../slicing"
 
-// Compressed bytes read per step while looking for office:body.
-const STEP = 64 * 1024
+// Compressed bytes read per step while looking for office:body (styles compress well: one step inflates to more
+// than a megabyte, so a step stays within a slice).
+const STEP = 16 * 1024
 const BODY = new TextEncoder().encode("body")
 
 // The start of content.xml up to and a little past office:body's start tag name, inflated only as far as
 // that: a 300 MB spreadsheet body is never inflated to read its styles. Returns the whole stream when it has
 // no office:body. A prefix cannot be CRC-checked; the body reader checks the whole stream when it reads it.
-export async function readUntilBody(archive: ZipArchive, entry: ZipEntry): Promise<Uint8Array> {
+export async function readUntilBody(archive: ZipArchive, entry: ZipEntry, slicing?: Slicing): Promise<Uint8Array> {
 	if (entry.method !== METHOD_STORED && entry.method !== METHOD_DEFLATE) return archive.read(entry)
+
+	const clock = slicing === undefined ? undefined : sliceClock(slicing)
 
 	const { dataOffset } = await archive.layout(entry)
 	let out = new Uint8Array(Math.min(entry.uncompressedSize, 256 * 1024))
@@ -49,21 +53,25 @@ export async function readUntilBody(archive: ZipArchive, entry: ZipEntry): Promi
 		for (let read = 0; read < entry.compressedSize && !found; read += STEP) {
 			accept(await archive.source.read(dataOffset + read, Math.min(STEP, entry.compressedSize - read)))
 			found = look()
+
+			if (clock?.due === true) await clock.pause()
 		}
 	} else {
 		const inflater = new Inflate(accept)
 
-		try {
-			for (let read = 0; read < entry.compressedSize && !found; read += STEP) {
-				const step = Math.min(STEP, entry.compressedSize - read)
-
+		for (let read = 0; read < entry.compressedSize && !found; read += STEP) {
+			const step = Math.min(STEP, entry.compressedSize - read)
+			try {
 				inflater.push(await archive.source.read(dataOffset + read, step), read + step >= entry.compressedSize)
 				found = look()
-			}
-		} catch (error) {
-			if (error instanceof ZipError) throw error
+			} catch (error) {
+				if (error instanceof ZipError) throw error
 
-			throw new ZipError("corrupt", `Damaged deflate data in ${entry.name}`)
+				throw new ZipError("corrupt", `Damaged deflate data in ${entry.name}`)
+			}
+
+			// A turn between steps (the pause's own error, an abort, passes as it is).
+			if (clock?.due === true) await clock.pause()
 		}
 	}
 

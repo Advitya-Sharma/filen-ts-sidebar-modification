@@ -83,6 +83,7 @@
 		"bench:text": "node --expose-gc --import tsx src/bench/textBench.ts",
 		"generate:fonts": "tsx src/scripts/fontTables.ts",
 		"generate:unicode": "tsx src/scripts/unicodeTables.ts",
+		"generate:currencies": "tsx src/scripts/currencyTables.ts",
 		"generate:shaping": "tsx src/scripts/shapingTables.ts",
 		"generate:pdf-fonts": "tsx src/scripts/pdfFontTables.ts",
 		"generate:geometry": "tsx src/scripts/presetGeometry.ts",

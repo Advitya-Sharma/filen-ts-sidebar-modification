@@ -1,3 +1,4 @@
+import { runSliced, sliceClock, type Slicing } from "../slicing"
 import { Namespaces, type XmlDocument } from "../xml/index"
 import type { ContentPrologue } from "./prologue"
 import { canonicalAttributes, elementName, readElement, type OdfElement } from "./tree"
@@ -90,7 +91,7 @@ export interface OdfListStyle {
 	readonly displayName: string | undefined
 	readonly automatic: boolean
 	readonly origin: StyleScope
-	// text:outline-style (§16.39): the headings' numbering.
+	// text:outline-style (§16.36): the headings' numbering.
 	readonly outline: boolean
 	readonly consecutiveNumbering: boolean
 	// Levels by number (1–10); a level the style leaves out is absent.
@@ -215,23 +216,39 @@ function unquoteFamily(value: string): string {
 		: trimmed
 }
 
+// An automatic style not read yet: where it is, read when first asked for (a document holds thousands).
+interface PendingStyle {
+	readonly document: XmlDocument
+	readonly namespaces: Namespaces
+	readonly node: number
+	readonly origin: StyleScope
+	readonly family: string
+	readonly name: string
+	readonly parent: string | undefined
+}
+
 interface ScopeTables {
 	readonly styles: Map<string, OdfStyle>
+	// Automatic styles by key, read when asked for (and kept in `read`, up to the sheet's limit).
+	readonly pending: Map<string, PendingStyle>
+	readonly read: Map<string, OdfStyle>
 	readonly lists: Map<string, OdfListStyle>
 	readonly data: Map<string, OdfDataStyle>
 }
 
 function scopeTables(): ScopeTables {
-	return { styles: new Map(), lists: new Map(), data: new Map() }
+	return { styles: new Map(), pending: new Map(), read: new Map(), lists: new Map(), data: new Map() }
 }
 
 // Every style a document has: common, default and automatic styles of both streams, page layouts, master
 // pages, list, outline and data styles, font faces, notes and line-numbering configuration, and the named
 // drawing resources (gradients, hatches, fill images, markers, dashes, opacities).
+// Style elements read between looks at the slice clock.
+const STYLES_PER_STEP = 64
+
 export class OdfStyleSheet {
 	readonly fontFaces = new Map<string, OdfFontFace>()
 	readonly defaults = new Map<string, OdfStyle>()
-	readonly defaultPageLayout: OdfPageLayout | undefined
 	readonly pageLayouts = new Map<string, OdfPageLayout>()
 	readonly masterPages = new Map<string, OdfMasterPage>()
 	// Master pages in document order: the first is the one a document without a page-break style starts with.
@@ -250,23 +267,80 @@ export class OdfStyleSheet {
 	private readonly automaticOf: Readonly<Record<StyleScope, ScopeTables>> = { styles: scopeTables(), content: scopeTables() }
 	private defaultLayout: OdfPageLayout | undefined = undefined
 
-	constructor(styles: XmlDocument | undefined, content: ContentPrologue | undefined) {
+	constructor(styles: XmlDocument | undefined, content: ContentPrologue | undefined, deferred = false) {
 		this.stylesDocument = styles
 		this.stylesNamespaces = styles === undefined ? undefined : new Namespaces(styles)
 
+		if (deferred) return
+
+		const steps = this.read(content)
+
+		while (steps.next().done !== true) continue
+	}
+
+	// The sheet read in slices (a long prologue holds thousands of automatic styles).
+	static async build(styles: XmlDocument | undefined, content: ContentPrologue | undefined, slicing: Slicing): Promise<OdfStyleSheet> {
+		const sheet = new OdfStyleSheet(styles, content, true)
+
+		await runSliced(sheet.read(content), sliceClock(slicing))
+
+		return sheet
+	}
+
+	get defaultPageLayout(): OdfPageLayout | undefined {
+		return this.defaultLayout
+	}
+
+	// Both streams read, a step at a time.
+	private *read(content: ContentPrologue | undefined): Generator<void> {
+		const styles = this.stylesDocument
+
 		if (styles !== undefined && this.stylesNamespaces !== undefined) {
-			this.readStream(styles, this.stylesNamespaces, styles.documentElement(), "styles")
+			yield* this.readStream(styles, this.stylesNamespaces, styles.documentElement(), "styles")
 		}
 
-		if (content !== undefined) this.readStream(content.document, content.namespaces, content.root, "content")
+		if (content !== undefined) yield* this.readStream(content.document, content.namespaces, content.root, "content")
 
-		this.defaultPageLayout = this.defaultLayout
 		this.checkParents()
 	}
 
 	// The style a `scope` stream's content names: its own automatic style first, then the common one.
 	style(family: string, name: string, scope: StyleScope): OdfStyle | undefined {
-		return this.automaticOf[scope].styles.get(key(family, name)) ?? this.common.styles.get(key(family, name))
+		return this.automaticStyle(scope, key(family, name)) ?? this.common.styles.get(key(family, name))
+	}
+
+	// Automatic styles read are kept up to this many (all of them by default); past it, read again when asked for.
+	// A translation reading a document in order asks for most of them once.
+	keepAtMost = Infinity
+
+	private automaticStyle(scope: StyleScope, styleKey: string): OdfStyle | undefined {
+		const tables = this.automaticOf[scope]
+		const known = tables.read.get(styleKey) ?? tables.styles.get(styleKey)
+
+		if (known !== undefined) return known
+
+		const pending = tables.pending.get(styleKey)
+
+		if (pending === undefined) return undefined
+
+		const style = this.readStyle(readElement(pending.document, pending.namespaces, pending.node), true, pending.origin)
+
+		if (style === undefined) return undefined
+		if (tables.read.size >= this.keepAtMost) tables.read.clear()
+
+		tables.read.set(styleKey, style)
+
+		return style
+	}
+
+	// The names of a stream's automatic styles of `family` (read or not yet read), in no particular order.
+	*automaticNames(family: string, scope: StyleScope): Generator<string> {
+		const tables = this.automaticOf[scope]
+		const prefix = key(family, "")
+
+		for (const table of [tables.styles, tables.pending]) {
+			for (const styleKey of table.keys()) if (styleKey.startsWith(prefix)) yield styleKey.slice(prefix.length)
+		}
 	}
 
 	// Common styles only: what style:parent-style-name and style:next-style-name refer to (§19.510).
@@ -287,17 +361,17 @@ export class OdfStyleSheet {
 		for (const style of this.common.styles.values()) if (family === undefined || style.family === family) yield style
 	}
 
-	private readStream(document: XmlDocument, namespaces: Namespaces, root: number, origin: StyleScope): void {
+	private *readStream(document: XmlDocument, namespaces: Namespaces, root: number, origin: StyleScope): Generator<void> {
 		for (let node = document.firstChildElement(root); node >= 0; node = document.nextSiblingElement(node)) {
 			switch (elementName(document, namespaces, node)) {
 				case "office:font-face-decls":
 					this.readFontFaces(document, namespaces, node)
 					break
 				case "office:styles":
-					this.readContainer(document, namespaces, node, origin, false)
+					yield* this.readContainer(document, namespaces, node, origin, false)
 					break
 				case "office:automatic-styles":
-					this.readContainer(document, namespaces, node, origin, true)
+					yield* this.readContainer(document, namespaces, node, origin, true)
 					break
 				case "office:master-styles":
 					this.readMasterStyles(document, namespaces, node)
@@ -338,10 +412,19 @@ export class OdfStyleSheet {
 		}
 	}
 
-	private readContainer(document: XmlDocument, namespaces: Namespaces, container: number, origin: StyleScope, automatic: boolean): void {
+	private *readContainer(
+		document: XmlDocument,
+		namespaces: Namespaces,
+		container: number,
+		origin: StyleScope,
+		automatic: boolean
+	): Generator<void> {
 		const tables = automatic ? this.automaticOf[origin] : this.common
+		let read = 0
 
 		for (let node = document.firstChildElement(container); node >= 0; node = document.nextSiblingElement(node)) {
+			if (++read % STYLES_PER_STEP === 0) yield
+
 			const name = elementName(document, namespaces, node)
 			const dataKind = DATA_STYLE_KINDS[name]
 
@@ -356,6 +439,23 @@ export class OdfStyleSheet {
 			switch (name) {
 				case "style:style":
 				case "style:default-style": {
+					if (automatic && name === "style:style") {
+						const attributes = canonicalAttributes(document, namespaces, node)
+						const family = attributes.get("style:family")
+						const styleName = attributes.get("style:name")
+
+						if (family === undefined || styleName === undefined) break
+
+						const styleKey = key(family, styleName)
+						const parent = attributes.get("style:parent-style-name")
+
+						if (tables.styles.has(styleKey) || tables.pending.has(styleKey))
+							this.issues.push({ kind: "duplicate", what: `style ${family}`, name: `${family}:${styleName}` })
+						else tables.pending.set(styleKey, { document, namespaces, node, origin, family, name: styleName, parent })
+
+						break
+					}
+
 					const style = this.readStyle(readElement(document, namespaces, node), automatic, origin)
 
 					if (style === undefined) break
@@ -577,7 +677,13 @@ export class OdfStyleSheet {
 	}
 
 	private checkParents(): void {
-		const tables = [this.common.styles, this.automaticOf.styles.styles, this.automaticOf.content.styles]
+		const tables = [
+			this.common.styles,
+			this.automaticOf.styles.styles,
+			this.automaticOf.styles.pending,
+			this.automaticOf.content.styles,
+			this.automaticOf.content.pending
+		]
 
 		for (const table of tables) {
 			for (const style of table.values()) {

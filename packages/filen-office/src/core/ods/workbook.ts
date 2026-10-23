@@ -1,16 +1,20 @@
 import { Relationships } from "../opc/relationships"
-import type { SheetProtectedAction, SheetRange } from "../sheet/protocol"
+import { SHEET_MAX_COLS, SHEET_MAX_ROWS, type SheetProtectedAction, type SheetRange } from "../sheet/protocol"
+import type { AxisShift } from "../xlsx/refs/axis"
+import { SourceAxis } from "./write/axis"
 import { DEFAULT_FORMAT, DEFAULT_VIEW, XlsxSheet } from "../xlsx/read/worksheet"
-import type {
-	XlsxDefinedName,
-	XlsxSection,
-	XlsxSheetEntry,
-	XlsxSheetModel,
-	XlsxSheetProtection,
-	XlsxSheetView,
-	XlsxRowRun,
-	XlsxStyleRuns,
-	XlsxWorkbookProtection
+import type { SheetStore } from "../xlsx/model/store"
+import {
+	rowRunAt,
+	type XlsxDefinedName,
+	type XlsxSection,
+	type XlsxSheetEntry,
+	type XlsxSheetModel,
+	type XlsxSheetProtection,
+	type XlsxSheetView,
+	type XlsxRowRun,
+	type XlsxStyleRuns,
+	type XlsxWorkbookProtection
 } from "../xlsx/model/types"
 import type { OdsIssues } from "./issues"
 import { rangeAddress, sheetRef } from "./formula/toXlsx"
@@ -19,16 +23,42 @@ import { NULL_DATE_1899, NULL_DATE_1904 } from "./read/values"
 import type { OdsCellStyles } from "./styles/cell"
 import type { OdsSettings, OdsTableView } from "./settings"
 import { featureParts, type OdsFeatureParts } from "./features"
+import { NO_CHARTS, type OdsChartParts } from "./charts/read"
 
 // The read content as the xlsx workbook model: one sheet entry and model per table, the workbook's names, and an
 // in-memory package of the parts the sheet features read (notes, link targets) in their SpreadsheetML form.
 
 // A sheet of an OpenDocument source: the xlsx sheet model with the run index of formats and the runs of rows the
-// store does not hold.
+// store does not hold, and where its rows and columns came from in the source table (moved by structure edits), which
+// the writer copies unchanged rows and cells from.
 export class OdsSheet extends XlsxSheet {
-	readonly styleRuns?: XlsxStyleRuns
-	readonly rowRuns?: readonly XlsxRowRun[]
+	styleRuns?: XlsxStyleRuns
 	readonly recalculate?: ReadonlySet<number>
+	rowAxis = SourceAxis.identity(SHEET_MAX_ROWS)
+	colAxis = SourceAxis.identity(SHEET_MAX_COLS)
+	// The runs of rows as read or moved since, and the same without the rows the store has come to hold since
+	// (a row an edit gave a cell takes its run's properties and holds them itself), as of the store's version.
+	private ownRuns: readonly XlsxRowRun[] = []
+	private apartRuns: readonly XlsxRowRun[] | null = null
+	private apartVersion = -1
+
+	get rowRuns(): readonly XlsxRowRun[] | undefined {
+		if (this.ownRuns.length === 0) return undefined
+
+		const store = this.store as SheetStore
+
+		if (this.apartRuns === null || this.apartVersion !== store.version) {
+			this.apartRuns = runsApart(this.ownRuns, store)
+			this.apartVersion = store.version
+		}
+
+		return this.apartRuns.length === 0 ? undefined : this.apartRuns
+	}
+
+	set rowRuns(runs: readonly XlsxRowRun[] | undefined) {
+		this.ownRuns = runs ?? []
+		this.apartRuns = null
+	}
 
 	constructor(
 		init: ConstructorParameters<typeof XlsxSheet>[0] & {
@@ -42,7 +72,65 @@ export class OdsSheet extends XlsxSheet {
 		if (init.styleRuns !== undefined) this.styleRuns = init.styleRuns
 		if (init.rowRuns.length > 0) this.rowRuns = init.rowRuns
 		if (init.recalculate.size > 0) this.recalculate = init.recalculate
+
+		// A row the store adds inside a run starts with the run's properties.
+		const store = this.store as SheetStore
+
+		store.rowBase = row => rowRunAt(this.ownRuns, row)
 	}
+
+	// Rows from here on hold cells an edit moved between rows or within them (cells shifted in a band), which the
+	// writer writes again whatever their source.
+	movedFrom = SHEET_MAX_ROWS
+
+	shiftSource(shift: AxisShift): { readonly apply: () => void; readonly revert: () => void } | null {
+		const before = { rowAxis: this.rowAxis, colAxis: this.colAxis, movedFrom: this.movedFrom }
+		const band = shift.band
+		const moved = band === undefined ? this.movedFrom : Math.min(this.movedFrom, shift.axis === "rows" ? shift.at : band.start)
+		const after = {
+			rowAxis: this.rowAxis.shifted(shift, "rows", SHEET_MAX_ROWS),
+			colAxis: this.colAxis.shifted(shift, "cols", SHEET_MAX_COLS),
+			movedFrom: moved
+		}
+
+		if (after.rowAxis === before.rowAxis && after.colAxis === before.colAxis && after.movedFrom === before.movedFrom) return null
+
+		const set = (values: typeof before): void => {
+			this.rowAxis = values.rowAxis
+			this.colAxis = values.colAxis
+			this.movedFrom = values.movedFrom
+		}
+
+		return { apply: () => set(after), revert: () => set(before) }
+	}
+}
+
+// Runs without the rows the store holds (each such row holds its own properties).
+function runsApart(runs: readonly XlsxRowRun[], store: SheetStore): readonly XlsxRowRun[] {
+	const out: XlsxRowRun[] = []
+
+	for (const run of runs) {
+		let first = run.first
+
+		for (let b = Math.max(0, store.blockOf(run.first)); b < store.blocks.length; b++) {
+			const block = store.blocks[b]
+
+			if (block === undefined || block.firstRow > run.last) break
+
+			for (let i = 0; i < block.rowCount; i++) {
+				const row = block.firstRow + (block.rows[i] ?? 0)
+
+				if (row < first || row > run.last) continue
+				if (row > first) out.push({ ...run, first, last: row - 1 })
+
+				first = row + 1
+			}
+		}
+
+		if (first <= run.last) out.push(first === run.first ? run : { ...run, first })
+	}
+
+	return out
 }
 
 export interface OdsWorkbookParts {
@@ -55,6 +143,8 @@ export interface OdsWorkbookParts {
 	readonly iterate: { readonly enabled: boolean; readonly count: number; readonly delta: number }
 	// Parts by name, with [Content_Types].xml.
 	readonly parts: Map<string, Uint8Array>
+	// Per sheet, its validations' rules to the names they came from.
+	readonly validationNames: readonly ReadonlyMap<string, string>[]
 }
 
 const SELECTABLE: readonly SheetProtectedAction[] = ["selectLockedCells", "selectUnlockedCells"]
@@ -127,7 +217,8 @@ export function buildSheets(
 	styles: OdsCellStyles,
 	settings: OdsSettings,
 	issues: OdsIssues,
-	prefixes: ReadonlyMap<string, string>
+	prefixes: ReadonlyMap<string, string>,
+	charts: OdsChartParts = NO_CHARTS
 ): OdsWorkbookParts {
 	const entries: XlsxSheetEntry[] = []
 	const models: XlsxSheetModel[] = []
@@ -137,7 +228,7 @@ export function buildSheets(
 		0,
 		content.tables.findIndex(table => table.name === activeName)
 	)
-	const features: OdsFeatureParts = featureParts(content, styles, issues, prefixes)
+	const features: OdsFeatureParts = featureParts(content, styles, issues, prefixes, charts, content.unheld)
 
 	content.tables.forEach((table: OdsTable, index) => {
 		const id = index
@@ -193,6 +284,8 @@ export function buildSheets(
 				})
 			} else {
 				issues.add("name", table.name, `print range: ${translated.refused}`)
+				// Kept as written: not moved with the rows.
+				content.unheld.pin(table.name, "printRange")
 			}
 		}
 
@@ -257,7 +350,8 @@ export function buildSheets(
 			count: Number(iteration?.attributes.get("table:steps") ?? "100") || 100,
 			delta: Number(iteration?.attributes.get("table:minimum-difference") ?? "0.001") || 0.001
 		},
-		parts: features.parts
+		parts: features.parts,
+		validationNames: features.sheets.map(sheet => sheet.validationNames)
 	}
 }
 

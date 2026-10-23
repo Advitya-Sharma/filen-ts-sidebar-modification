@@ -4,15 +4,17 @@ import type { ByteSource } from "@filen/office/core/opc"
 import type { DocxHost } from "@filen/office/dom/docx"
 import type { DocxRtfDocument } from "@filen/office/dom/docx/rtf"
 import type { DocxEditingBackend } from "@/features/preview/lib/docxEditing"
-import { docxRtf } from "@/features/preview/lib/docxEngine"
+import { docxOdt, docxRtf } from "@/features/preview/lib/docxEngine"
 import { rtfEditingBackend } from "@/features/preview/lib/rtfEditing"
 import { PreviewDownloadButton, PreviewErrorState, PreviewLoading } from "@/features/preview/components/previewErrorState"
 import { log } from "@/lib/log"
 
-// An RTF file in the docx viewer: read in the docx worker into the package the viewer opens where it is held (none of
-// it on the page), then `children` with it. To be edited the editor takes its own copy and opens on it while the
-// document is proved there (Gate 1: blocks the RTF writer cannot write stay locked; editing starts once it is known),
-// and saves are written back as RTF there (rtfEditing.ts). Released when the preview closes.
+// An RTF file in the docx viewer (or an OpenDocument text file opened for editing): read in the docx worker into the
+// package the viewer opens where it is held (none of it on the page), then `children` with it. To be edited the editor
+// takes its own copy and opens on it while the document is proved there (Gate 1: blocks the writer cannot write stay
+// locked; editing starts once it is known), and saves are written back in the file's format there (rtfEditing.ts).
+// Released when the preview closes. An OpenDocument file the writer cannot hold (encrypted, damaged) shows
+// `unopened` instead: the viewer, which tells why.
 
 export interface RtfOpened {
 	// The viewer's source: the package where the worker holds it.
@@ -22,10 +24,27 @@ export interface RtfOpened {
 	readonly editing: { readonly docx: Uint8Array; readonly backend: DocxEditingBackend } | undefined
 }
 
-type State = { readonly kind: "reading" } | { readonly kind: "ready"; readonly opened: RtfOpened } | { readonly kind: "failed" }
+type State =
+	| { readonly kind: "reading" }
+	| { readonly kind: "ready"; readonly opened: RtfOpened }
+	| { readonly kind: "failed" }
+	| { readonly kind: "unopened" }
 
-export function RtfDocument({ bytes, edit, children }: { bytes: Uint8Array; edit: boolean; children: (opened: RtfOpened) => ReactNode }) {
+export function RtfDocument({
+	bytes,
+	edit,
+	format = "rtf",
+	unopened,
+	children
+}: {
+	bytes: Uint8Array
+	edit: boolean
+	format?: "rtf" | "odt"
+	unopened?: () => ReactNode
+	children: (opened: RtfOpened) => ReactNode
+}) {
 	const { t } = useTranslation("preview")
+	const fallback = unopened !== undefined
 	const [state, setState] = useState<{ bytes: Uint8Array; state: State }>({ bytes, state: { kind: "reading" } })
 	let current = state
 
@@ -39,10 +58,13 @@ export function RtfDocument({ bytes, edit, children }: { bytes: Uint8Array; edit
 		let held: DocxRtfDocument | undefined
 		let proofFailed = false
 
+		let notOpened = false
 		const read = async (): Promise<RtfOpened | undefined> => {
-			const opened = await docxRtf.open(bytes, { signal: controller.signal })
+			const opened = await (format === "odt" ? docxOdt : docxRtf).open(bytes, { signal: controller.signal })
 
 			if (opened.kind !== "opened") {
+				notOpened = opened.kind === "notRtf"
+
 				return undefined
 			}
 
@@ -68,14 +90,18 @@ export function RtfDocument({ bytes, edit, children }: { bytes: Uint8Array; edit
 					return
 				}
 
-				log.error("docx", "proving an RTF document failed", error)
+				log.error("docx", `proving an ${format === "odt" ? "OpenDocument" : "RTF"} document failed`, error)
 				proofFailed = true
 				setState(previous => (previous.bytes === bytes ? { bytes, state: { kind: "failed" } } : previous))
 			})
 
 			const docx = await taking
 
-			return { host: document.host, bytes: document.bytes, editing: { docx, backend: rtfEditingBackend(document, locked) } }
+			return {
+				host: document.host,
+				bytes: document.bytes,
+				editing: { docx, backend: rtfEditingBackend(document, locked, format === "odt" ? "ODT" : "RTF") }
+			}
 		}
 
 		read().then(
@@ -84,14 +110,17 @@ export function RtfDocument({ bytes, edit, children }: { bytes: Uint8Array; edit
 					return
 				}
 
-				setState(previous =>
-					previous.bytes === bytes
-						? { bytes, state: opened === undefined || proofFailed ? { kind: "failed" } : { kind: "ready", opened } }
-						: previous
-				)
+				const next: State =
+					opened === undefined && notOpened && fallback
+						? { kind: "unopened" }
+						: opened === undefined || proofFailed
+							? { kind: "failed" }
+							: { kind: "ready", opened }
+
+				setState(previous => (previous.bytes === bytes ? { bytes, state: next } : previous))
 			},
 			(error: unknown) => {
-				log.error("docx", "reading an RTF document failed", error)
+				log.error("docx", `reading an ${format === "odt" ? "OpenDocument" : "RTF"} document failed`, error)
 
 				if (!controller.signal.aborted) {
 					setState(previous => (previous.bytes === bytes ? { bytes, state: { kind: "failed" } } : previous))
@@ -103,7 +132,7 @@ export function RtfDocument({ bytes, edit, children }: { bytes: Uint8Array; edit
 			controller.abort()
 			held?.release()
 		}
-	}, [bytes, edit])
+	}, [bytes, edit, format, fallback])
 
 	switch (current.state.kind) {
 		case "reading":
@@ -115,6 +144,8 @@ export function RtfDocument({ bytes, edit, children }: { bytes: Uint8Array; edit
 					action={<PreviewDownloadButton />}
 				/>
 			)
+		case "unopened":
+			return unopened?.() ?? null
 		case "ready":
 			return children(current.state.opened)
 	}

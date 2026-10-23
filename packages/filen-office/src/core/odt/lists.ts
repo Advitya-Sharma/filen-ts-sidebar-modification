@@ -2,7 +2,7 @@ import { parseLength, type OdfListLevel, type OdfListStyle, type OdfStyleSheet, 
 import { fontFamily, type PropsSink } from "./props"
 import { esc, twips } from "./wml"
 
-// ODF list styles (Part 3 §16.30) as WordprocessingML abstract numbering, and list instances as w:num:
+// ODF list styles (Part 3 §16.32) as WordprocessingML abstract numbering, and list instances as w:num:
 // text:list starts a new list unless it continues one (text:continue-numbering, text:continue-list), and a
 // list item's text:start-value restarts the count through a level override.
 
@@ -21,7 +21,7 @@ const FORMATS: Readonly<Record<string, string>> = {
 	"ⅰ, ⅱ, ⅲ, ...": "lowerRoman"
 }
 
-// Where a level puts its label and text (§19.880 text:list-level-position-and-space-mode).
+// Where a level puts its label and text (§20.431 text:list-level-position-and-space-mode).
 export interface LevelGeometry {
 	readonly mode: "label-alignment" | "label-width-and-position"
 	// label-alignment: absolute text indent and first-line offset (negative: hanging).
@@ -66,8 +66,10 @@ export class Lists {
 	private readonly abstracts: string[] = []
 	private readonly nums: string[] = []
 	private readonly abstractIds = new Map<string, number>()
-	// The last instance of each list style (text:continue-numbering), and instances by xml:id.
-	private readonly lastOf = new Map<string, ListInstance>()
+	// Each w:num's list style (the outline style's name is "\u0000outline").
+	readonly numStyles = new Map<number, { readonly style: string; readonly scope: StyleScope }>()
+	// The last list opened, by its style (text:continue-numbering), and instances by xml:id (text:continue-list).
+	private last: { readonly key: string; readonly instance: ListInstance } | undefined
 	private readonly byId = new Map<string, ListInstance>()
 	private outlineInstance: ListInstance | undefined
 
@@ -99,10 +101,13 @@ export class Lists {
 		const key = `${scope}\u0000${style}`
 		let instance = continueList === undefined ? undefined : this.byId.get(continueList)
 
-		if (instance === undefined && continueNumbering) instance = this.lastOf.get(key)
+		// text:continue-numbering continues the preceding list, and only one of the same list style (ODF 1.3 Part 3
+		// §19.786); text:continue-list, when present, wins (§19.785).
+		if (instance === undefined && continueList === undefined && continueNumbering && this.last?.key === key)
+			instance = this.last.instance
 		if (instance === undefined) instance = this.newInstance(list, style, scope, sink)
 
-		this.lastOf.set(key, instance)
+		this.last = { key, instance }
 
 		if (xmlId !== undefined) this.byId.set(xmlId, instance)
 
@@ -130,6 +135,7 @@ export class Lists {
 	// The instance restarted at `start` on `level` (a list item's text:start-value).
 	restart(instance: ListInstance, ilvl: number, start: number): void {
 		instance.num = this.addNum(instance.abstract, `<w:lvlOverride w:ilvl="${ilvl}"><w:startOverride w:val="${start}"/></w:lvlOverride>`)
+		this.numStyles.set(instance.num, { style: instance.style, scope: instance.scope })
 	}
 
 	level(instance: ListInstance, level: number): OdfListLevel | undefined {
@@ -152,7 +158,11 @@ export class Lists {
 			this.abstracts.push(this.abstractXml(list, abstract, sink))
 		}
 
-		return { style, scope, abstract, num: this.addNum(abstract, "") }
+		const num = this.addNum(abstract, "")
+
+		this.numStyles.set(num, { style, scope })
+
+		return { style, scope, abstract, num }
 	}
 
 	private addNum(abstract: number, overrides: string): number {

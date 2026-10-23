@@ -110,6 +110,24 @@ const DEVIATIONS: Readonly<Record<string, string>> = {
 	"formulajs/test/information.js:8": "the engine has no #NULL! error value: a formula naming it does not parse here (ERROR.TYPE's 1)",
 	"formulajs/test/information.js:15":
 		"the engine has no #GETTING_DATA error value: a formula naming it does not parse here (ERROR.TYPE's 8)",
+	"formulajs/test/math-trig.js:131": SYNTAX,
+	"formulajs/test/math-trig.js:132": SYNTAX,
+	"formulajs/test/math-trig.js:136":
+		'CEILING has no optional argument ("CEILING(number, significance)"): a call without significance does not enter',
+	"formulajs/test/math-trig.js:155": SYNTAX,
+	"formulajs/test/math-trig.js:179": SYNTAX,
+	"formulajs/test/math-trig.js:344": "an argument left empty in a formula is 0, not the default (formulajs's undefined)",
+	"formulajs/test/math-trig.js:347":
+		'2014.6 is a multiple of 0.2 and stays as it is ("CEILING function": CEILING(1.5,0.1) is 1.5; LibreOffice gives 2014.6); formulajs floors the binary quotient, 10072.999999999998',
+	"formulajs/test/math-trig.js:357": "an argument left empty in a formula is 0, not the default (formulajs's undefined)",
+	"formulajs/test/math-trig.js:390": SYNTAX,
+	"formulajs/test/math-trig.js:399": SYNTAX,
+	"formulajs/test/math-trig.js:401":
+		'"ISO.CEILING function": "If significance is omitted, its default value is 1", and ISO.CEILING(4.3) is 5',
+	"formulajs/test/math-trig.js:405":
+		'"ISO.CEILING function": the absolute value of the significance is used, and ISO.CEILING(4.3,-2) is 6',
+	"formulajs/test/math-trig.js:407":
+		'"ISO.CEILING function": the absolute value of the significance is used, and ISO.CEILING(-4.3,-2) is -4',
 	"formulajs/test/math-trig.js:632": SYNTAX,
 	"formulajs/test/math-trig.js:634": SYNTAX,
 	"formulajs/test/statistical.js:566":
@@ -288,6 +306,11 @@ const LO_SIGNIFICANCE = '"If significance < 1, PERCENTRANK returns the #NUM! err
 const LO_TRIMMEAN = 'TRIMMEAN: "If percent < 0 or percent > 1, TRIMMEAN returns the #NUM! error value." (1 itself is not out of range)'
 const LO_ENCODEURL =
 	'ENCODEURL keeps "." (support.microsoft.com "ENCODEURL function": its example gives http%3A%2F%2Fcontoso.sharepoint.com%2FFinance%2F...)'
+const LO_CEILING =
+	"the workbook's ODF CEILING is LibreOffice's, an error for a negative number without a mode or with a significance of the other sign; Excel's CEILING.MATH, which the file keeps it as, rounds to the significance's absolute value (support.microsoft.com \"CEILING.MATH function\": CEILING.MATH(-8.1,2) is -8)"
+const LO_FLOOR =
+	"the workbook's ODF FLOOR is LibreOffice's, an error for a negative number without a mode or with a significance of the other sign; Excel's FLOOR.MATH, which the file keeps it as, rounds to the significance's absolute value (support.microsoft.com \"FLOOR.MATH function\": FLOOR.MATH(-8.1,2) is -10)"
+const LO_EMPTY_ARGUMENT = "an argument left empty in a formula is 0, not the default: FLOOR.MATH(7.9,0,5) is 0"
 const LO_ARRAY_ARITHMETIC =
 	"the engine evaluates an ordinary formula without array arithmetic, so LINEST's (LOGEST's) array times {9,1} reads its first value; Excel sums both (support.microsoft.com \"LINEST function\", Example 2: 11000)"
 const LO_RANDOM = "RANDARRAY's numbers are random: the workbook's expected cell holds a check of them, not a value"
@@ -404,6 +427,30 @@ const LIBREOFFICE_DEVIATIONS: Readonly<Record<string, string>> = {
 	"information/fods/type.fods Sheet2!A2": LO_BOOLEANS,
 	"information/fods/type.fods Sheet2!A7": LO_SYNTAX,
 	"information/fods/type.fods Sheet2!A15": 'TYPE has no 8 in Excel (support.microsoft.com "TYPE function": 1, 2, 4, 16, 64, 128)',
+	"information/fods/iseven.fods Sheet2!A8":
+		'ISEVEN of text: "If number is nonnumeric, ISEVEN returns the #VALUE! error value." (LibreOffice\'s expected cell holds "err")',
+	"mathematical/fods/ceiling.fods Sheet2!A7": LO_CEILING,
+	"mathematical/fods/ceiling.fods Sheet2!A24": LO_CEILING,
+	"mathematical/fods/ceiling.fods Sheet2!A25": LO_CEILING,
+	"mathematical/fods/ceiling.fods Sheet2!A26": LO_CEILING,
+	"mathematical/fods/ceiling.fods Sheet2!A27": LO_CEILING,
+	"mathematical/fods/ceiling.fods Sheet2!A28": LO_CEILING,
+	"mathematical/fods/ceiling.fods Sheet2!A29": LO_CEILING,
+	"mathematical/fods/floor.fods Sheet2!A7": LO_FLOOR,
+	"mathematical/fods/floor.fods Sheet2!A24": LO_FLOOR,
+	"mathematical/fods/floor.fods Sheet2!A25": LO_FLOOR,
+	"mathematical/fods/floor.fods Sheet2!A26": LO_FLOOR,
+	"mathematical/fods/floor.fods Sheet2!A27": LO_FLOOR,
+	"mathematical/fods/floor.fods Sheet2!A28": LO_FLOOR,
+	"mathematical/fods/floor.fods Sheet2!A29": LO_FLOOR,
+	"mathematical/fods/floor.fods Sheet2!A52": LO_EMPTY_ARGUMENT,
+	"mathematical/fods/floor.fods Sheet2!A53": LO_EMPTY_ARGUMENT,
+	"mathematical/fods/floor.fods Sheet2!A55": LO_EMPTY_ARGUMENT,
+	"mathematical/fods/floor.fods Sheet2!A56": LO_EMPTY_ARGUMENT,
+	"mathematical/fods/int.fods Sheet2!A5":
+		'INT rounds the value down ("Rounds a number down to the nearest integer"): ((6*15.54)-77.7)/15.54 is 0.9999999999999994 in binary, so 0; LibreOffice rounds it at 15 digits first',
+	"mathematical/fods/roundup.fods Sheet2!A14":
+		"8.06-8 is 0.0600000000000005 in binary, also at the 15 digits Excel holds, so ROUNDUP takes it to 0.07; LibreOffice's subtraction gives 0.06 itself",
 	"spreadsheet/fods/address.fods Sheet2!A2": LO_SHEET_POINT,
 	"spreadsheet/fods/address.fods Sheet2!A10": LO_SHEET_POINT,
 	"spreadsheet/fods/address.fods Sheet2!A14": LO_SHEET_POINT,

@@ -124,6 +124,7 @@ function flags(overrides: Partial<DriveSelectionFlags> = {}): DriveSelectionFlag
 		includesUndecryptable: false,
 		everySharedRoot: false,
 		everyArchive: false,
+		everyDownloadAs: false,
 		...overrides
 	}
 }

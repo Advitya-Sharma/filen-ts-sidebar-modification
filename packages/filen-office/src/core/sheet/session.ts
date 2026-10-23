@@ -115,6 +115,13 @@ export interface SheetSessionDocument {
 	dropPreview?(sheet: SheetId): void
 	viewOnly(): void
 	close(): void
+	// Called before each edit runs: what checkEdit judges is what the edit itself did.
+	beginEdit?(command: SheetCommand): void
+	// Whether the file's writer can hold what an edit just did (`touched`: the ranges it reported): a refusal undoes
+	// the edit at once, before anything is recorded or handed out.
+	checkEdit?(touched: ReadonlyMap<SheetId, readonly SheetRange[]>, command: SheetCommand): SheetRefusal | null
+	// The edit checkEdit refused was undone: whatever it recorded of its own goes with it.
+	editUndone?(): void
 }
 
 declare module "./protocol" {
@@ -1160,6 +1167,9 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 			): ReturnType<NonNullable<ReturnType<SheetRegistry<D>["command"]>>["run"]>
 		}
 		const collector = new ChangeCollector()
+
+		this.document.beginEdit?.(command)
+
 		const handled = await handler.run({ ...this.readContext(undefined), changes: collector }, command)
 
 		if (handled !== null && "refused" in handled) {
@@ -1167,7 +1177,18 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 			return this.refused(handled.refused)
 		}
 
-		if (handled !== null) this.history.record(handled)
+		if (handled !== null) {
+			const unwritable = this.document.checkEdit?.(collector.ranges, command) ?? null
+
+			if (unwritable !== null) {
+				await handled.undo(new ChangeCollector())
+				this.document.editUndone?.()
+
+				return this.refused(unwritable)
+			}
+
+			this.history.record(handled)
+		}
 
 		return { ok: true, change: this.change(collector) }
 	}

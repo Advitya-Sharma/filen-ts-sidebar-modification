@@ -7,6 +7,7 @@ import {
 	CARRIED,
 	NO_SPAN,
 	RowFlag,
+	ROW_MARKS,
 	blockOrigin,
 	type XlsxSourceCell,
 	type XlsxFormula,
@@ -867,7 +868,7 @@ function writeRow(out: ByteBuilder, context: RowContext, block: XlsxRowBlock, in
 	const row = block.firstRow + (block.rows[index] ?? 0)
 	const height = block.rowHeights[index] ?? Number.NaN
 	const style = block.rowStyles[index] ?? -1
-	const flags = (block.rowFlags[index] ?? 0) & ~(RowFlag.DIRTY | RowFlag.NEW)
+	const flags = (block.rowFlags[index] ?? 0) & ~ROW_MARKS
 	const spans = widenedSpans(source?.spans, block, index)
 	const from = block.rowStarts[index] ?? 0
 	const to = block.rowStarts[index + 1] ?? 0
@@ -974,7 +975,7 @@ function equalsSource(context: RowContext, block: XlsxRowBlock, index: number, r
 	const store = context.sheet.store
 	const from = block.rowStarts[index] ?? 0
 	const to = block.rowStarts[index + 1] ?? 0
-	const flags = (block.rowFlags[index] ?? 0) & ~(RowFlag.DIRTY | RowFlag.NEW)
+	const flags = (block.rowFlags[index] ?? 0) & ~ROW_MARKS
 	const sourceRow = block.sourceFirstRow < 0 ? -1 : block.sourceFirstRow + (block.rows[index] ?? 0)
 
 	// A row without r is numbered by its position: written anew with its number.
@@ -1133,7 +1134,7 @@ function quickRow(
 
 	const height = block.rowHeights[index] ?? Number.NaN
 	const style = block.rowStyles[index] ?? -1
-	const flags = (block.rowFlags[index] ?? 0) & ~(RowFlag.DIRTY | RowFlag.NEW)
+	const flags = (block.rowFlags[index] ?? 0) & ~ROW_MARKS
 	let sourceFlags = 0
 	let sourceHeight = Number.NaN
 	let sourceStyle = -1

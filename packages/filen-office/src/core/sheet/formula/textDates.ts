@@ -29,8 +29,15 @@ function timeOf(text: string): TextDateTime {
 	return { hours: (hours % 12) + (half.toLowerCase() === "p" ? 12 : 0), minutes, seconds }
 }
 
+// The locale each parser reads in, for the engine's other readings of text (functions/plugin.ts reads numbers in it).
+const parserLocales = new WeakMap<ConfigParams["parseDateTime"], SheetLocale>()
+
+export function parserLocale(parser: ConfigParams["parseDateTime"]): SheetLocale {
+	return parserLocales.get(parser) ?? EN_US_LOCALE
+}
+
 export function textDateParser(locale: SheetLocale = EN_US_LOCALE): ConfigParams["parseDateTime"] {
-	return (text: string): TextDateTime => {
+	const parser = (text: string): TextDateTime => {
 		const trimmed = text.trim().replace(/\s+/g, " ")
 		const date = localizedDate(trimmed, locale)
 
@@ -49,4 +56,8 @@ export function textDateParser(locale: SheetLocale = EN_US_LOCALE): ConfigParams
 
 		return day === null || clock === undefined ? undefined : { ...day, ...clock }
 	}
+
+	parserLocales.set(parser, locale)
+
+	return parser
 }

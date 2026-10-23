@@ -22,9 +22,11 @@ export type SheetPdfJobResult =
 export type { SheetPdfRefusal, SheetPdfRequest }
 
 // What the job is sent: the print, and the password that encrypts the PDF (a protected workbook's own).
+// `deterministic`: no creation date, a file identifier from the title (equal exports compare byte for byte).
 export interface SheetPdfJobArgs {
 	readonly request: SheetPdfRequest
 	readonly password?: string
+	readonly deterministic?: boolean
 }
 
 export async function sheetPdf(
@@ -34,6 +36,7 @@ export async function sheetPdf(
 		readonly signal?: SheetAbortSignal
 		readonly onProgress?: (done: number, total: number) => void
 		readonly password?: string
+		readonly deterministic?: boolean
 	} = {}
 ): Promise<SheetPdfJobResult | { readonly ok: false; readonly reason: "unsupported" | "closed" }> {
 	const jobs = sheetJobs(session)
@@ -42,7 +45,11 @@ export async function sheetPdf(
 
 	const onProgress = options.onProgress
 
-	const args: SheetPdfJobArgs = options.password === undefined ? { request } : { request, password: options.password }
+	const args: SheetPdfJobArgs = {
+		request,
+		...(options.password !== undefined && { password: options.password }),
+		...(options.deterministic === true && { deterministic: true })
+	}
 
 	try {
 		return (await jobs.job(SHEET_PDF_JOB, args, {

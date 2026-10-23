@@ -12,6 +12,8 @@
 // Several keys below (sort menu, column headers, new-directory dialog, breadcrumb) are declared
 // ahead of the components that will render them, so no literal string has to land in those
 // components later. "directory" never "folder" — binding across every key here.
+import { driveDownloadAs } from "@/locales/en/driveDownloadAs"
+
 export const drive = {
 	// ── Toolbar ──────────────────────────────────────────────────────────────
 	/** Directory item menu — submenu holding New directory, New text file, Upload files and Upload directory for that directory */
@@ -808,5 +810,6 @@ export const drive = {
 	/** Activity toast — deleting file versions (an item is a version, named by its date) partly failed; {{count}} succeeded, {{failed}} failed */
 	driveDeleteVersionsPartial_one: "Deleted {{count}} version, {{failed}} failed",
 	/** Activity toast — deleting file versions (an item is a version, named by its date) partly failed; {{count}} succeeded, {{failed}} failed */
-	driveDeleteVersionsPartial_other: "Deleted {{count}} versions, {{failed}} failed"
+	driveDeleteVersionsPartial_other: "Deleted {{count}} versions, {{failed}} failed",
+	...driveDownloadAs
 } as const

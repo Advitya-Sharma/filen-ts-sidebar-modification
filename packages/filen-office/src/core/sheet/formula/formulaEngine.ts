@@ -58,7 +58,16 @@ export interface RecalculatedCell {
 	// A cell a dynamic-array formula spills over, not a formula of its own: its value now (null where the spill no
 	// longer reaches).
 	spilled?: true
+	// An error that comes from another cell's formula (propagated): that cell, by sheet index.
+	root?: { readonly sheet: number; readonly row: number; readonly col: number }
+	// What a #NAME? did not know: a function or a name, as written.
+	unknown?: { readonly kind: "function" | "name"; readonly name: string }
 }
+
+// The engine's words for what a #NAME? did not know (HyperFormula's ErrorMessage.FunctionName and
+// NamedExpressionName).
+const UNKNOWN_FUNCTION = /^Function name (.+) not recognized\.$/u
+const UNKNOWN_NAME = /^Named expression (.+) not recognized\.$/u
 
 // A formula's stored result, held by the engine in its place: the formula is not calculated here (a function the
 // engine lacks, an array formula, syntax it cannot read). It depends on no cell there: the caller knows what the
@@ -1508,7 +1517,7 @@ export class FormulaEngine {
 				row: change.address.row,
 				col: change.address.col,
 				value: exported(value),
-				...(value instanceof DetailedCellError ? { error: true } : {})
+				...this.errorOf(value, change.address, id => this.sheetIds.indexOf(id))
 			})
 		}
 	}
@@ -1611,7 +1620,7 @@ export class FormulaEngine {
 				row: address.row,
 				col: address.col,
 				value: exported(value),
-				...(value instanceof DetailedCellError ? { error: true } : {}),
+				...this.errorOf(value, address, id => this.sheetIds.indexOf(id)),
 				stale: true
 			})
 		}
@@ -1820,7 +1829,7 @@ export class FormulaEngine {
 				row: address.row,
 				col: address.col,
 				value: exported(value),
-				...(value instanceof DetailedCellError ? { error: true } : {})
+				...this.errorOf(value, address, id => this.sheetIds.indexOf(id))
 			})
 		}
 	}
@@ -2207,7 +2216,7 @@ export class FormulaEngine {
 				row: address.row,
 				col: address.col,
 				value: exported(value),
-				...(value instanceof DetailedCellError ? { error: true } : {})
+				...this.errorOf(value, address, id => ids.indexOf(id))
 			})
 		}
 
@@ -2249,6 +2258,30 @@ export class FormulaEngine {
 			return lifted || Array.isArray(value)
 		} catch {
 			return false
+		}
+	}
+
+	// Whether a value is an error, and the cell it comes from where that is another one (the engine names the cell
+	// whose formula failed first: a propagated error keeps it).
+	private errorOf(
+		value: unknown,
+		at: SimpleCellAddress,
+		index: (id: number) => number
+	): Pick<RecalculatedCell, "error" | "root" | "unknown"> {
+		if (!(value instanceof DetailedCellError)) return {}
+
+		const fn = UNKNOWN_FUNCTION.exec(value.message)?.[1]
+		const name = UNKNOWN_NAME.exec(value.message)?.[1]
+		const unknown =
+			fn !== undefined ? { kind: "function" as const, name: fn } : name !== undefined ? { kind: "name" as const, name } : undefined
+		const root = value.address === undefined ? undefined : this.engine.simpleCellAddressFromString(value.address, at.sheet)
+		const sheet = root === undefined ? -1 : index(root.sheet)
+		const own = root === undefined || (root.sheet === at.sheet && root.row === at.row && root.col === at.col)
+
+		return {
+			error: true,
+			...(unknown !== undefined && { unknown }),
+			...(!own && root !== undefined && sheet >= 0 && { root: { sheet, row: root.row, col: root.col } })
 		}
 	}
 

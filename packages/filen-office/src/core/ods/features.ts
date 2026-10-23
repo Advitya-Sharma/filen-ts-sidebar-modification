@@ -5,11 +5,13 @@ import { escapeAttribute, escapeText } from "../xml/index"
 import type { XlsxDefinedName, XlsxDxf, XlsxSection } from "../xlsx/model/types"
 import { columnText, rangeAddress, sheetRef, translateExpression } from "./formula/toXlsx"
 import type { OdsIssues } from "./issues"
+import type { UnheldCollector } from "./unheld"
 import { capturedText, parseCaptured } from "./read/captured"
 import type { OdsContent, OdsTable } from "./read/content"
 import { OdsReadError } from "./read/errors"
 import type { OdsCellLink, OdsCellNote } from "./read/sheet"
 import type { OdsCellStyles } from "./styles/cell"
+import { NO_CHARTS, type OdsChartParts } from "./charts/read"
 
 // The sheet features' sources in their SpreadsheetML form, built from what content.xml held, so the features read an
 // OpenDocument sheet as they read a worksheet: annotations as a comments part (§18.7), text:a links as hyperlinks
@@ -28,6 +30,46 @@ const COMMENTS_CONTENT = "application/vnd.openxmlformats-officedocument.spreadsh
 export interface OdsSheetFeatures {
 	readonly sections: XlsxSection[]
 	readonly relationships: Relationship[]
+	// Each validation's dataValidation element without its sqref (as validationRuleKey gives it), to the name of the
+	// table:content-validation it came from.
+	readonly validationNames: ReadonlyMap<string, string>
+}
+
+// Attribute values a dataValidation element has when it leaves them out (ECMA-376 Part 1 §18.3.1.32).
+const DV_DEFAULTS: Readonly<Record<string, string>> = {
+	type: "none",
+	operator: "between",
+	allowBlank: "0",
+	showDropDown: "0",
+	showInputMessage: "0",
+	showErrorMessage: "0",
+	errorStyle: "stop",
+	imeMode: "noControl",
+	error: "",
+	errorTitle: "",
+	prompt: "",
+	promptTitle: ""
+}
+
+// A dataValidation element's rule, its sqref aside, however its attributes are spelled and ordered: what tells two
+// validations apart.
+export function validationRuleKey(markup: string): string {
+	const open = markup.slice(0, markup.indexOf(">") + 1)
+	const attributes: string[] = []
+
+	for (const match of open.matchAll(/\s([A-Za-z:]+)="([^"]*)"/g)) {
+		const name = match[1] ?? ""
+		const raw = match[2] ?? ""
+		const value = raw === "true" ? "1" : raw === "false" ? "0" : raw
+
+		if (name === "sqref" || name.startsWith("xmlns") || DV_DEFAULTS[name] === value) continue
+
+		attributes.push(`${name}=${value}`)
+	}
+
+	const formula = (tag: string): string => new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(markup)?.[1] ?? ""
+
+	return JSON.stringify([attributes.sort(), formula("formula1"), formula("formula2")])
 }
 
 export interface OdsFeatureParts {
@@ -340,7 +382,13 @@ function paragraphText(paragraph: OdfElement): string {
 	return text
 }
 
-function validationsSection(table: OdsTable, validations: OdfElement | undefined, issues: OdsIssues): string | null {
+function validationsSection(
+	table: OdsTable,
+	validations: OdfElement | undefined,
+	issues: OdsIssues,
+	names: Map<string, string>,
+	unheld: UnheldCollector | undefined
+): string | null {
 	const used = table.built.validations
 
 	if (used.size === 0 || validations === undefined) return null
@@ -366,6 +414,8 @@ function validationsSection(table: OdsTable, validations: OdfElement | undefined
 
 		if (typeof rule === "string") {
 			issues.add("validation", table.name, rule)
+			// Kept as written: its base cell and the cells its condition reads (on any sheet) are not moved with them.
+			unheld?.makeOpaque("validation")
 
 			continue
 		}
@@ -395,9 +445,11 @@ function validationsSection(table: OdsTable, validations: OdfElement | undefined
 			`sqref="${sqref}"`
 		].filter(part => part !== "")
 
-		out.push(
-			`<dataValidation ${attributes.join(" ")}>${rule.formula1 === null ? "" : `<formula1>${escapeText(rule.formula1)}</formula1>`}${rule.formula2 === null ? "" : `<formula2>${escapeText(rule.formula2)}</formula2>`}</dataValidation>`
-		)
+		const element = `<dataValidation ${attributes.join(" ")}>${rule.formula1 === null ? "" : `<formula1>${escapeText(rule.formula1)}</formula1>`}${rule.formula2 === null ? "" : `<formula2>${escapeText(rule.formula2)}</formula2>`}</dataValidation>`
+
+		if (!names.has(validationRuleKey(element))) names.set(validationRuleKey(element), name)
+
+		out.push(element)
 	}
 
 	return out.length === 0 ? null : `<dataValidations xmlns="${MAIN}" count="${out.length}">${out.join("")}</dataValidations>`
@@ -816,14 +868,48 @@ function relationshipsPart(relationships: readonly { id: string; type: string; t
 	)
 }
 
+// A named expression's or range's key among the unheld (unheld.ts): its scope (a table's index, "" for the
+// workbook's), its name in upper case and the attribute.
+export function nameKey(sheet: number | null, name: string, attribute: string): string {
+	return `name\u0000${sheet ?? ""}\u0000${name.toUpperCase()}\u0000${attribute}`
+}
+
+// A database range the model does not hold: its range and its filter's output address. Its filter, sort and
+// subtotal rules name columns by their position in it (table:field-number), so it moves only whole.
+function databaseRangeAddresses(range: OdfElement, unheld: UnheldCollector): void {
+	const name = range.attributes.get("table:name") ?? ""
+	const positional = (element: OdfElement): boolean =>
+		element.children.some(
+			child => child.attributes.has("table:field-number") || child.attributes.has("table:group-by-field-number") || positional(child)
+		)
+	const target = range.attributes.get("table:target-range-address")
+
+	if (target !== undefined) unheld.element(positional(range) ? "fields" : "address", `db\u0000${name}\u0000target-range-address`, target)
+
+	const walk = (element: OdfElement, path: string): void => {
+		element.children.forEach((child, index) => {
+			const output = child.attributes.get("table:condition-source-range-address")
+
+			if (output !== undefined)
+				unheld.element("address", `db\u0000${name}\u0000${path}/${index}\u0000condition-source-range-address`, output)
+
+			walk(child, `${path}/${index}`)
+		})
+	}
+
+	walk(range, "")
+}
+
 export function featureParts(
 	content: OdsContent,
 	styles: OdsCellStyles,
 	issues: OdsIssues,
-	prefixes: ReadonlyMap<string, string>
+	prefixes: ReadonlyMap<string, string>,
+	charts: OdsChartParts = NO_CHARTS,
+	unheld?: UnheldCollector
 ): OdsFeatureParts {
-	const parts = new Map<string, Uint8Array>()
-	const overrides: string[] = []
+	const parts = new Map<string, Uint8Array>(charts.parts)
+	const overrides: string[] = [...charts.overrides]
 	const definedNames: XlsxDefinedName[] = []
 	const sheetIndex = new Map(content.tables.map((table, index) => [table.name, index]))
 	const filters = new Map<number, string>()
@@ -839,6 +925,8 @@ export function featureParts(
 		if (target === null) {
 			issues.add("filter", undefined, "target range")
 
+			if (unheld !== undefined) databaseRangeAddresses(range, unheld)
+
 			continue
 		}
 
@@ -847,7 +935,11 @@ export function featureParts(
 		// A named database range is no defined name: formulas reading it (DGET) keep their results.
 		if (index !== undefined && !name.startsWith("__Anonymous_Sheet_DB__")) issues.add("name", target.sheet, `database range ${name}`)
 
-		if (index === undefined || range.attributes.get("table:display-filter-buttons") !== "true" || filters.has(index)) continue
+		if (index === undefined || range.attributes.get("table:display-filter-buttons") !== "true" || filters.has(index)) {
+			if (unheld !== undefined) databaseRangeAddresses(range, unheld)
+
+			continue
+		}
 
 		const filter = range.children.find(child => child.name === "table:filter")
 
@@ -884,6 +976,11 @@ export function featureParts(
 
 			if (formula === null) {
 				issues.add("name", table, name)
+
+				const kept = named.name === "table:named-range" ? "cell-range-address" : "expression"
+				const text = named.attributes.get(`table:${kept}`)
+
+				if (text !== undefined) unheld?.element("name", nameKey(sheet, name, kept), text)
 
 				continue
 			}
@@ -931,16 +1028,33 @@ export function featureParts(
 
 		for (const markup of conditionalSections(table, styles, issues)) sections.push(section("conditionalFormatting", markup))
 
-		const validations = validationsSection(table, content.validations, issues)
+		const validationNames = new Map<string, string>()
+		const validations = validationsSection(table, content.validations, issues, validationNames, unheld)
 
 		if (validations !== null) sections.push(section("dataValidations", validations))
+
+		// The sheet's charts: their drawing's relationship after the others, its section in schema order.
+		const sheetCharts = charts.sheets.get(index)
+
+		if (sheetCharts !== undefined) {
+			const ids: string[] = []
+
+			for (const relationship of sheetCharts.relationships) {
+				const id = `rId${relationships.length + 1}`
+
+				ids.push(id)
+				relationships.push({ id, type: relationship.type, target: relationship.target, external: false })
+			}
+
+			sections.push(...sheetCharts.sections(ids))
+		}
 
 		const relationshipsName = `xl/worksheets/_rels/sheet${index + 1}.xml.rels`
 		const bytes = relationshipsPart(relationships)
 
 		parts.set(relationshipsName, bytes)
 
-		return { sections, relationships: [...parseRelationships(bytes, `xl/worksheets/sheet${index + 1}.xml`).all] }
+		return { sections, relationships: [...parseRelationships(bytes, `xl/worksheets/sheet${index + 1}.xml`).all], validationNames }
 	})
 
 	parts.set("[Content_Types].xml", encoder.encode(`${CONTENT_TYPES_START}${overrides.join("")}</Types>`))

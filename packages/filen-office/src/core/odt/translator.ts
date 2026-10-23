@@ -12,12 +12,12 @@ import { MarkupFlow, paragraph, type Flow, type ParagraphBlock } from "./flow"
 import { Frames } from "./frames"
 import { listIndent, levelGeometry, Lists } from "./lists"
 import { Pages } from "./pages"
-import { paragraphProperties, type Attributes, type PropsSink } from "./props"
+import { paragraphProperties, runProperties, type Attributes, type PropsSink } from "./props"
 import { StyleMapper } from "./styles"
 import { translateTable } from "./tables"
 import type { OdtLossyReason } from "./types"
 import { OdtScanError } from "./scan"
-import { esc, PartWriter, REL } from "./wml"
+import { esc, escText, PartWriter, REL } from "./wml"
 
 // Nested blocks and spans (each frame, table cell, note or list level adds about two).
 const MAX_NESTING = 128
@@ -28,6 +28,8 @@ const MAX_NESTING = 128
 
 export interface TranslatorSettings {
 	readonly tabsRelativeToIndent: boolean
+	// What the style caches keep at most (StyleOptions.keepAtMost): a document read once, in order.
+	readonly keepAtMost?: number
 }
 
 // Where a paragraph sits in a list.
@@ -62,7 +64,7 @@ const IGNORED_BLOCKS: ReadonlySet<string> = new Set([
 	"office:event-listeners"
 ])
 
-const PASS_THROUGH_INLINE: ReadonlySet<string> = new Set([
+export const PASS_THROUGH_INLINE: ReadonlySet<string> = new Set([
 	"text:meta",
 	"text:ruby-base",
 	"text:date",
@@ -75,10 +77,6 @@ const PASS_THROUGH_INLINE: ReadonlySet<string> = new Set([
 	"text:template-name",
 	"text:sheet-name",
 	"text:chapter",
-	"text:bookmark-ref",
-	"text:reference-ref",
-	"text:sequence-ref",
-	"text:note-ref",
 	"text:initial-creator",
 	"text:creation-date",
 	"text:creation-time",
@@ -120,13 +118,12 @@ const PASS_THROUGH_INLINE: ReadonlySet<string> = new Set([
 	"text:script",
 	"text:execute-macro",
 	"text:dde-connection",
-	"text:bibliography-mark",
 	"text:alphabetical-index-mark",
 	"field:fieldmark"
 ])
 
 // Fields whose shown result is kept as text with no WordprocessingML field behind it.
-const FIELDS_AS_TEXT: ReadonlySet<string> = new Set([
+export const FIELDS_AS_TEXT: ReadonlySet<string> = new Set([
 	"text:sequence",
 	"text:variable-get",
 	"text:variable-set",
@@ -146,9 +143,6 @@ const FIELDS_AS_TEXT: ReadonlySet<string> = new Set([
 
 const SKIPPED_INLINE: ReadonlySet<string> = new Set([
 	"text:soft-page-break",
-	"text:reference-mark",
-	"text:reference-mark-start",
-	"text:reference-mark-end",
 	"text:alphabetical-index-mark-start",
 	"text:alphabetical-index-mark-end",
 	"text:toc-mark",
@@ -173,23 +167,26 @@ class Runs {
 	private out = ""
 	private text = ""
 	private rPr = ""
+	// The run's origin attribute (w:rsidR naming the text:span it came from), "" for none.
+	private origin = ""
 	private readonly translator: Translator
 
 	constructor(translator: Translator) {
 		this.translator = translator
 	}
 
-	addText(text: string, rPr: string): void {
+	addText(text: string, rPr: string, origin = ""): void {
 		if (text === "") return
-		if (rPr !== this.rPr) this.flush()
+		if (rPr !== this.rPr || origin !== this.origin) this.flush()
 
 		this.rPr = rPr
+		this.origin = origin
 		this.text += text
 	}
 
-	addRun(inner: string, rPr: string): void {
+	addRun(inner: string, rPr: string, origin = ""): void {
 		this.flush()
-		this.out += this.wrap(`<w:r>${rPr === "" ? "" : `<w:rPr>${rPr}</w:rPr>`}${inner}</w:r>`)
+		this.out += this.wrap(`<w:r${origin}>${rPr === "" ? "" : `<w:rPr>${rPr}</w:rPr>`}${inner}</w:r>`)
 	}
 
 	addRaw(markup: string): void {
@@ -209,15 +206,15 @@ class Runs {
 			const code = text.charCodeAt(k)
 
 			if (code !== 0xad && code !== 0x2011) continue
-			if (k > from) inner += `<${tag} xml:space="preserve">${esc(text.slice(from, k))}</${tag}>`
+			if (k > from) inner += `<${tag} xml:space="preserve">${escText(text.slice(from, k))}</${tag}>`
 
 			inner += code === 0xad ? "<w:softHyphen/>" : "<w:noBreakHyphen/>"
 			from = k + 1
 		}
 
-		if (from < text.length) inner += `<${tag} xml:space="preserve">${esc(text.slice(from))}</${tag}>`
+		if (from < text.length) inner += `<${tag} xml:space="preserve">${escText(text.slice(from))}</${tag}>`
 
-		this.out += this.wrap(`<w:r>${this.rPr === "" ? "" : `<w:rPr>${this.rPr}</w:rPr>`}${inner}</w:r>`)
+		this.out += this.wrap(`<w:r${this.origin}>${this.rPr === "" ? "" : `<w:rPr>${this.rPr}</w:rPr>`}${inner}</w:r>`)
 		this.text = ""
 	}
 
@@ -283,7 +280,10 @@ export class Translator implements PropsSink {
 		this.sheet = sheet
 		this.resolver = resolver
 		this.settings = settings
-		this.styles = new StyleMapper(sheet, resolver, { tabsRelativeToIndent: settings.tabsRelativeToIndent })
+		this.styles = new StyleMapper(sheet, resolver, {
+			tabsRelativeToIndent: settings.tabsRelativeToIndent,
+			...(settings.keepAtMost === undefined ? {} : { keepAtMost: settings.keepAtMost })
+		})
 		this.lists = new Lists(sheet)
 		this.pages = new Pages(this)
 		this.frames = new Frames(this)
@@ -314,6 +314,44 @@ export class Translator implements PropsSink {
 
 	id(): number {
 		return this.nextId++
+	}
+
+	// The state a top-level block of the body starts in, as a key: the master page it is on; undefined when it
+	// carries more than that (a page break or frames waiting for the next paragraph, an annotation or tracked change
+	// open, columns).
+	blockState(): string | undefined {
+		if (
+			this.breakAfter ||
+			this.pendingAnchors.length > 0 ||
+			this.openAnnotations.size > 0 ||
+			this.insertion !== undefined ||
+			this.deleting ||
+			this.depth !== 0
+		)
+			return undefined
+
+		return this.pages.plainMaster()
+	}
+
+	// Whether what was translated left nothing a later block reads (lists, notes, comments, relationships, ids,
+	// bookmarks, tracked changes, pictures, sections, header and footer parts) and ends in state `state`.
+	leftAsIn(state: string): boolean {
+		return (
+			this.lists.empty &&
+			this.noteCount === 0 &&
+			this.endnoteCount === 0 &&
+			this.commentCount === 0 &&
+			this.relationships.length === 0 &&
+			this.nextRelationship === 100 &&
+			this.nextId === 1 &&
+			this.bookmarkIds.size === 0 &&
+			this.changes.size === 0 &&
+			this.objectKinds.size === 0 &&
+			this.frames.media.length === 0 &&
+			this.pages.sections.length === 0 &&
+			this.pages.parts.size === 0 &&
+			this.blockState() === state
+		)
 	}
 
 	relationship(type: string, target: string, external: boolean): string {
@@ -487,6 +525,48 @@ export class Translator implements PropsSink {
 	}
 
 	private section(node: number, flow: Flow, list: ListContext | undefined): void {
+		const steps = this.sectionSteps(node, flow, list)
+
+		while (steps.next().done !== true) continue
+	}
+
+	// As block, a step given between the blocks of a section (one can hold most of a document).
+	// The offset in content.xml of the parsed document's byte 0 for the block being translated (undefined: no
+	// offsets are known, as in styles.xml or a run read on its own).
+	blockBase: number | undefined
+
+	private readonly untranslatedSpans = new Map<string, boolean>()
+
+	// Whether a span style says what its WordprocessingML does not (props.ts: untranslatedText).
+	private untranslatedSpan(name: string): boolean {
+		let found = this.untranslatedSpans.get(name)
+
+		if (found === undefined) {
+			let lossy = false
+
+			runProperties(this.sheet, this.styles.text(name, this.scope).own, {
+				lossy: reason => (lossy ||= reason === "untranslatedText")
+			})
+			found = lossy
+			this.untranslatedSpans.set(name, found)
+		}
+
+		return found
+	}
+
+	*blockSteps(node: number, flow: Flow): Generator<void> {
+		if (this.name(node) !== "text:section") {
+			this.block(node, flow)
+
+			return
+		}
+
+		this.enter()
+		yield* this.sectionSteps(node, flow, undefined)
+		this.leave()
+	}
+
+	private *sectionSteps(node: number, flow: Flow, list: ListContext | undefined): Generator<void> {
 		const attributes = this.attributes(node)
 
 		if (attributes.get("text:display") === "none" || attributes.get("text:display") === "condition") return
@@ -504,15 +584,18 @@ export class Translator implements PropsSink {
 			this.lossy("sectionProperties")
 		}
 
-		if (!flow.body || count <= 1) {
-			this.blocks(node, flow, list)
+		const columned = flow.body && count > 1
 
-			return
+		if (columned) this.pages.openColumns(columns)
+
+		for (let child = this.document.firstChildElement(node); child >= 0; child = this.document.nextSiblingElement(child)) {
+			if (list === undefined) yield* this.blockSteps(child, flow)
+			else this.block(child, flow, list)
+
+			yield
 		}
 
-		this.pages.openColumns(columns)
-		this.blocks(node, flow, list)
-		this.pages.closeColumns()
+		if (columned) this.pages.closeColumns()
 	}
 
 	// --- Paragraphs ---
@@ -630,7 +713,8 @@ export class Translator implements PropsSink {
 		node: number,
 		runs: Runs,
 		base: { readonly styleKey: string; readonly text: Attributes; readonly fontSize: number },
-		span: { readonly key: string; readonly styleId: string | undefined; readonly own: Attributes } | undefined,
+		span:
+			{ readonly key: string; readonly styleId: string | undefined; readonly own: Attributes; readonly origin?: string } | undefined,
 		state: InlineState
 	): void {
 		this.enter()
@@ -642,7 +726,8 @@ export class Translator implements PropsSink {
 		node: number,
 		runs: Runs,
 		base: { readonly styleKey: string; readonly text: Attributes; readonly fontSize: number },
-		span: { readonly key: string; readonly styleId: string | undefined; readonly own: Attributes } | undefined,
+		span:
+			{ readonly key: string; readonly styleId: string | undefined; readonly own: Attributes; readonly origin?: string } | undefined,
 		state: InlineState
 	): void {
 		const document = this.document
@@ -665,7 +750,7 @@ export class Translator implements PropsSink {
 				if (text === "") continue
 
 				state.trimLeading = text.endsWith(" ")
-				runs.addText(text, rPr())
+				runs.addText(text, rPr(), span?.origin)
 
 				continue
 			}
@@ -683,11 +768,23 @@ export class Translator implements PropsSink {
 
 					const own = span === undefined ? text.own : new Map([...span.own, ...text.own])
 
+					// A span whose style says what its WordprocessingML does not names itself on its runs (w:rsidR, its
+					// offset in content.xml), so a rewrite of the paragraph finds it again whatever the edit did around it.
+					const origin =
+						span === undefined && styleName !== undefined && this.blockBase !== undefined && this.untranslatedSpan(styleName)
+							? ` w:rsidR="${(this.blockBase + this.document.start(child)).toString(16).toUpperCase().padStart(8, "0")}"`
+							: undefined
+
 					this.inline(
 						child,
 						runs,
 						base,
-						{ key: `${span?.key ?? ""}/${styleName ?? ""}`, styleId: text.styleId ?? span?.styleId, own },
+						{
+							key: `${span?.key ?? ""}/${styleName ?? ""}`,
+							styleId: text.styleId ?? span?.styleId,
+							own,
+							...(origin === undefined ? {} : { origin })
+						},
 						state
 					)
 					break
@@ -695,16 +792,16 @@ export class Translator implements PropsSink {
 				case "text:s": {
 					const count = Math.max(1, Math.min(10_000, Number(this.attributes(child).get("text:c") ?? "1") || 1))
 
-					runs.addText(" ".repeat(count), rPr())
+					runs.addText(" ".repeat(count), rPr(), span?.origin)
 					state.trimLeading = false
 					break
 				}
 				case "text:tab":
-					runs.addRun("<w:tab/>", rPr())
+					runs.addRun("<w:tab/>", rPr(), span?.origin)
 					state.trimLeading = false
 					break
 				case "text:line-break":
-					runs.addRun("<w:br/>", rPr())
+					runs.addRun("<w:br/>", rPr(), span?.origin)
 					state.trimLeading = false
 					break
 				case "text:a":
@@ -716,13 +813,15 @@ export class Translator implements PropsSink {
 					const shown = document.textContent(child).trim() || "1"
 
 					runs.addRaw(`<w:fldSimple w:instr=" ${instruction} ">`)
-					runs.addRun(`<w:t>${esc(shown)}</w:t>`, rPr())
+					runs.addRun(`<w:t>${escText(shown)}</w:t>`, rPr())
 					runs.addRaw("</w:fldSimple>")
 					state.trimLeading = false
 					break
 				}
 				case "text:note":
 					this.note(child, runs, rPr())
+					// Its citation is a character: a space after it shows (Part 3 §6.1.2).
+					state.trimLeading = false
 					break
 				case "office:annotation":
 					this.annotation(child, runs)
@@ -730,8 +829,20 @@ export class Translator implements PropsSink {
 				case "text:bookmark":
 				case "text:bookmark-start":
 				case "text:bookmark-end":
+				case "text:reference-mark":
+				case "text:reference-mark-start":
+				case "text:reference-mark-end":
 					this.bookmark(name, this.attributes(child).get("text:name") ?? "", runs)
 					break
+				case "text:bibliography-mark": {
+					// A citation: its shown text as a field's result (§8.1.11), kept whole for the writer to copy.
+					const identifier = this.attributes(child).get("text:identifier") ?? ""
+
+					runs.addRaw(`<w:fldSimple w:instr=" CITATION ${esc(identifier.replace(/[\s"\\]/gu, "_"))} ">`)
+					this.inline(child, runs, base, span, state)
+					runs.addRaw("</w:fldSimple>")
+					break
+				}
 				case "text:change":
 				case "text:change-start":
 				case "text:change-end":
@@ -774,12 +885,55 @@ export class Translator implements PropsSink {
 				case "draw:measure":
 				case "dr3d:scene":
 					runs.addRaw(this.frames.translate(child, "paragraph"))
+
+					// A frame anchored as a character is one: a space after it shows (Part 3 §6.1.2).
+					if (this.attributes(child).get("text:anchor-type") === "as-char") state.trimLeading = false
+
 					break
+				case "text:reference-ref":
+				case "text:bookmark-ref":
+				case "text:sequence-ref":
+				case "text:note-ref": {
+					// A cross-reference: its shown text as the result of a field (§7.7.5 to §7.7.8), which keeps it whole
+					// for the writer to copy; what it refers to is the source's.
+					const target = this.attributes(child).get("text:ref-name") ?? ""
+					const instruction = name === "text:note-ref" ? "NOTEREF" : "REF"
+
+					runs.addRaw(`<w:fldSimple w:instr=" ${instruction} ${esc(target.replace(/[\s"\\]/gu, "_"))} \\h ">`)
+					this.inline(child, runs, base, span, state)
+					runs.addRaw("</w:fldSimple>")
+					break
+				}
 				default:
 					if (SKIPPED_INLINE.has(name)) break
 
-					if (FIELDS_AS_TEXT.has(name)) this.lossy("fieldAsText")
-					else if (!PASS_THROUGH_INLINE.has(name)) this.lossy("unknownElement")
+					if (FIELDS_AS_TEXT.has(name)) {
+						// Its shown result as a field's, kept whole for the writer to copy (a sequence is SEQ, §7.4.13; the
+						// others name the variable or field they show).
+						const attributes = this.attributes(child)
+						const target = (attributes.get("text:name") ?? attributes.get("text:ref-name") ?? "").replace(/[\s"\\]/gu, "_")
+
+						this.lossy("fieldAsText")
+						runs.addRaw(
+							`<w:fldSimple w:instr=" ${name === "text:sequence" ? "SEQ" : "DOCVARIABLE"} ${esc(target === "" ? name.slice(5) : target)} ">`
+						)
+						this.inline(child, runs, base, span, state)
+						runs.addRaw("</w:fldSimple>")
+
+						break
+					}
+
+					if (PASS_THROUGH_INLINE.has(name) && name !== "text:meta" && name !== "text:ruby-base") {
+						// A field (metadata, dates, chapters, form fields...): its shown text as a field's result, kept whole
+						// for the writer to copy.
+						runs.addRaw(`<w:fldSimple w:instr=" DOCPROPERTY ${name.replace(":", "_")} ">`)
+						this.inline(child, runs, base, span, state)
+						runs.addRaw("</w:fldSimple>")
+
+						break
+					}
+
+					if (!PASS_THROUGH_INLINE.has(name)) this.lossy("unknownElement")
 
 					this.inline(child, runs, base, span, state)
 			}
@@ -790,7 +944,8 @@ export class Translator implements PropsSink {
 		node: number,
 		runs: Runs,
 		base: { readonly styleKey: string; readonly text: Attributes; readonly fontSize: number },
-		span: { readonly key: string; readonly styleId: string | undefined; readonly own: Attributes } | undefined,
+		span:
+			{ readonly key: string; readonly styleId: string | undefined; readonly own: Attributes; readonly origin?: string } | undefined,
 		state: InlineState
 	): void {
 		const attributes = this.attributes(node)
@@ -822,9 +977,13 @@ export class Translator implements PropsSink {
 		runs.addRaw("</w:hyperlink>")
 	}
 
+	// Bookmarks and reference marks (§6.2.1, §6.2.2) as WordprocessingML bookmarks: both name a span to refer to. Their
+	// names are kept apart as ODF keeps them.
 	private bookmark(kind: string, name: string, runs: Runs): void {
-		if (kind === "text:bookmark-end") {
-			const id = this.bookmarkIds.get(name)
+		const key = kind.startsWith("text:reference-mark") ? `\u0000${name}` : name
+
+		if (kind === "text:bookmark-end" || kind === "text:reference-mark-end") {
+			const id = this.bookmarkIds.get(key)
 
 			if (id !== undefined) runs.addRaw(`<w:bookmarkEnd w:id="${id}"/>`)
 
@@ -833,11 +992,11 @@ export class Translator implements PropsSink {
 
 		const id = this.id()
 
-		if (kind === "text:bookmark-start") this.bookmarkIds.set(name, id)
+		if (kind === "text:bookmark-start" || kind === "text:reference-mark-start") this.bookmarkIds.set(key, id)
 
 		runs.addRaw(`<w:bookmarkStart w:id="${id}" w:name="${esc(name)}"/>`)
 
-		if (kind === "text:bookmark") runs.addRaw(`<w:bookmarkEnd w:id="${id}"/>`)
+		if (kind === "text:bookmark" || kind === "text:reference-mark") runs.addRaw(`<w:bookmarkEnd w:id="${id}"/>`)
 	}
 
 	private note(node: number, runs: Runs, rPr: string): void {
@@ -861,14 +1020,14 @@ export class Translator implements PropsSink {
 
 		runs.addRun(`<w:${tag}Reference${custom ? ' w:customMarkFollows="1"' : ""} w:id="${id}"/>`, `${rPr}${style}`)
 
-		if (custom) runs.addRun(`<w:t>${esc(label)}</w:t>`, `${rPr}${style}`)
+		if (custom) runs.addRun(`<w:t>${escText(label)}</w:t>`, `${rPr}${style}`)
 
 		const flow = new MarkupFlow()
 
 		if (body >= 0) this.blocks(body, flow)
 
 		const first = flow.blocks.find((block): block is ParagraphBlock => block.kind === "p")
-		const reference = `<w:r><w:rPr>${style}</w:rPr>${custom ? `<w:t>${esc(label)}</w:t>` : `<w:${tag}Ref/>`}</w:r><w:r><w:t xml:space="preserve"> </w:t></w:r>`
+		const reference = `<w:r><w:rPr>${style}</w:rPr>${custom ? `<w:t>${escText(label)}</w:t>` : `<w:${tag}Ref/>`}</w:r><w:r><w:t xml:space="preserve"> </w:t></w:r>`
 
 		if (first === undefined) flow.add(paragraph("", "", reference))
 		else first.content = reference + first.content
@@ -896,7 +1055,7 @@ export class Translator implements PropsSink {
 		if (flow.blocks.length === 0) flow.add(paragraph("", "", ""))
 
 		this.comments.add(
-			`<w:comment w:id="${id}" w:author="${esc(author)}"${date === "" ? "" : ` w:date="${esc(date.replace(/\.\d+$/, ""))}"`}${initials === "" ? "" : ` w:initials="${esc(initials)}"`}>${flow.xml()}</w:comment>`
+			`<w:comment w:id="${id}" w:author="${esc(author)}"${date === "" ? "" : ` w:date="${esc(wmlDate(date))}"`}${initials === "" ? "" : ` w:initials="${esc(initials)}"`}>${flow.xml()}</w:comment>`
 		)
 
 		const name = attributes.get("office:name")
@@ -942,7 +1101,7 @@ export class Translator implements PropsSink {
 							const infoName = this.name(info)
 
 							if (infoName === "dc:creator") author = this.document.textContent(info)
-							else if (infoName === "dc:date") date = this.document.textContent(info).replace(/\.\d+$/, "")
+							else if (infoName === "dc:date") date = wmlDate(this.document.textContent(info))
 						}
 					} else if (name === "text:p" || name === "text:h") {
 						paragraphs++
@@ -1039,4 +1198,12 @@ function decodeAnchor(target: string): string {
 	const bar = decoded.lastIndexOf("|")
 
 	return bar > 0 ? decoded.slice(0, bar) : decoded
+}
+
+// A dc:date as WordprocessingML's date and time (ECMA-376 Part 1 ST_DateTime, an xsd:dateTime): without fractions of a
+// second, a date alone at its midnight.
+function wmlDate(value: string): string {
+	const trimmed = value.trim().replace(/\.\d+$/u, "")
+
+	return /^\d{4}-\d{2}-\d{2}$/u.test(trimmed) ? `${trimmed}T00:00:00` : trimmed
 }

@@ -39,6 +39,7 @@ import { PendingRegistry } from "@/lib/sw/pendingRegistry"
 import { GenerationGate } from "@/lib/sw/generationGate"
 import { DownloadReporter, type ReportedStream } from "@/lib/sw/downloadReporter"
 import { heldBackBody } from "@/lib/sw/heldBackBody"
+import { streamDownloadHeaders } from "@/lib/sw/streamDownloadHeaders"
 import { plainErrorDTO, toErrorDTO } from "@/lib/sdk/errors"
 import { contentDispositionAttachment } from "@/lib/filename"
 import { log } from "@/lib/log"
@@ -81,7 +82,8 @@ interface PendingStreamDownload {
 	kind: "stream"
 	stream: ReadableStream<Uint8Array>
 	name: string
-	size: number
+	// Null for bytes the page makes as they stream.
+	size: number | null
 	taken: boolean
 }
 // A preview the page's SDK worker reads (SW_MSG_REGISTER_PORT_PREVIEW): no file handle and no Client here,
@@ -787,12 +789,7 @@ function handleStreamDownload(event: FetchEvent, id: string, pending: PendingStr
 	// Built BEFORE the stream is counted (see pumpToResponse).
 	const response = new Response(held.body, {
 		status: 200,
-		headers: {
-			"Content-Type": "application/octet-stream",
-			"Content-Disposition": contentDispositionAttachment(pending.name),
-			"Content-Length": String(pending.size),
-			"X-Content-Type-Options": "nosniff"
-		}
+		headers: streamDownloadHeaders(pending.name, pending.size)
 	})
 
 	stream.onCancelRequest(() => {
@@ -969,7 +966,7 @@ self.addEventListener("message", (event: ExtendableMessageEvent) => {
 
 	// Needs no Client: the page streams the bytes.
 	if (type === SW_MSG_REGISTER_STREAM_DOWNLOAD) {
-		const msg = event.data as { id: string; name: string; size: number; stream: unknown }
+		const msg = event.data as { id: string; name: string; size: unknown; stream: unknown }
 
 		if (!(msg.stream instanceof ReadableStream)) {
 			port?.postMessage({ ok: false, error: "no stream" })
@@ -980,7 +977,7 @@ self.addEventListener("message", (event: ExtendableMessageEvent) => {
 			kind: "stream",
 			stream: msg.stream as ReadableStream<Uint8Array>,
 			name: msg.name,
-			size: msg.size,
+			size: typeof msg.size === "number" && Number.isSafeInteger(msg.size) && msg.size >= 0 ? msg.size : null,
 			taken: false
 		})
 		port?.postMessage({ ok: true })

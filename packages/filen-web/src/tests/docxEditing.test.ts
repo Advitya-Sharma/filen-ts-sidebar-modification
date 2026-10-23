@@ -11,7 +11,7 @@ import { inThreadDocxZipper } from "@filen/office/dom/docx/save"
 // Saving with the writer refusing some edited blocks: they are locked back to the file's own and the rest is
 // written (decision 5 at save time); a refusal no lock resolves leaves the document as it was.
 
-const writer = vi.hoisted(() => ({ refuse: "", always: false, runs: 0 }))
+const writer = vi.hoisted(() => ({ refuse: "", always: false, runs: 0, during: undefined as (() => void) | undefined }))
 
 type Doc = DocxEditorSession["state"]["doc"]
 
@@ -33,6 +33,8 @@ vi.mock("@filen/office/core/docx/write", async () => {
 	const actual = await vi.importActual<typeof import("@filen/office/core/docx/write")>("@filen/office/core/docx/write")
 	const refused = (input: DocxSaveInput): boolean => {
 		writer.runs++
+		// The user types while the writer runs (from its second run: the search).
+		if (writer.runs === 2) writer.during?.()
 
 		return writer.always || (writer.refuse.length > 0 && input.sessions.some(session => holds(session.state.doc, writer.refuse)))
 	}
@@ -115,6 +117,7 @@ afterEach(() => {
 	writer.refuse = ""
 	writer.always = false
 	writer.runs = 0
+	writer.during = undefined
 })
 
 describe("writeDocx", () => {
@@ -163,6 +166,30 @@ describe("writeDocx", () => {
 		written.commit()
 		expect(written.locked?.reverted).toBe(1)
 		expect(holds(session.state.doc, "BAD!")).toBe(true)
+		expect(session.snapshot().dirty).toBe(true)
+	})
+
+	it("searches the document as the save found it: typing meanwhile is neither written nor taken back, and stays unsaved", async () => {
+		const { session, host } = await openSession(BYTES)
+
+		editParagraphs(session, [" KEPT", " BAD"])
+		writer.refuse = "BAD"
+		// Typed at the very start while the search runs: every block after it moves.
+		writer.during = () => {
+			session.dispatch(session.state.tr.insertText("TYPED ", 1))
+		}
+
+		const written = await writeDocx(host)
+		const saved = await textOf(written.bytes)
+
+		expect(saved).toContain("KEPT")
+		expect(saved).not.toContain("BAD")
+		expect(saved).not.toContain("TYPED")
+		written.commit()
+		expect(written.locked?.reverted).toBe(1)
+		expect(holds(session.state.doc, "BAD")).toBe(false)
+		expect(holds(session.state.doc, "KEPT")).toBe(true)
+		expect(texts(session.state.doc)[0]?.startsWith("TYPED ")).toBe(true)
 		expect(session.snapshot().dirty).toBe(true)
 	})
 

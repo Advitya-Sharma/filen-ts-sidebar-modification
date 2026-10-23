@@ -135,6 +135,14 @@ describe("isEditable", () => {
 
 		expect(isEditable(fileItem({ meta: byMime("report.bin", word) }), "drive")).toBe(false)
 
+		// OpenDocument text documents and templates, saved as ODT; a Word 97–2003 document is not (view-only).
+		for (const name of ["notes.odt", "letter.OTT", "story.rtf"]) {
+			expect(isEditable(fileItem({ meta: decodedMeta(name) }), "drive")).toBe(true)
+			expect(isEditable(fileItem({ meta: decodedMeta(name) }), "sharedIn")).toBe(false)
+		}
+
+		expect(isEditable(fileItem({ meta: decodedMeta("old.doc") }), "drive")).toBe(false)
+
 		// By their own extensions and types, and only in the user's own drive.
 		for (const name of ["macro.docm", "letter.dotx", "normal.dotm"]) {
 			expect(isEditable(fileItem({ meta: decodedMeta(name) }), "drive")).toBe(true)

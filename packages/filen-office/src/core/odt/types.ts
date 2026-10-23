@@ -14,6 +14,10 @@ export type OdtLossyReason =
 	| "textTransform"
 	// Text rotation, combining, ruby or a character effect without an equivalent.
 	| "textEffect"
+	// A text property WordprocessingML has no form for (an overline, a line-through colour, East Asian bold, italic or
+	// size apart from the Latin text's, a raise with its own size, kerning...): not shown; a rewrite keeps it from
+	// the source span style.
+	| "untranslatedText"
 	// draw:chain-next-name: text flowing from one text box into another.
 	| "chainedTextBox"
 	// Frames anchored to another frame, or to a page other than the first, or that flow with the text
@@ -58,6 +62,8 @@ export interface OdtOrigin {
 	readonly first: number
 	readonly count: number
 	readonly lossy: readonly OdtLossyReason[]
+	// A block of the body: the translator's state as it began (Translator.blockState).
+	readonly state?: string | undefined
 }
 
 export type OdtOpenFailure = OdfOpenFailure | "malformed"
@@ -74,6 +80,16 @@ export interface OdtTranslation {
 	readonly lossy: ReadonlyMap<OdtLossyReason, number>
 	// Embedded objects shown from a replacement or as a placeholder, by kind.
 	readonly objects: ReadonlyMap<string, number>
+	// Each w:num's ODF list style and the stream naming it (the outline style is "\u0000outline").
+	readonly numbering: ReadonlyMap<number, { readonly style: string; readonly scope: "styles" | "content" }>
+	// Picture parts by the package entry they hold.
+	readonly media: ReadonlyMap<string, string>
+	// Each section (each w:sectPr, in order) by the master page and page layout it was read from.
+	// Each section's page style (its first page's follower, when the first is a first page), page layout, and the
+	// master page it starts with.
+	readonly sections: readonly { readonly master: string; readonly layout: string | undefined; readonly start?: string }[]
+	// The translator's state past the body's last block (Translator.blockState).
+	readonly endState?: string | undefined
 }
 
 export type OdtTranslateResult =

@@ -6,7 +6,7 @@ import { parseLength, parsePercent } from "./units"
 const MAX_CHAIN = 64
 
 // Attributes whose percent value is relative to the same attribute of the parent style (Part 3 §20.190
-// fo:font-size, §20.180 style:font-size-asian/-complex, §20.21x fo:margin-*): resolved to a length when the
+// fo:font-size, §20.284 style:font-size-asian, §20.285 style:font-size-complex, §20.205 to §20.209 fo:margin-*): resolved to a length when the
 // parent has one, so a resolved style never holds a percent of something it no longer knows.
 const RELATIVE_TO_PARENT: ReadonlySet<string> = new Set([
 	"fo:font-size",
@@ -100,9 +100,12 @@ export class OdfStyleResolver {
 	readonly sheet: OdfStyleSheet
 	private readonly cache = new Map<string, Resolved>()
 	private readonly reported = new Set<string>()
+	// Resolutions kept up to this many (all by default); past it, resolved again when asked for.
+	private readonly keepAtMost: number
 
-	constructor(sheet: OdfStyleSheet) {
+	constructor(sheet: OdfStyleSheet, options: { readonly keepAtMost?: number } = {}) {
 		this.sheet = sheet
+		this.keepAtMost = options.keepAtMost ?? Infinity
 	}
 
 	// The style `name` as the `scope` stream's content uses it; undefined (or an unknown name) resolves to the
@@ -141,6 +144,9 @@ export class OdfStyleResolver {
 
 		chain.reverse()
 		resolved = new Resolved(chain, truncated)
+
+		if (this.cache.size >= this.keepAtMost) this.cache.clear()
+
 		this.cache.set(cacheKey, resolved)
 
 		return resolved

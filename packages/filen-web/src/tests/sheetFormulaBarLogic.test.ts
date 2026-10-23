@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { highlightedReferences } from "@filen/office/core/sheet"
+import { highlightedReferences, textNumber } from "@filen/office/core/sheet"
 import type { GridCanvas, GridPaintScene } from "@filen/office/react/sheet"
 import { referenceColors, REFERENCE_COLORS } from "@/features/spreadsheet/formulaBar/referenceColors"
 import { referenceLayer } from "@/features/spreadsheet/formulaBar/referenceLayer"
@@ -7,11 +7,24 @@ import { sheetLocaleOf } from "@/features/spreadsheet/formulaBar/sheetLocale"
 
 describe("the locale entries are typed in", () => {
 	it("comes from the browser's formatting locale, ; between arguments where , is the point", () => {
-		expect(sheetLocaleOf("en-US")).toEqual({ decimal: ".", group: ",", argument: ",", dateOrder: "mdy" })
-		expect(sheetLocaleOf("en-GB")).toEqual({ decimal: ".", group: ",", argument: ",", dateOrder: "dmy" })
-		expect(sheetLocaleOf("de-DE")).toEqual({ decimal: ",", group: ".", argument: ";", dateOrder: "dmy" })
+		expect(sheetLocaleOf("en-US")).toEqual({ decimal: ".", group: ",", argument: ",", dateOrder: "mdy", currencies: ["$"] })
+		expect(sheetLocaleOf("en-GB")).toEqual({ decimal: ".", group: ",", argument: ",", dateOrder: "dmy", currencies: ["£"] })
+		expect(sheetLocaleOf("de-DE")).toEqual({ decimal: ",", group: ".", argument: ";", dateOrder: "dmy", currencies: ["€"] })
 		expect(sheetLocaleOf("ja-JP").dateOrder).toBe("ymd")
 		expect(sheetLocaleOf("not a tag")).toEqual({ decimal: ".", group: ",", argument: ",", dateOrder: "mdy" })
+	})
+
+	it("reads text with the region's currency symbol as a number", () => {
+		const read = (language: string, text: string) => textNumber(text, sheetLocaleOf(language))
+
+		expect(read("de-DE", "€5")).toBe(5)
+		expect(read("de-DE", "5 €")).toBe(5)
+		expect(read("de-DE", "1.000,50 €")).toBe(1000.5)
+		expect(read("en-GB", "£5")).toBe(5)
+		expect(read("ja-JP", "¥5")).toBe(5)
+		expect(read("ja-JP", "￥5")).toBe(5)
+		expect(read("en-US", "$1,000.50")).toBe(1000.5)
+		expect(read("de-DE", "£5")).toBeUndefined()
 	})
 })
 

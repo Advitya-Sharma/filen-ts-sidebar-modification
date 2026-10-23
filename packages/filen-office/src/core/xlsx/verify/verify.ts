@@ -24,6 +24,7 @@ import {
 	CellKind,
 	NO_SPAN,
 	RowFlag,
+	ROW_MARKS,
 	type XlsxFormula,
 	type XlsxRichRun,
 	type XlsxRowBlock,
@@ -279,7 +280,7 @@ function checkRow(
 
 	if (decoded.row !== row) fail("model", `${where} reads back as row ${decoded.row + 1}`)
 
-	const flags = (block.rowFlags[index] ?? 0) & ~(RowFlag.DIRTY | RowFlag.NEW)
+	const flags = (block.rowFlags[index] ?? 0) & ~ROW_MARKS
 
 	if (!sameRowProperties(decoded, block.rowHeights[index] ?? Number.NaN, block.rowStyles[index] ?? -1, flags)) {
 		fail("model", `${where}: its properties read back differently`)
@@ -551,7 +552,7 @@ async function checkSplicedBatch(
 			const index = written.index
 			const row = block.firstRow + (block.rows[index] ?? 0)
 			const where = `${name} row ${row + 1}`
-			const own = (flags: number) => flags & ~(RowFlag.DIRTY | RowFlag.NEW)
+			const own = (flags: number) => flags & ~ROW_MARKS
 			const height = block.rowHeights[index] ?? Number.NaN
 			const readHeight = read.rowHeights[i] ?? Number.NaN
 

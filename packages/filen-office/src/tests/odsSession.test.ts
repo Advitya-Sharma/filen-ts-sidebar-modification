@@ -49,11 +49,12 @@ const NUMBERS = (values: readonly number[]): string =>
 		.join("")
 
 describe("an ODS session", () => {
-	it("opens view-only, saving nothing", async () => {
+	it("opens unproven, proves writable and saves an edit", async () => {
 		const { session, info } = await open({ body: table("One", NUMBERS([1])) })
 
 		expect(info.kind).toBe("ods")
-		expect(info.writability).toEqual({ state: "viewOnly", reason: "legacyFormat" })
+		expect(info.writability).toEqual({ state: "unproven" })
+		expect(await session.intent()).toEqual({ state: "writable" })
 		expect(
 			(
 				await session.command({
@@ -62,8 +63,8 @@ describe("an ODS session", () => {
 					cells: { rows: Uint32Array.of(0), cols: Uint16Array.of(0), inputs: ["2"] }
 				})
 			).ok
-		).toBe(false)
-		expect((await session.save()).ok).toBe(false)
+		).toBe(true)
+		expect((await session.save()).ok).toBe(true)
 		session.close()
 	})
 
@@ -195,5 +196,57 @@ describe("an ODS session", () => {
 		expect(layout.protection?.hasPassword).toBe(true)
 		expect([...(layout.protection?.allows ?? [])]).toEqual(["selectUnlockedCells"])
 		session.close()
+	})
+})
+
+describe("an ODS save under way", () => {
+	it("stops at its next slice once the session is closed", { timeout: 60_000 }, async () => {
+		let rows = ""
+
+		for (let k = 0; k < 4000; k++)
+			rows += `<table:table-row><table:table-cell office:value-type="float" office:value="${k}"><text:p>${k}</text:p></table:table-cell></table:table-row>`
+
+		let pauses = 0
+		let close: (() => void) | null = null
+		let pausesAfterClose = -1
+		const slicing = {
+			sliceMs: 0,
+			now: () => performance.now(),
+			pause: (): Promise<void> => {
+				pauses++
+
+				if (pausesAfterClose >= 0) pausesAfterClose++
+
+				// Closed in the save's third slice.
+				if (close !== null && pauses === 3) {
+					close()
+					pausesAfterClose = 0
+				}
+
+				return new Promise(resolve => setTimeout(resolve, 0))
+			}
+		}
+		const host = inThreadSheetHost()
+		const result = await host.open(
+			odsBytes({ body: table("S", rows) }),
+			{ kind: "ods", slicing, settings: { author: "Test" } },
+			() => undefined
+		)
+
+		if (result.kind !== "opened") throw new Error(result.kind)
+
+		const session = result.session
+
+		await session.intent()
+		await session.command({ type: "axis.insert", sheet: result.info.sheets[0]?.id ?? 0, axis: "cols", at: 0, count: 1 })
+
+		pauses = 0
+		close = () => session.close()
+
+		const saved = await session.save()
+
+		expect(saved.ok ? "ok" : saved.reason).toBe("closed")
+		// The slice under way when it closed ends it: no further slice of the save runs.
+		expect(pausesAfterClose).toBeLessThanOrEqual(1)
 	})
 })

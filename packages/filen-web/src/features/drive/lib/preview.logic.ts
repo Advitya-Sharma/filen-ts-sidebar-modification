@@ -101,7 +101,7 @@ const EXTENSION_CATEGORIES: ReadonlyMap<string, PreviewCategory> = buildExtensio
 	],
 	[["pdf"], "pdf"],
 	// Macro-enabled documents and templates open (and edit) as documents; macros are never run. Word 97–2003 documents
-	// and templates open from their conversion and OpenDocument text (and its templates) translated, both view-only.
+	// and templates open from their conversion, view-only; OpenDocument text (and its templates) translated, editable.
 	[["docx", "docm", "dotx", "dotm", "doc", "dot", "odt", "ott", "rtf"], "docx"],
 	[SPREADSHEET_EXTENSIONS, "spreadsheet"],
 	[["md", "markdown"], "markdown"],

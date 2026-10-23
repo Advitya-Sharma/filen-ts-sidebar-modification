@@ -6,6 +6,7 @@ import { buildPublicLinkUrl } from "@/features/drive/components/linkDialog.logic
 import { resolveDriveNavigationTarget } from "@/features/drive/lib/navigate"
 import { canOpenAsText, canPreview, previewType } from "@/features/drive/lib/preview.logic"
 import { canExtractItem } from "@/features/drive/lib/archiveTargets"
+import { downloadAsSource } from "@/features/drive/lib/downloadAs.logic"
 import { type DriveItemLinkStatus } from "@/features/drive/queries/drive"
 import { type ActionDescriptor } from "@/lib/actionDescriptor"
 import { type DriveKey } from "@/lib/i18n"
@@ -47,6 +48,7 @@ export type ItemActionId =
 	| "info"
 	| "openContainingDirectory"
 	| "download"
+	| "downloadAs"
 	| "publicLink"
 	| "copyLink"
 	| "share"
@@ -112,6 +114,9 @@ const COMPRESS: ItemActionDescriptor = { id: "compress", ...ACTION_DEFS.compress
 // Unpacks an archive file (canExtractItem). A submenu in the item menus (archiveSubmenus.tsx); "dialog"
 // opens the options dialog.
 const EXTRACT: ItemActionDescriptor = { id: "extract", ...ACTION_DEFS.extract, run: "dialog", dialogKind: "extract" }
+// A document or spreadsheet exported to another format from the saved file, beside Download (it reads exactly
+// what Download reads). A submenu of formats in the item menus (downloadAsSubmenu.tsx).
+const DOWNLOAD_AS: ItemActionDescriptor = { id: "downloadAs", ...ACTION_DEFS.downloadAs, run: "direct" }
 // In Open's place for a file nothing recognises (canOpenAsText), which Open never covers.
 const OPEN_AS_TEXT: ItemActionDescriptor = { id: "openAsText", ...ACTION_DEFS.openAsText, run: "dialog", dialogKind: "openAsText" }
 
@@ -246,6 +251,10 @@ function itemActionsFor(item: DriveItem, variant: DriveVariant, searchHit: boole
 	// (download mutates nothing).
 	actions.push(downloadDescriptor())
 
+	if (downloadAsSource(item) !== null) {
+		actions.push(DOWNLOAD_AS)
+	}
+
 	// An item the caller can't mutate still copies: it sits with the read actions, right after Download.
 	if (!ownerMutable) {
 		actions.push(COPY, COMPRESS)
@@ -313,6 +322,7 @@ const OFFLINE_GATED_IDS: ReadonlySet<ItemActionId> = new Set([
 	"deletePermanently",
 	"openContainingDirectory",
 	"download",
+	"downloadAs",
 	"copy",
 	"compress",
 	"extract"

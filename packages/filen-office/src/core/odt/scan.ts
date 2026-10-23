@@ -1,7 +1,7 @@
 import { Inflate } from "fflate"
 import { crc32, ZipError, type SliceClock, type ZipArchive, type ZipEntry } from "../opc/index"
 import { METHOD_DEFLATE, METHOD_STORED } from "../opc/zipReader"
-import { Namespaces, parseXml, type XmlDocument } from "../xml/index"
+import { Namespaces, assertWellFormed, parseXml, type XmlDocument } from "../xml/index"
 
 // content.xml's body cut into its top-level blocks (the children of office:text) without ever holding the
 // body as one tree: a depth-tracking byte scan finds where each block starts and ends, and consecutive blocks
@@ -100,13 +100,16 @@ export class BodyScanner {
 	private pendingBytes = 0
 	private done = false
 	private readonly batchBytes: number
+	private readonly strict: boolean
 
-	// `rootTag`: the root element's start tag; `bodyStart`: stream offset of office:body's start tag.
-	constructor(rootTag: Uint8Array, bodyStart: number, options: { readonly batchBytes?: number } = {}) {
+	// `rootTag`: the root element's start tag; `bodyStart`: stream offset of office:body's start tag. `strict`: each
+	// batch is checked for every well-formedness rule (assertWellFormed), not only its structure.
+	constructor(rootTag: Uint8Array, bodyStart: number, options: { readonly batchBytes?: number; readonly strict?: boolean } = {}) {
 		this.containers = [rootTag.slice()]
 		this.base = bodyStart
 		this.at = bodyStart
 		this.batchBytes = options.batchBytes ?? BATCH_BYTES
+		this.strict = options.strict === true
 	}
 
 	get finished(): boolean {
@@ -317,6 +320,9 @@ export class BodyScanner {
 		wrapped.set(tail, offset)
 
 		const document = parseXml(wrapped)
+
+		if (this.strict) assertWellFormed(document)
+
 		let container = document.documentElement()
 
 		for (let level = 1; level < head.length; level++) container = document.firstChildElement(container)

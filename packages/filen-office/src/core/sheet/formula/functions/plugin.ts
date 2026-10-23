@@ -1,5 +1,16 @@
 import { ISO_1900, type DateBase } from "../../numfmt/date"
-import { ArraySize, CellError, ErrorType, FunctionPlugin, HyperFormula, SimpleRangeValue, type SimpleCellAddress } from "hyperformula"
+import { textNumberParser } from "../../input/locale"
+import { parserLocale } from "../textDates"
+import {
+	ArraySize,
+	CellError,
+	ErrorType,
+	FunctionPlugin,
+	HyperFormula,
+	SimpleRangeValue,
+	type ConfigParams,
+	type SimpleCellAddress
+} from "hyperformula"
 import { MAX_COLUMNS, MAX_ROWS } from "../../model/model"
 
 // The engine's plugin types, read from the plugin class (HyperFormula does not export them by name).
@@ -47,17 +58,25 @@ export function rowStateOf(sheet: number, row: number): number {
 // The engine's helpers adjusted to Excel, once per engine (they are shared by every plugin of one engine).
 const adjusted = new WeakSet<object>()
 
-// Where the engine's own coercion differs from Excel's, for every function and operator of one engine: text that is
-// empty ("" from a formula) is not a number, so ""*2 and ""+1 are #VALUE! (the engine read it as 0). An empty cell
-// still is 0.
+// Where the engine's own coercion differs from Excel's, for every function and operator of one engine:
+// - text that is empty ("" from a formula) is not a number, so ""*2 and ""+1 are #VALUE! (the engine read it as 0).
+//   An empty cell still is 0;
+// - text reads as a number as Excel reads it, in the session's locale (input/locale.ts textNumber): "1,000"*1 is 1000
+//   in en-US and "1.000,5"*1 1000.5 in de-DE (the engine took only plain digits with "." and "$"). Dates and times
+//   still read after it, through the engine's parseDateTime (formula/textDates.ts).
 function adjustToExcel(helper: Helper): void {
 	if (adjusted.has(helper)) return
 
 	adjusted.add(helper)
 
 	const coerce = helper.coerceNonDateScalarToMaybeNumber.bind(helper)
+	const read = textNumberParser(
+		parserLocale(
+			(helper as unknown as { readonly config: { readonly parseDateTime: ConfigParams["parseDateTime"] } }).config.parseDateTime
+		)
+	)
 
-	helper.coerceNonDateScalarToMaybeNumber = arg => (arg === "" ? undefined : coerce(arg))
+	helper.coerceNonDateScalarToMaybeNumber = arg => (typeof arg === "string" ? (arg === "" ? undefined : read(arg)) : coerce(arg))
 }
 
 // Every plugin of the app's own: the engine it runs in coerces as Excel does (adjustToExcel).

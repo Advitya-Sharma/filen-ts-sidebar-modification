@@ -667,6 +667,72 @@ describe("inflating", () => {
 })
 
 describe("writeZip details", () => {
+	it("writes entries as they come from an async source, each one only once the one before is written", async () => {
+		const written: string[] = []
+		const sink = {
+			chunks: [] as Uint8Array[],
+			write(chunk: Uint8Array) {
+				this.chunks.push(chunk)
+				written.push(`bytes:${String(chunk.length)}`)
+
+				return Promise.resolve()
+			},
+			close: () => Promise.resolve()
+		}
+
+		async function* entries() {
+			for (const name of ["one.pdf", "two.pdf"]) {
+				written.push(`made:${name}`)
+				yield { kind: "data" as const, name, bytes: text(`%PDF ${name}`), compress: false }
+			}
+		}
+
+		await writeZip({ items: entries() }, null, sink)
+
+		// The second entry is asked for only after the first one's bytes went out.
+		expect(written.indexOf("made:two.pdf")).toBeGreaterThan(written.findIndex(step => step.startsWith("bytes:")))
+
+		const joined = new Uint8Array(sink.chunks.reduce((sum, chunk) => sum + chunk.length, 0))
+		let at = 0
+
+		for (const chunk of sink.chunks) {
+			joined.set(chunk, at)
+			at += chunk.length
+		}
+
+		const archive = await ZipArchive.open(bytesSource(joined))
+
+		expect(archive.entries.map(entry => entry.name)).toEqual(["one.pdf", "two.pdf"])
+		expect(new TextDecoder().decode(await archive.read(archive.entries[1] as ZipEntry))).toBe("%PDF two.pdf")
+	})
+
+	it("stamps a new entry with the time it is given, in DOS local time, and the DOS epoch without one", async () => {
+		const sink = memorySink()
+		const modified = new Date(2026, 9, 23, 14, 37, 58)
+
+		await writeZip(
+			{
+				items: [
+					{ kind: "data", name: "dated.pdf", bytes: text("%PDF"), compress: false, modified },
+					{ kind: "data", name: "plain.txt", bytes: text("x"), compress: false },
+					{ kind: "data", name: "old.txt", bytes: text("y"), compress: false, modified: new Date(1975, 0, 1) }
+				]
+			},
+			null,
+			sink
+		)
+
+		const archive = await ZipArchive.open(bytesSource(sink.bytes()))
+		const [dated, plain, old] = archive.entries
+
+		expect(dated?.modDate).toBe(((2026 - 1980) << 9) | (10 << 5) | 23)
+		expect(dated?.modTime).toBe((14 << 11) | (37 << 5) | 29)
+		expect(plain).toMatchObject({ modDate: (1 << 5) | 1, modTime: 0 })
+		// Before the DOS epoch: the epoch itself.
+		expect(old).toMatchObject({ modDate: (1 << 5) | 1, modTime: 0 })
+		expect(new TextDecoder().decode(await archive.read(dated as ZipEntry))).toBe("%PDF")
+	})
+
 	it("reuses the layouts an archive already read instead of reading every local header again", async () => {
 		const bytes = fixture("03-header-footer-footnotes.docx")
 		let reads = 0

@@ -1,5 +1,6 @@
 import { HyperFormula, type FunctionPluginDefinition } from "hyperformula"
 import { AggregateFunctions } from "./aggregate"
+import { installExcelArguments } from "./arguments"
 import { ArrayFunctions } from "./arrays"
 import { BondFunctions } from "./bonds"
 import { ARRAY_RESULTS } from "../../refs/formulaRefs"
@@ -12,6 +13,7 @@ import { IndirectFunctions } from "./indirect"
 import { LambdaFunctions } from "./lambda"
 import { LogicalFunctions } from "./logical"
 import { LookupFunctions } from "./lookup"
+import { MathFunctions } from "./math"
 import { MatrixFunctions } from "./matrix"
 import { MiscFunctions } from "./misc"
 import { ReferenceFunctions } from "./reference"
@@ -24,7 +26,8 @@ import { TextFunctions } from "./text"
 import { Text2Functions } from "./text2"
 
 // The app's own functions, registered with the engine once, before the first engine is built. A function the engine
-// has of its own is replaced where it calculates differently from Excel (TEXT, SUBTOTAL, COUNTBLANK); the others are
+// has of its own is replaced where it calculates differently from Excel (TEXT, SUBTOTAL, COUNTBLANK, the rounding
+// functions, DATEDIF), and arguments Excel truncates are truncated (arguments.ts); the others are
 // functions it lacks, and the engine-only functions its formula text calls (functions/engineNames.ts).
 const PLUGINS: readonly FunctionPluginDefinition[] = [
 	TextFunctions,
@@ -47,7 +50,8 @@ const PLUGINS: readonly FunctionPluginDefinition[] = [
 	Text2Functions,
 	ConvertFunctions,
 	MiscFunctions,
-	RegexFunctions
+	RegexFunctions,
+	MathFunctions
 ]
 
 let registered = false
@@ -69,6 +73,7 @@ export function registerSheetFunctions(): void {
 		)
 	}
 
+	installExcelArguments()
 	installBlankTails(ARRAY_RESULTS)
 }
 

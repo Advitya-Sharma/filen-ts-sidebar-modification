@@ -13,6 +13,7 @@ import {
 import { CONTEXT_TREE_MENU_FAMILY } from "@/features/drive/components/directoryTreeSubmenu"
 import { TransferSubmenu } from "@/features/drive/components/transferSubmenu"
 import { BulkExtractSubmenu, CompressSubmenu } from "@/features/drive/components/archiveSubmenus"
+import { DownloadAsSubmenu } from "@/features/drive/components/downloadAsSubmenu"
 import { DriveContextMenuContent, type ItemDestination } from "@/features/drive/components/itemMenu"
 import { type ItemActionDialogKind } from "@/features/drive/components/itemMenu.logic"
 import { ContextMenuContent, ContextMenuItem } from "@/components/ui/context-menu"
@@ -65,6 +66,17 @@ export function DriveBulkContextMenuContent({ variant, selectedItems, onBulkActi
 							onMoreOptions={() => {
 								onBulkAction("compress")
 							}}
+						/>
+					)
+				}
+
+				if (descriptor.id === "downloadAs") {
+					return (
+						<DownloadAsSubmenu
+							key={descriptor.id}
+							family={CONTEXT_TREE_MENU_FAMILY}
+							disabled={offlineDisabled}
+							items={selectedItems}
 						/>
 					)
 				}

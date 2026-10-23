@@ -36,6 +36,9 @@ export type ZipPlanItem =
 			readonly template?: ZipEntry
 			// The CRC-32 the content must have (see PartChange.crc32).
 			readonly crc32?: number
+			// When the content was made, stamped in DOS local time (APPNOTE 4.4.6); without it (and no
+			// template) the DOS epoch.
+			readonly modified?: Date
 	  }
 
 // A run of content already raw-deflated, spliced into an entry's stream as is: non-final blocks ending on a byte
@@ -57,6 +60,14 @@ export interface ZipPlan {
 	readonly items: readonly ZipPlanItem[]
 	readonly comment?: Uint8Array
 	// End with ZIP64 records even when nothing needs them (kept from an archive that had them).
+	readonly zip64End?: boolean
+}
+
+// New entries as something makes them (one at a time, each asked for once the one before was written out): an
+// archive streamed while its content is still being made, holding one entry's content at a time.
+export interface StreamedZipPlan {
+	readonly items: AsyncIterable<ZipPlanItem>
+	readonly comment?: Uint8Array
 	readonly zip64End?: boolean
 }
 
@@ -90,6 +101,20 @@ const MAX_32 = 0xffffffff
 const MAX_16 = 0xffff
 // 1980-01-01 00:00, the DOS epoch: what Word stamps on every entry, and deterministic.
 const DOS_EPOCH_DATE = (1 << 5) | 1
+const DOS_LAST_YEAR = 2107
+
+// A local time as a DOS date and time (two-second steps); outside the years DOS can hold, the nearest end.
+function dosTime(at: Date): { readonly time: number; readonly date: number } {
+	const year = at.getFullYear()
+
+	if (Number.isNaN(year) || year < 1980) return { time: 0, date: DOS_EPOCH_DATE }
+	if (year > DOS_LAST_YEAR) return { time: (23 << 11) | (59 << 5) | 29, date: ((DOS_LAST_YEAR - 1980) << 9) | (12 << 5) | 31 }
+
+	return {
+		time: (at.getHours() << 11) | (at.getMinutes() << 5) | (at.getSeconds() >> 1),
+		date: ((year - 1980) << 9) | ((at.getMonth() + 1) << 5) | at.getDate()
+	}
+}
 const VERSION_DEFLATE = 20
 const VERSION_ZIP64 = 45
 // Writes smaller than this are gathered into one chunk, so a sink behind a bridge sees few calls.
@@ -633,7 +658,7 @@ async function dataOf(item: Extract<ZipPlanItem, { kind: "data" }>, options: Wri
 // the archive the plan came from, entry layouts it already read are reused; given only the source bytes
 // (as next to the file on mobile), each copied entry's local header is read once.
 export async function writeZip(
-	plan: ZipPlan,
+	plan: ZipPlan | StreamedZipPlan,
 	original: ZipArchive | ByteSource | null,
 	sink: ByteSink,
 	options: WriteZipOptions = {}
@@ -648,7 +673,9 @@ export async function writeZip(
 	const crcs = new Map<string, number>()
 	const copies = new Map<string, { crc: number; length: number }>()
 
-	for (const item of plan.items) {
+	const streamed = !Array.isArray(plan.items)
+
+	for await (const item of plan.items) {
 		const name = item.kind === "copy" ? item.entry.name : item.name
 
 		if (names.has(name)) throw new ZipError("duplicateName", `Duplicate entry ${name} in the plan`)
@@ -697,13 +724,15 @@ export async function writeZip(
 
 		if (!sameName) flags = isAscii(nameBytes) ? flags & ~FLAG_UTF8 : flags | FLAG_UTF8
 
+		const stamp = item.modified === undefined ? undefined : dosTime(item.modified)
+
 		const record: CentralRecord = {
 			versionMadeBy: template?.versionMadeBy ?? VERSION_DEFLATE,
 			versionNeeded: Math.max(template?.versionNeeded ?? 0, VERSION_DEFLATE),
 			flags,
 			method: item.compress ? METHOD_DEFLATE : METHOD_STORED,
-			modTime: template?.modTime ?? 0,
-			modDate: template?.modDate ?? DOS_EPOCH_DATE,
+			modTime: stamp?.time ?? template?.modTime ?? 0,
+			modDate: stamp?.date ?? template?.modDate ?? DOS_EPOCH_DATE,
 			crc32: content.crc,
 			compressedSize: content.size,
 			uncompressedSize: item.bytes.length,
@@ -723,6 +752,9 @@ export async function writeZip(
 
 		crcs.set(item.name, content.fed())
 		records.push(record)
+
+		// What is made as it streams goes out before the next entry is asked for.
+		if (streamed) await out.flush()
 	}
 
 	const directoryOffset = out.written

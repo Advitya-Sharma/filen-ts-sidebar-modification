@@ -147,6 +147,25 @@ describe("previewMenuHiddenActionIds (preview header item-menu derivation)", () 
 		])
 	})
 
+	it("keeps Download as for a document the preview may download, and drops it where it may not", () => {
+		const docx = fileItem({
+			meta: {
+				type: "decoded",
+				data: { name: "report.docx", mime: "application/octet-stream", modified: 0n, size: 1n, key: "key", version: 2 }
+			}
+		})
+
+		expect(menuIds(docx, "drive")).toContain("downloadAs")
+		expect(
+			driveItemActions(docx, "drive")
+				.map(descriptor => descriptor.id)
+				.filter(id => !previewMenuHiddenActionIds(undefined, false).has(id))
+		).not.toContain("downloadAs")
+		expect(previewMenuHiddenActionIds(PHOTOS_HIDDEN_ACTION_IDS, false)).toEqual(
+			new Set(["download", ...PHOTOS_HIDDEN_ACTION_IDS, "downloadAs"])
+		)
+	})
+
 	it("otherwise matches driveItemActions' own variant gating exactly (download aside)", () => {
 		expect(menuIds(dirItem(), "trash")).toEqual(["restore", "deletePermanently", "info"])
 		expect(menuIds(fileItem(), "links")).toEqual([

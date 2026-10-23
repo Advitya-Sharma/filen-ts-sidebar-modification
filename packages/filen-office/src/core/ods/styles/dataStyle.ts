@@ -168,8 +168,13 @@ function sectionCode(style: OdfDataStyle, held: string[]): { code: string; local
 				const decimals = digitsAttribute(part, "number:decimal-places", 0, held)
 				const integers = Math.max(1, digitsAttribute(part, "number:min-integer-digits", 1, held))
 				const exponent = Math.max(1, digitsAttribute(part, "number:min-exponent-digits", 2, held))
+				// Engineering notation: the exponent a multiple of the interval (§19.355), "##0" in a code.
+				const interval = digitsAttribute(part, "number:exponent-interval", 1, held)
+				const mantissa = interval > integers ? "#".repeat(interval - integers) + "0".repeat(integers) : "0".repeat(integers)
+				// A sign for positive exponents too unless number:forced-exponent-sign says otherwise (§19.356).
+				const sign = part.attributes.get("number:forced-exponent-sign") === "false" ? "E-" : "E+"
 
-				code += `${"0".repeat(integers)}${decimals > 0 ? `.${"0".repeat(decimals)}` : ""}E+${"0".repeat(exponent)}`
+				code += `${mantissa}${decimals > 0 ? `.${"0".repeat(decimals)}` : ""}${sign}${"0".repeat(exponent)}`
 				break
 			}
 			case "number:fraction": {

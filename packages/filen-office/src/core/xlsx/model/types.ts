@@ -15,6 +15,7 @@ import type {
 } from "../../sheet/protocol"
 import type { Markup } from "../../xml/editor"
 import type { Slicing } from "../../slicing"
+import type { AxisShift } from "../refs/axis"
 
 // The lossless workbook model the reader builds, edits change and the splice writer saves. Untouched parts stay
 // compressed in the source zip and are copied as stored; a sheet is parsed on demand into a columnar store whose
@@ -70,8 +71,14 @@ export const RowFlag = {
 	THICK_BOTTOM: 1 << 7,
 	// Bits 8-10: outline level 0-7.
 	OUTLINE_SHIFT: 8,
-	OUTLINE_MASK: 0b111 << 8
+	OUTLINE_MASK: 0b111 << 8,
+	// With DIRTY: its cells moved along the row as columns were inserted or deleted, and nothing else changed it since
+	// (each cell is its source cell at its new column).
+	SHIFTED: 1 << 11
 } as const
+
+// The bits that say how a row changed since open, not what it is.
+export const ROW_MARKS = RowFlag.DIRTY | RowFlag.NEW | RowFlag.SHIFTED
 
 // XlsxRowBlock.rowSpans for a row with no source bytes.
 export const NO_SPAN = 0xffffffff
@@ -367,6 +374,8 @@ export interface XlsxStyleRuns {
 	// The runs crossing `range`, clipped to it, in row then column order.
 	forEach(range: SheetRange, visit: (startRow: number, startCol: number, endRow: number, endCol: number, style: number) => void): void
 	estimateBytes(): number
+	// The runs after rows or columns inserted or deleted, as ranges move (refs/axis.ts); undefined when none is left.
+	shifted(shift: AxisShift): XlsxStyleRuns | undefined
 }
 
 // The first <sheetView> (the others are kept as written).
@@ -428,10 +437,13 @@ export interface XlsxSheetModel {
 	// (namespaces, mc:Ignorable); without one the writer makes a plain root.
 	readonly freshRoot?: string | undefined
 	// Formats of empty cells the store does not hold (XlsxStyleRuns); none for a SpreadsheetML source.
-	readonly styleRuns?: XlsxStyleRuns
+	styleRuns?: XlsxStyleRuns
 	// Rows the store does not hold, alike in runs (an OpenDocument source's hidden or resized rows without cells, which
 	// can reach the grid's end): ascending, apart from each other and from the store's rows. None for SpreadsheetML.
-	readonly rowRuns?: readonly XlsxRowRun[]
+	rowRuns?: readonly XlsxRowRun[] | undefined
+	// What else of the sheet moves with its rows and columns (an OpenDocument source's runs and where its rows and
+	// columns came from): the step a structure edit applies and reverts, null when nothing moves.
+	shiftSource?(shift: AxisShift): { readonly apply: () => void; readonly revert: () => void } | null
 	// Formula cells (history.ts cellKeyOf) whose stored results are calculated again once the engine is built, the
 	// stored one shown until then and where the engine holds the formula: an OpenDocument source's volatile formulas
 	// (LibreOffice recalculates them on load) and results written as error text.
@@ -786,4 +798,10 @@ export interface XlsxChangeLog {
 	removeRelationship(source: string, id: string): void
 	formulasChanged(): void
 	needsFullCalc(): void
+	// What one edit marks: begun before it runs, ended once it ran (each section and part it marked, re-marked ones
+	// too, as changes.ts sheetMark, workbookMark and partMark name them; null when none was begun).
+	beginJournal?(): void
+	endJournal?(): ReadonlySet<string> | null
+	// The edit the journal ended on was refused and undone: the marks it made first go too.
+	forgetJournal?(): void
 }

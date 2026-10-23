@@ -27,7 +27,6 @@ import "@filen/office/css/docx.css"
 import { recordContentVerdict } from "@/features/drive/lib/contentVerdicts"
 import { uploadConvertedCopy } from "@/features/drive/lib/convertedCopy"
 import { driveItemMime, isLinkedEmbedItem, type DriveItem } from "@/features/drive/lib/item"
-import { itemFileKind } from "@/features/drive/lib/preview.logic"
 import { TextViewer } from "@/features/preview/components/textViewer"
 import type { DriveVariant } from "@/features/drive/lib/preferences"
 import { usePreviewBytes } from "@/features/preview/hooks/usePreviewBytes"
@@ -43,6 +42,7 @@ import {
 	docxFormatOf,
 	docxRefusalKey,
 	docxSessionKey,
+	isTextTemplate,
 	legacyNeedsPassword,
 	legacyRefusalKey,
 	viewOnlyReasons,
@@ -122,8 +122,9 @@ export function DocxViewer({ item, alt, variant, editing, canSaveCopy, onOpenFil
 	// Editing or viewing is decided as the file mounts. The editor keeps the document it opened across the
 	// user's own saves (each makes the file a new version under a new uuid): its bytes stay the ones it read.
 	const format = docxFormatOf(alt)
-	// An RTF document edits as the package it reads as and saves as RTF (rtfDocument.tsx).
-	const [edit] = useState(() => editing?.writable === true && (format === "docx" || format === "rtf"))
+	// Every format edits: an RTF or OpenDocument text document as the package it reads as, saved in its own format
+	// (rtfDocument.tsx).
+	const [edit] = useState(() => editing?.writable === true)
 	const [openedItem] = useState(item)
 	const result = usePreviewBytes(edit ? openedItem : item)
 	const downloading = result.status === "pending"
@@ -140,11 +141,106 @@ export function DocxViewer({ item, alt, variant, editing, canSaveCopy, onOpenFil
 
 	return (
 		<PreviewGate result={result}>
-			{ready =>
-				format === "rtf" ? (
+			{ready => {
+				// RTF never comes here: it always opens through its held document.
+				const shown = format === "odt" ? "odt" : "docx"
+				const standard = (): ReactNode =>
+					isTextTemplate(item, ready.bytes) ? (
+						<DocxTemplateAsText
+							item={item}
+							alt={alt}
+							anon={anon}
+						/>
+					) : (
+						<DocxPasswordBoundary
+							bytes={ready.bytes}
+							name={alt}
+						>
+							{(content, key, conversion) => {
+								const context = { anon, archive, linked: isLinkedEmbedItem(item), variant }
+
+								// A Word 97–2003 document is shown from its conversion, read-only.
+								if (conversion !== null) {
+									return (
+										<DocxLegacyView
+											item={item}
+											conversion={conversion}
+											canSaveCopy={canSaveCopy === true}
+											onOpenFile={onOpenFile}
+										>
+											{legacy => (
+												<DocxDocumentView
+													content={content}
+													alt={alt}
+													format="docx"
+													encrypted={undefined}
+													legacy={legacy}
+													context={context}
+												/>
+											)}
+										</DocxLegacyView>
+									)
+								}
+
+								// Download as ▸ PDF: the file laid out again in the PDF worker; a protected one's password is asked and
+								// checked against the file as stored, then protects the PDF.
+								const pdf: DocxPdfExportTarget = {
+									fileName: alt,
+									source: () =>
+										content.file === null
+											? { kind: "file", bytes: ready.bytes }
+											: { kind: "file", bytes: content.file, format: shown },
+									encryptedFile: key === null ? undefined : ready.bytes
+								}
+								const viewer = (
+									<DocxDocumentView
+										content={content}
+										alt={alt}
+										format={shown}
+										encrypted={key?.document.integrity}
+										context={context}
+										pdf={pdf}
+									/>
+								)
+
+								// An OpenDocument file edits through its held document (above); here it is only shown.
+								if (!edit || editing === undefined || format === "odt") {
+									return viewer
+								}
+
+								const editProps = {
+									alt,
+									encryptedFile: key === null ? undefined : ready.bytes,
+									writable: editing.writable,
+									renamed: editing.renamed,
+									onDirtyChange: editing.onDirtyChange,
+									saveRef: editing.saveRef,
+									onAutosave: editing.onAutosave,
+									viewer: () => viewer
+								}
+
+								// A password-protected document's editor takes its own copy and seals its saves with its key.
+								return key === null || content.file !== null ? (
+									<DocxEditView
+										bytes={content.file ?? ready.bytes}
+										{...editProps}
+									/>
+								) : (
+									<DocxProtectedEditView
+										document={key.document}
+										{...editProps}
+									/>
+								)
+							}}
+						</DocxPasswordBoundary>
+					)
+
+				return format === "rtf" || (format === "odt" && edit && editing !== undefined) ? (
 					<RtfDocument
 						bytes={ready.bytes}
 						edit={edit && editing !== undefined}
+						format={format === "odt" ? "odt" : "rtf"}
+						{...(format === "odt" ? { unopened: standard } : {})}
 					>
 						{rtf => {
 							const viewer = (
@@ -174,106 +270,12 @@ export function DocxViewer({ item, alt, variant, editing, canSaveCopy, onOpenFil
 							)
 						}}
 					</RtfDocument>
-				) : textTemplate(item, ready.bytes) ? (
-					<DocxTemplateAsText
-						item={item}
-						alt={alt}
-						anon={anon}
-					/>
 				) : (
-					<DocxPasswordBoundary
-						bytes={ready.bytes}
-						name={alt}
-					>
-						{(content, key, conversion) => {
-							const context = { anon, archive, linked: isLinkedEmbedItem(item), variant }
-
-							// A Word 97–2003 document is shown from its conversion, read-only.
-							if (conversion !== null) {
-								return (
-									<DocxLegacyView
-										item={item}
-										conversion={conversion}
-										canSaveCopy={canSaveCopy === true}
-										onOpenFile={onOpenFile}
-									>
-										{legacy => (
-											<DocxDocumentView
-												content={content}
-												alt={alt}
-												format="docx"
-												encrypted={undefined}
-												legacy={legacy}
-												context={context}
-											/>
-										)}
-									</DocxLegacyView>
-								)
-							}
-
-							// Download as ▸ PDF: the file laid out again in the PDF worker; a protected one's password is asked and
-							// checked against the file as stored, then protects the PDF.
-							const pdf: DocxPdfExportTarget = {
-								fileName: alt,
-								source: () =>
-									content.file === null
-										? { kind: "file", bytes: ready.bytes }
-										: { kind: "file", bytes: content.file, format },
-								encryptedFile: key === null ? undefined : ready.bytes
-							}
-							const viewer = (
-								<DocxDocumentView
-									content={content}
-									alt={alt}
-									format={format}
-									encrypted={key?.document.integrity}
-									context={context}
-									pdf={pdf}
-								/>
-							)
-
-							if (!edit || editing === undefined) {
-								return viewer
-							}
-
-							const editProps = {
-								alt,
-								encryptedFile: key === null ? undefined : ready.bytes,
-								writable: editing.writable,
-								renamed: editing.renamed,
-								onDirtyChange: editing.onDirtyChange,
-								saveRef: editing.saveRef,
-								onAutosave: editing.onAutosave,
-								viewer: () => viewer
-							}
-
-							// A password-protected document's editor takes its own copy and seals its saves with its key.
-							return key === null || content.file !== null ? (
-								<DocxEditView
-									bytes={content.file ?? ready.bytes}
-									{...editProps}
-								/>
-							) : (
-								<DocxProtectedEditView
-									document={key.document}
-									{...editProps}
-								/>
-							)
-						}}
-					</DocxPasswordBoundary>
+					standard()
 				)
-			}
+			}}
 		</PreviewGate>
 	)
-}
-
-// A `.dot` is a Word 97–2003 template or a text file (Graphviz) under the same extension: bytes that are neither a
-// compound file nor a zip package are text.
-function textTemplate(item: DriveItem, bytes: Uint8Array): boolean {
-	const kind = itemFileKind(item)
-	const zip = bytes[0] === 0x50 && bytes[1] === 0x4b
-
-	return kind?.ambiguous === true && kind.extension === "dot" && !zip && !isCompoundFile(bytes)
 }
 
 // What the read found about a `.dot`, recorded (the drive preview then shows it in the text viewer, editable as any

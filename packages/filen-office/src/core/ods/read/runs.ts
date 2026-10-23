@@ -1,5 +1,6 @@
 import type { SheetRange } from "../../sheet/protocol"
 import type { XlsxStyleRuns } from "../../xlsx/model/types"
+import { crossInBand, shiftAxisSpan, type AxisShift } from "../../xlsx/refs/axis"
 
 // Formats of empty cells kept as runs (XlsxStyleRuns): runs of rows, each with ascending runs of columns. A run of
 // rows stands for every row of a repeated table:table-row and for consecutive rows whose runs are equal, so a
@@ -113,6 +114,117 @@ export class StyleRuns implements XlsxStyleRuns {
 	estimateBytes(): number {
 		return 4 * (this.rowStarts.length * 3 + 1 + this.colStarts.length * 3)
 	}
+
+	// Each run as a rectangle [startRow, endRow), [startCol, endCol).
+	private rectangles(): Rectangle[] {
+		const out: Rectangle[] = []
+
+		for (let run = 0; run < this.rowStarts.length; run++) {
+			for (let k = this.firstRun[run] ?? 0; k < (this.firstRun[run + 1] ?? 0); k++)
+				out.push({
+					startRow: this.rowStarts[run] ?? 0,
+					endRow: this.rowEnds[run] ?? 0,
+					startCol: this.colStarts[k] ?? 0,
+					endCol: this.colEnds[k] ?? 0,
+					style: this.styles[k] ?? 0
+				})
+		}
+
+		return out
+	}
+
+	shifted(shift: AxisShift): StyleRuns | undefined {
+		const rows = shift.axis === "rows"
+		const moved: Rectangle[] = []
+
+		for (const rectangle of this.rectangles()) {
+			// A band edit moves only the band's part of a run across it (refs/axis.ts).
+			const parts = shift.band === undefined ? [rectangle] : splitAtBand(rectangle, shift)
+
+			for (const part of parts) {
+				const start = rows ? part.startRow : part.startCol
+				const end = rows ? part.endRow : part.endCol
+
+				if (!crossInBand(rows ? part.startCol : part.startRow, shift)) {
+					moved.push(part)
+
+					continue
+				}
+
+				const span = shiftAxisSpan(start, end - 1, shift)
+
+				if (span === null) continue
+
+				moved.push(rows ? { ...part, startRow: span[0], endRow: span[1] + 1 } : { ...part, startCol: span[0], endCol: span[1] + 1 })
+			}
+		}
+
+		return fromRectangles(moved)
+	}
+}
+
+interface Rectangle {
+	readonly startRow: number
+	readonly endRow: number
+	readonly startCol: number
+	readonly endCol: number
+	readonly style: number
+}
+
+// The parts of a run inside and outside a band edit's band (columns for an edit of rows, rows for one of columns).
+function splitAtBand(rectangle: Rectangle, shift: AxisShift): Rectangle[] {
+	const band = shift.band
+
+	if (band === undefined) return [rectangle]
+
+	const rows = shift.axis === "rows"
+	const low = rows ? rectangle.startCol : rectangle.startRow
+	const high = rows ? rectangle.endCol : rectangle.endRow
+	const cuts = [low, Math.max(low, Math.min(high, band.start)), Math.max(low, Math.min(high, band.end + 1)), high]
+	const out: Rectangle[] = []
+
+	for (let k = 0; k < 3; k++) {
+		const from = cuts[k] ?? 0
+		const to = cuts[k + 1] ?? 0
+
+		if (to > from) out.push(rows ? { ...rectangle, startCol: from, endCol: to } : { ...rectangle, startRow: from, endRow: to })
+	}
+
+	return out
+}
+
+// Rectangles that do not overlap, as runs: swept row boundary by row boundary.
+function fromRectangles(rectangles: readonly Rectangle[]): StyleRuns | undefined {
+	if (rectangles.length === 0) return undefined
+
+	const bounds = [...new Set(rectangles.flatMap(rectangle => [rectangle.startRow, rectangle.endRow]))].sort((a, b) => a - b)
+	const byStart = [...rectangles].sort((a, b) => a.startRow - b.startRow)
+	const builder = new StyleRunsBuilder()
+	let active: Rectangle[] = []
+	let next = 0
+
+	for (let k = 0; k + 1 < bounds.length; k++) {
+		const from = bounds[k] ?? 0
+		const to = bounds[k + 1] ?? 0
+
+		active = active.filter(rectangle => rectangle.endRow > from)
+
+		while (next < byStart.length && (byStart[next]?.startRow ?? 0) <= from) {
+			const rectangle = byStart[next++]
+
+			if (rectangle !== undefined && rectangle.endRow > from) active.push(rectangle)
+		}
+
+		if (active.length === 0) continue
+
+		active.sort((a, b) => a.startCol - b.startCol)
+
+		for (const rectangle of active) builder.add(rectangle.startCol, rectangle.endCol, rectangle.style)
+
+		builder.endRows(from, to)
+	}
+
+	return builder.finish()
 }
 
 // Collects runs row by row, ascending: a row run equal to the one before and adjacent to it extends it.

@@ -19,6 +19,7 @@ import { TransfersUnloadGuard } from "@/features/shell/components/transfersUnloa
 import { ActivityDetailsDialog } from "@/lib/activity/activityDetailsDialog"
 import { DriveJobCancelDialog } from "@/features/transfers/components/driveJobCancelDialog"
 import { ExtractPasswordDialog } from "@/features/transfers/components/extractPasswordDialog"
+import { DownloadAsPasswordDialog } from "@/features/drive/components/downloadAsPasswordDialog"
 import { JobReportDialog } from "@/features/transfers/components/jobReportDialog"
 import { allowNextUnload } from "@/lib/unloadGuard"
 import { guardStrayDrops } from "@/lib/dropGuard"
@@ -139,6 +140,8 @@ function RootLayout() {
 					{/* Asked from a drive job's progress toast or its transfers row, so they live beside the toasts. */}
 					<DriveJobCancelDialog />
 					<ExtractPasswordDialog />
+					{/* Asked by a protected file's Download as, started from an item menu that has closed since. */}
+					<DownloadAsPasswordDialog />
 					<JobReportDialog />
 					{/* Opened from an activity's result toast. */}
 					<ActivityDetailsDialog />

@@ -35,9 +35,7 @@ export class XlsxParts implements XlsxPartMap {
 	}
 
 	*parts(): Iterable<XlsxPart> {
-		for (const entry of this.opc.zip.entries) {
-			if (entry.name.endsWith("/") && entry.uncompressedSize === 0) continue
-
+		for (const entry of this.opc.entries()) {
 			const part = this.get(entry.name)
 
 			if (part !== undefined) yield part

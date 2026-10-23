@@ -14,9 +14,20 @@ import type {
 	DocxViewerState
 } from "@filen/office/dom/docx"
 import type { DocxDocument } from "@filen/office/react/docx"
+import { isCompoundFile } from "@filen/office/core/cfb"
+import type { DriveItem } from "@/features/drive/lib/item"
 import type { DriveVariant } from "@/features/drive/lib/preferences"
-import { extensionOf } from "@/features/drive/lib/preview.logic"
+import { extensionOf, itemFileKind } from "@/features/drive/lib/preview.logic"
 import type { PreviewKey } from "@/lib/i18n"
+
+// A `.dot` is a Word 97–2003 template or a text file (Graphviz) under the same extension: bytes that are neither a
+// compound file nor a zip package are text.
+export function isTextTemplate(item: DriveItem, bytes: Uint8Array): boolean {
+	const kind = itemFileKind(item)
+	const zip = bytes[0] === 0x50 && bytes[1] === 0x4b
+
+	return kind?.ambiguous === true && kind.extension === "dot" && !zip && !isCompoundFile(bytes)
+}
 
 // Which engine failures fall back to docx-preview for this release: the engine throwing (a defect or a
 // limit it hit) or rejecting markup docx-preview may still read. Files that are not a readable Word

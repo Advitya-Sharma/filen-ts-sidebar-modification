@@ -43,8 +43,9 @@ export class SaveRefusedError extends Error {
 	}
 }
 
-// RTF edits as the package it reads as and saves as RTF (the lossless RTF writer).
-const DOCX_EDITABLE_EXTENSIONS: ReadonlySet<string> = new Set(["docx", "docm", "dotx", "dotm", "rtf"])
+// RTF and OpenDocument text (and its templates) edit as the package they read as and save in their own format (the
+// lossless RTF and ODT writers).
+const DOCX_EDITABLE_EXTENSIONS: ReadonlySet<string> = new Set(["docx", "docm", "dotx", "dotm", "rtf", "odt", "ott"])
 
 export function isEditable(item: DriveItem, variant: DriveVariant): boolean {
 	if (variant !== "drive") {
@@ -66,7 +67,7 @@ export function isEditable(item: DriveItem, variant: DriveVariant): boolean {
 	}
 
 	// A Word document edits on its pages: a document or template, macro-enabled or not (macros are kept byte for byte and never run; the writer
-	// keeps the file's content type), or an RTF document.
+	// keeps the file's content type), an RTF document, or an OpenDocument text document or template (its mimetype kept).
 	if (category === "docx") {
 		return DOCX_EDITABLE_EXTENSIONS.has(extensionOf(driveItemName(base)))
 	}

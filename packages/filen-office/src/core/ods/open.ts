@@ -20,6 +20,11 @@ import { OdsCellStyles } from "./styles/cell"
 import { numFmtLocaleFor } from "./styles/locale"
 import { buildSheets, type OdsWorkbookParts } from "./workbook"
 import { readSettings } from "./settings"
+import { setOdsSource } from "./source"
+import { cellPrint, withCached } from "./unheld"
+import { OdfNs } from "../odf/namespaces"
+import { readOdsCharts } from "./charts/read"
+import { DEFAULT_VIEW } from "../xlsx/read/worksheet"
 
 export type OdsOpenFailure = XlsxOpenFailure
 
@@ -35,6 +40,8 @@ export interface OdsOpenOptions {
 }
 
 const XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
+// Repeats past the caps that leave content out of the model (read/sheet.ts).
+const TRUNCATING: ReadonlySet<string> = new Set(["cell copies", "row copies", "rows past the last", "cells past the last column", "merges"])
 
 // Opens an OpenDocument spreadsheet (.ods, .ots) into the xlsx workbook model, read-only: the package and its styles,
 // then content.xml in one streamed pass that builds every sheet. Never throws: every failure is a typed result. An
@@ -107,6 +114,10 @@ async function open(source: ByteSource, options: OdsOpenOptions): Promise<OdsOpe
 
 	prefixes.set("xml", XML_NAMESPACE)
 
+	const version = prologue.document
+		.attributes(prologue.root)
+		.find(({ name }) => name.endsWith(":version") && prefixes.get(name.slice(0, -8)) === OdfNs.office)?.value
+
 	const issues = new OdsIssues()
 	const styles = new OdsCellStyles(sheet, new OdfStyleResolver(sheet), issues)
 	const sharedStrings = SharedStrings.empty(() => null)
@@ -123,7 +134,13 @@ async function open(source: ByteSource, options: OdsOpenOptions): Promise<OdsOpe
 	}
 
 	const settings = await readSettings(odf, clock)
-	const built: OdsWorkbookParts = buildSheets(content, styles, settings, issues, prefixes)
+	const charts = await readOdsCharts({
+		odf,
+		prefixes,
+		tables: content.tables.map((table, index) => ({ index, name: table.name, shapes: table.shapes, frames: table.frames })),
+		issues
+	})
+	const built: OdsWorkbookParts = buildSheets(content, styles, settings, issues, prefixes, charts)
 	const opc = OpcPackage.fromParts(built.parts)
 	const parts = new XlsxParts(opc, await opc.contentTypes())
 	const models = new Map<number, XlsxSheetModel>()
@@ -173,7 +190,60 @@ async function open(source: ByteSource, options: OdsOpenOptions): Promise<OdsOpe
 	// Every model is built: the sheets read as parsed.
 	for (const sheetEntry of sheets) sheetEntry.model = models.get(sheetEntry.id) ?? null
 
-	return { ok: true, workbook, issues: issues.list() }
+	const read = issues.list()
+
+	setOdsSource(workbook, {
+		odf,
+		version,
+		validationNames: new Set(
+			(content.validations?.children ?? []).flatMap(child => {
+				const name = child.attributes.get("table:name")
+
+				return name === undefined ? [] : [name]
+			})
+		),
+		content: entry,
+		prefixes,
+		styles,
+		settings,
+		tables: content.tables.map((table, index) => {
+			const model = models.get(index)
+			const tableStyle = styles.sheetStyle(table.styleName)
+
+			return {
+				index,
+				id: index,
+				name: table.name,
+				styleName: table.styleName,
+				hidden: !tableStyle.display,
+				rightToLeft: tableStyle.rightToLeft,
+				tabColor: tableStyle.tabColor,
+				cols: model?.cols ?? [],
+				merges: model?.merges ?? new Uint32Array(0),
+				sections: model?.sections ?? [],
+				relationships: model?.relationships.all ?? [],
+				view: model?.view ?? DEFAULT_VIEW,
+				protection: model?.protection ?? null,
+				defaultRowHeight: model?.format.defaultRowHeight ?? Number.NaN,
+				defaultColPx: model?.format.defaultColPx ?? Number.NaN,
+				truncated: read.some(issue => issue.kind === "repeat" && issue.sheet === table.name && TRUNCATING.has(issue.detail ?? "")),
+				rows: table.built.rowCount,
+				columns: table.built.columnCount,
+				validationNames: built.validationNames[index] ?? new Map()
+			}
+		}),
+		parts: built.parts,
+		charts: charts.charts,
+		definedNames: [...definedNames],
+		protection: built.protection,
+		activeTab: built.activeTab,
+		issues: read,
+		unheld: withCached(content.unheld.result(), (sheet, row, col) =>
+			cellPrint(models.get(content.tables.findIndex(table => table.name === sheet)), sharedStrings, row, col)
+		)
+	})
+
+	return { ok: true, workbook, issues: read }
 }
 
 async function isUtf16(odf: OdfPackage, entry: NonNullable<ReturnType<OdfPackage["archive"]["get"]>>): Promise<boolean> {

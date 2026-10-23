@@ -190,7 +190,7 @@ describe("previewType — extension category map", () => {
 		expect(previewType(fileNamed(`letter.${ext}`))).toBe("docx")
 	})
 
-	it.each(["odt", "ott", "ODT"])("%s -> docx (OpenDocument text, view-only)", ext => {
+	it.each(["odt", "ott", "ODT"])("%s -> docx (OpenDocument text, translated)", ext => {
 		expect(previewType(fileNamed(`letter.${ext}`))).toBe("docx")
 	})
 

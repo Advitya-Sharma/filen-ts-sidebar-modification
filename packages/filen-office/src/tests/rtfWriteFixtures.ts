@@ -134,7 +134,7 @@ export const PNG = Uint8Array.from(
 // style applied (theme fonts and colours), a new table, two cells merged, a table nested in a cell, a section break,
 // the page set up anew (orientation, margins, columns) and a picture inserted. Each on its own paragraph (or the first
 // table); returns the names of those that applied.
-export async function scriptedEdits(editing: RtfEditing): Promise<string[]> {
+export async function scriptedEdits(editing: Pick<RtfEditing, "session" | "editor">): Promise<string[]> {
 	const { session, editor } = editing
 	const done: string[] = []
 	const text = (): { node: Node; pos: number }[] => paragraphs(session.state.doc)

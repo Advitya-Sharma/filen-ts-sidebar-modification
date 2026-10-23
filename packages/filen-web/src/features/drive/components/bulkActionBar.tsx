@@ -14,6 +14,7 @@ import {
 import { useIsOnline } from "@/lib/useIsOnline"
 import { DROPDOWN_TREE_MENU_FAMILY } from "@/features/drive/components/directoryTreeSubmenu"
 import { BulkExtractMenuEntries, CompressMenuEntries } from "@/features/drive/components/archiveSubmenus"
+import { DownloadAsEntries } from "@/features/drive/components/downloadAsSubmenu"
 import { BulkActionButton, BulkActionMenuButton, SelectionActionBar } from "@/components/selectionActionBar"
 
 export interface BulkActionBarProps {
@@ -53,7 +54,24 @@ export function BulkActionBar({ variant, selectedItems, onDialogAction }: BulkAc
 				const disabled = (descriptor.id === "download" && !isBulkDownloadEnabled(selectedItems)) || offlineDisabled
 				const disabledReason = offlineDisabled ? t("common:offlineActionDisabled") : undefined
 
-				// Compress and Extract open the same entries their submenus hold in the menus.
+				// Compress, Extract and Download as open the same entries their submenus hold in the menus.
+				if (descriptor.id === "downloadAs") {
+					return (
+						<BulkActionMenuButton
+							key={descriptor.id}
+							icon={descriptor.icon}
+							label={t(descriptor.labelKey)}
+							disabled={disabled}
+							disabledReason={disabledReason}
+						>
+							<DownloadAsEntries
+								family={DROPDOWN_TREE_MENU_FAMILY}
+								items={selectedItems}
+							/>
+						</BulkActionMenuButton>
+					)
+				}
+
 				if (descriptor.id === "compress" || descriptor.id === "extract") {
 					return (
 						<BulkActionMenuButton

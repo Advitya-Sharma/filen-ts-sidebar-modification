@@ -44,7 +44,7 @@ import { formatRef, parseRef } from "./sqref"
 import { liveRelationships, refState } from "./state"
 import { readTable, rewriteTable, shiftTable, tableEdit, withoutTablePart, type TableInfo, type TableShift } from "./tables"
 import type { TableEdit } from "./structured"
-import { shiftCols, shiftMerges, shiftView } from "./views"
+import { shiftCols, shiftMerges, shiftRowRuns, shiftView } from "./views"
 
 // A structure edit's effect on every construct of the catalogue, planned before anything changes: a plan to apply
 // (and to revert exactly, as the undo applied in order), or the typed refusal of the first construct that cannot
@@ -650,7 +650,10 @@ function planSheet(
 		// unless another edit has the writer serialise them from the model, which holds the first view only.
 		const marked = workbook.changes.sheets.get(model.id)?.sections
 		const views = model.sections.find(section => section.name === "sheetViews")
-		const viewsByModel = marked?.has("sheetViews") === true && !state.ownsSection(marked.get("sheetViews"))
+		// A sheet of another format holds its view in the model alone (an OpenDocument sheet's settings.xml view).
+		const viewsByModel =
+			(marked?.has("sheetViews") === true && !state.ownsSection(marked.get("sheetViews"))) ||
+			(views === undefined && model.shiftSource !== undefined)
 		let viewStep: Step | null = null
 
 		if (views !== undefined && !viewsByModel) {
@@ -790,13 +793,17 @@ function modelStep(
 	viewsByModel: boolean,
 	touch: (construct: RefConstruct) => void
 ): Step {
-	const before = { merges: model.merges, cols: model.cols, view: model.view }
+	const before = { merges: model.merges, cols: model.cols, view: model.view, styleRuns: model.styleRuns, rowRuns: model.rowRuns }
 	const after = {
 		merges: shiftMerges(model.merges, shift),
 		cols: shiftCols(model.cols, shift),
-		view: viewsByModel ? shiftView(model.view, shift) : model.view
+		view: viewsByModel ? shiftView(model.view, shift) : model.view,
+		styleRuns: model.styleRuns?.shifted(shift),
+		rowRuns: model.rowRuns === undefined ? undefined : shiftRowRuns(model.rowRuns, shift)
 	}
 	const changes = workbook.changes
+	// What a source of another format keeps beside the model (an OpenDocument sheet's runs and source axes).
+	const source = model.shiftSource?.(shift) ?? null
 
 	if (after.merges !== before.merges) touch("merges")
 	if (after.cols !== before.cols) touch("cols")
@@ -807,12 +814,28 @@ function modelStep(
 		model.cols = values.cols
 		model.view = values.view
 
+		if (after.styleRuns !== before.styleRuns) {
+			if (values.styleRuns === undefined) delete model.styleRuns
+			else model.styleRuns = values.styleRuns
+		}
+
+		if (after.rowRuns !== before.rowRuns) model.rowRuns = values.rowRuns ?? []
+
 		if (after.merges !== before.merges) changes.sheetSection(model.id, "mergeCells")
 		if (after.cols !== before.cols) changes.sheetSection(model.id, "cols")
 		if (after.view !== before.view) changes.sheetSection(model.id, "sheetViews")
 	}
 
-	return { apply: () => set(after), revert: () => set(before) }
+	return {
+		apply: () => {
+			set(after)
+			source?.apply()
+		},
+		revert: () => {
+			source?.revert()
+			set(before)
+		}
+	}
 }
 
 // The cells: moved in the store (exactly restored on revert), shared string references counted, and header

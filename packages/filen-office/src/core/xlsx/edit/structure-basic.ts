@@ -179,12 +179,17 @@ export async function moveAxis(
 	const turn = async (clock: SliceClock | undefined): Promise<void> => {
 		if (clock?.due === true) await clock.pause()
 	}
+	// Before the engine's own move, one indivisible call: a turn whatever the slice holds, so it runs in a task of its
+	// own and our work around it never shares one with it.
+	const turnBeforeEngine = async (clock: SliceClock | undefined): Promise<void> => {
+		if (clock !== undefined && engine !== null && index >= 0) await clock.pause()
+	}
 	const clock = clockOf()
 
 	await turn(clock)
 	forward()
 	await document.loadTables()
-	await turn(clock)
+	await turnBeforeEngine(clock)
 	await document.applySliced(await engineForward(clock), post, changes, clock)
 	await sealSliced(document, post, clock)
 	report(changes)
@@ -202,6 +207,8 @@ export async function moveAxis(
 			await turn(clock)
 
 			const live = document.engine
+
+			if (clock !== undefined && live !== null && index >= 0) await clock.pause()
 
 			if (live !== null && index >= 0) {
 				await document.guardedSliced(() =>
@@ -239,6 +246,7 @@ export async function moveAxis(
 			await turn(clock)
 			forward()
 			await document.loadTables()
+			await turnBeforeEngine(clock)
 			await engineForward(clock)
 			await document.restoreLogSliced(post, "after", clock)
 			report(sink)

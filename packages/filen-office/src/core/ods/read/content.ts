@@ -11,6 +11,8 @@ import { OdsSheetBuilder, type OdsBuiltSheet, type OdsCellInput, type OdsRowInpu
 import { capturedElement } from "./captured"
 import { dateValue, durationValue, nullDate, NULL_DATE_1899 } from "./values"
 import type { OdfElement } from "../../odf/tree"
+import { decodeUtf8 } from "../../xml/index"
+import { ADDRESS_ATTRIBUTES, UnheldCollector } from "../unheld"
 
 // office:body of content.xml read in one streamed pass (ODF 1.3 Part 3 §9.1 table:table and its children), into one
 // built sheet per table plus the spreadsheet's own elements, which are small and kept as trees.
@@ -22,9 +24,19 @@ export interface OdsTableProtection {
 	readonly allows: ReadonlyMap<string, boolean>
 }
 
+// A frame anchored to a cell (draw:frame inside a table:table-cell): a chart object, an image or a text box.
+export interface OdsCellFrame {
+	readonly row: number
+	readonly col: number
+	readonly markup: Uint8Array
+}
+
 export interface OdsTable {
 	readonly name: string
 	readonly styleName: string | undefined
+	// table:shapes as written (shapes anchored to the page), and frames anchored to cells.
+	readonly shapes: Uint8Array | undefined
+	readonly frames: readonly OdsCellFrame[]
 	readonly protection: OdsTableProtection | null
 	readonly printRanges: string | undefined
 	readonly printed: boolean
@@ -45,7 +57,12 @@ export interface OdsContent {
 	readonly protectionKey: string | undefined
 	readonly protectionAlgorithm: string | undefined
 	readonly cells: number
+	// What names cells by address that the model does not carry (unheld.ts); names are added as features are read.
+	readonly unheld: UnheldCollector
 }
+
+// Bytes of content.xml read between two looks at the slice clock.
+const READ_SLICE = 64 * 1024
 
 const WHITE_SPACE = /[ \t\r\n]+/
 // Whether text holds what §6.1.2 collapses: a tab or line end, two spaces, or a space at either end. A loop, not a
@@ -98,6 +115,8 @@ interface TableState {
 	readonly printed: boolean
 	readonly conditionalFormats: OdfElement[]
 	readonly names: OdfElement[]
+	shapes: Uint8Array | undefined
+	readonly frames: OdsCellFrame[]
 	rowOutline: number
 	colOutline: number
 	rowsCollapsed: number
@@ -112,6 +131,9 @@ export class ContentReader implements ScanHandler {
 	private readonly tables: OdsTable[] = []
 	private table: TableState | null = null
 	private readonly names: OdfElement[] = []
+	private readonly unheld = new UnheldCollector()
+	// Elements whose addresses were read so far (their order keys them).
+	private captures = 0
 	private calculation: OdfElement | undefined
 	private validations: OdfElement | undefined
 	private databaseRanges: OdfElement | undefined
@@ -206,14 +228,29 @@ export class ContentReader implements ScanHandler {
 		signal: { readonly aborted: boolean } | undefined
 	): Promise<OdsContent> {
 		for await (const chunk of chunks) {
-			this.scanner.push(chunk)
+			// In pieces: an inflate step gives half a megabyte, more than a slice reads of dense rows.
+			for (let at = 0; at < chunk.length; at += READ_SLICE) {
+				this.scanner.push(at === 0 && chunk.length <= READ_SLICE ? chunk : chunk.subarray(at, at + READ_SLICE))
 
-			if (clock?.due === true) await clock.pause()
-			if (signal?.aborted === true) throw new OdsReadError("aborted", "Reading was aborted")
+				if (clock?.due === true) await clock.pause()
+				if (signal?.aborted === true) throw new OdsReadError("aborted", "Reading was aborted")
+			}
 		}
 
 		this.scanner.end()
 
+		return this.content()
+	}
+
+	// A small piece of markup read at once (a few rows the writer reads back as the reader does).
+	readBytes(bytes: Uint8Array): OdsContent {
+		this.scanner.push(bytes)
+		this.scanner.end()
+
+		return this.content()
+	}
+
+	private content(): OdsContent {
 		return {
 			tables: this.tables,
 			nullDate: this.nullDateDays,
@@ -224,7 +261,8 @@ export class ContentReader implements ScanHandler {
 			structureProtected: this.structureProtected,
 			protectionKey: this.protectionKey,
 			protectionAlgorithm: this.protectionAlgorithm,
-			cells: this.cellCount
+			cells: this.cellCount,
+			unheld: this.unheld
 		}
 	}
 
@@ -415,13 +453,60 @@ export class ContentReader implements ScanHandler {
 				break
 			case E["table:shapes"]:
 				this.issues.add("drawing", this.table?.name, "shapes", Math.max(1, countShapes(markup)))
+
+				if (this.table !== null) this.table.shapes = markup.slice()
 				break
+			case E["draw:frame"]: {
+				const table = this.table
+
+				if (table !== null)
+					table.frames.push({ row: table.builder.currentRow, col: table.builder.currentCol, markup: markup.slice() })
+				break
+			}
 			case E["office:forms"]:
 				if (hasChildElements(markup)) this.issues.add("form", this.table?.name)
+
+				// Controls bound to cells (form:linked-cell, form:source-cell-range, ODF 1.3 Part 3 §19.274, §19.311).
+				if (/:(?:linked-cell|source-cell-range)\s*=/.test(decodeUtf8(markup))) this.unheld.makeOpaque("form")
+				break
+			case E["table:data-pilot-tables"]:
+				this.elementAddresses(capturedElement(markup, prefixes), "pilot")
+				break
+			case E["table:consolidation"]:
+				this.elementAddresses(capturedElement(markup, prefixes), "consolidation")
+				break
+			case E["table:label-ranges"]:
+				this.elementAddresses(capturedElement(markup, prefixes), "label")
 				break
 			default:
 				break
 		}
+	}
+
+	// The addresses of a DataPilot table, consolidation or label range element (by the path of each element in it,
+	// for the proof to find them again).
+	private elementAddresses(root: OdfElement, kind: string): void {
+		const walk = (element: OdfElement, path: string): void => {
+			const fields = element.children.some(function named(child): boolean {
+				return child.attributes.has("table:field-number") || child.children.some(named)
+			})
+
+			for (const [name, value] of element.attributes) {
+				const local = name.startsWith("table:") ? name.slice(6) : ""
+
+				if (ADDRESS_ATTRIBUTES.get(local) !== "address") continue
+
+				this.unheld.element(
+					fields && local === "cell-range-address" ? "fields" : "address",
+					`${kind}\u0000${path}\u0000${local}`,
+					value
+				)
+			}
+
+			element.children.forEach((child, index) => walk(child, `${path}/${index}`))
+		}
+
+		walk(root, String(this.captures++))
 	}
 
 	private ignore(selfClosing: boolean): void {
@@ -452,11 +537,11 @@ export class ContentReader implements ScanHandler {
 				break
 			case E["table:data-pilot-tables"]:
 				this.issues.add("pivotTable", undefined)
-				this.ignore(selfClosing)
+				this.capture(selfClosing)
 				break
 			case E["table:consolidation"]:
 				this.issues.add("consolidation", undefined)
-				this.ignore(selfClosing)
+				this.capture(selfClosing)
 				break
 			case E["table:dde-links"]:
 				this.issues.add("ddeLink", undefined)
@@ -464,10 +549,12 @@ export class ContentReader implements ScanHandler {
 				break
 			case E["table:label-ranges"]:
 				if (!selfClosing) this.issues.add("labelRanges", undefined)
-				this.ignore(selfClosing)
+				this.capture(selfClosing)
 				break
 			case E["table:tracked-changes"]:
 				this.issues.add("trackedChanges", undefined)
+				// Changes name their cells by table, row and column (§9.9): none of them is followed.
+				this.unheld.makeOpaque("trackedChanges")
 				this.ignore(selfClosing)
 				break
 			default:
@@ -497,6 +584,8 @@ export class ContentReader implements ScanHandler {
 			printed: !scanner.is(A["table:print"], "false"),
 			conditionalFormats: [],
 			names: [],
+			shapes: undefined,
+			frames: [],
 			rowOutline: 0,
 			colOutline: 0,
 			rowsCollapsed: 0,
@@ -594,6 +683,7 @@ export class ContentReader implements ScanHandler {
 				break
 			case E["table:scenario"]:
 				this.issues.add("scenario", table.name)
+				this.unheld.pin(table.name, "scenario")
 				this.ignore(selfClosing)
 				break
 			default:
@@ -708,6 +798,19 @@ export class ContentReader implements ScanHandler {
 				cell.recalculate = volatileFormula(translated.text)
 			} else {
 				this.issues.add("formula", this.table?.name, translated.refused)
+
+				const table = this.table
+
+				if (table !== null)
+					this.unheld.cell(
+						"formula",
+						table.name,
+						table.builder.currentRow,
+						this.row.repeat,
+						table.builder.currentCol,
+						cell.repeat,
+						formula
+					)
 			}
 		}
 
@@ -763,10 +866,12 @@ export class ContentReader implements ScanHandler {
 				break
 			case E["table:detective"]:
 				this.issues.add("detective", this.table?.name)
+				if (this.table !== null) this.unheld.pin(this.table.name, "detective")
 				this.ignore(selfClosing)
 				break
 			case E["table:cell-range-source"]:
 				this.issues.add("cellRangeSource", this.table?.name)
+				if (this.table !== null) this.unheld.pin(this.table.name, "cellRangeSource")
 				this.ignore(selfClosing)
 				break
 			case E["office:annotation-end"]:
@@ -776,11 +881,29 @@ export class ContentReader implements ScanHandler {
 				this.issues.add("subTable", this.table?.name)
 				this.ignore(selfClosing)
 				break
+			case E["draw:frame"]:
+				// A frame anchored to the cell (a chart object, an image): kept as written for the charts.
+				this.issues.add("drawing", this.table?.name, "cell")
+				this.shapeEnd()
+				this.capture(selfClosing)
+				break
 			default:
-				// draw:frame, draw:custom-shape and other shapes anchored to the cell.
-				if (element === UNKNOWN) this.issues.add("drawing", this.table?.name, "cell")
+				// draw:custom-shape and other shapes anchored to the cell.
+				if (element === UNKNOWN) {
+					this.issues.add("drawing", this.table?.name, "cell")
+					this.shapeEnd()
+				}
 				this.ignore(selfClosing)
 		}
+	}
+
+	// A shape anchored to the cell up to another (table:end-cell-address, ODF 1.3 Part 3 §19.597).
+	private shapeEnd(): void {
+		const table = this.table
+		const end = this.scanner.attribute(A["table:end-cell-address"])
+
+		if (table !== null && end !== undefined)
+			this.unheld.cell("shapeEnd", table.name, table.builder.currentRow, 1, table.builder.currentCol, 1, end)
 	}
 
 	private openInParagraph(element: number, selfClosing: boolean): void {
@@ -917,7 +1040,9 @@ export class ContentReader implements ScanHandler {
 			printed: table.printed,
 			built: table.builder.finish(),
 			conditionalFormats: table.conditionalFormats,
-			names: table.names
+			names: table.names,
+			shapes: table.shapes,
+			frames: table.frames
 		})
 		this.table = null
 	}

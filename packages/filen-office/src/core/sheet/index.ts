@@ -199,5 +199,7 @@ export {
 	localizedInput,
 	localizedNumber,
 	localizeFormula,
-	plainLocale
+	plainLocale,
+	territoryCurrency,
+	textNumber
 } from "./input/locale"
