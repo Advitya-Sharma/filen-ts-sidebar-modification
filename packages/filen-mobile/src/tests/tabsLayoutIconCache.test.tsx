@@ -26,7 +26,7 @@ vi.mock("@/features/contacts/queries/useContactRequests.query", () => ({ default
 vi.mock("@/queries/useAccount.query", () => ({ default: () => ({ data: undefined }) }))
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
 vi.mock("@expo/vector-icons/MaterialIcons", () => ({ default: { getImageSource: h.getImageSource } }))
-vi.mock("expo-router/unstable-native-tabs", () => {
+vi.mock("expo-router/native-tabs", () => {
 	const Passthrough = ({ children }: { children?: ReactNode }) => children
 	const Nothing = () => null
 	const Icon = ({ src }: { src?: ReactElement<{ family: unknown }> }) => {

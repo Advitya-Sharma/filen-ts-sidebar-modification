@@ -1,5 +1,5 @@
 import Ionicons from "@expo/vector-icons/Ionicons"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import View, { CrossGlassContainerView } from "@/components/ui/view"
 import { PressableScale } from "@/components/ui/pressables"
 

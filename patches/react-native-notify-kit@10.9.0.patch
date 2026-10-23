@@ -1,17 +1,17 @@
 diff --git a/android/src/main/java/app/notifee/core/ForegroundService.java b/android/src/main/java/app/notifee/core/ForegroundService.java
-index bda1ee4fa7a6ddd94d6e0dee948fa72ad9dda3d1..af4394ef0fbcb45eb3bc87c8dc453d0fa6ef5e35 100644
+index 02fdacdeb0f2fd5f47b8caa6be511200b8cd502a..31e99e314834122cbba7b8bd98d3b85b8456b88e 100644
 --- a/android/src/main/java/app/notifee/core/ForegroundService.java
 +++ b/android/src/main/java/app/notifee/core/ForegroundService.java
-@@ -94,6 +94,49 @@ public class ForegroundService extends Service {
-     }
+@@ -403,6 +403,62 @@ public class ForegroundService extends Service {
+             ContextHolder.getApplicationContext(), run, requestedDurationMs));
    }
  
 +  /**
-+   * Refreshes the notification of an already-running foreground service in place.
++   * Patched (filen): refreshes the notification of an already-running foreground service in place.
 +   *
-+   * <p>Returns false when this notification is not the one the service is currently serving, or
-+   * when the requested foreground-service type differs from the promoted one — both need a real
-+   * {@code startForeground()} and must go through {@link #start}.
++   * <p>Returns false unless this notification is the one the live, promoted service is serving
++   * with no START/STOP in flight and an unchanged foreground-service type; every other case needs a
++   * real {@code startForeground()} and goes through {@link #start}.
 +   *
 +   * <p>Exists so that repeated {@code displayNotification()} calls for a live foreground service
 +   * (progress updates) stop issuing redundant {@code startForegroundService()} intents.
@@ -23,7 +23,7 @@ index bda1ee4fa7a6ddd94d6e0dee948fa72ad9dda3d1..af4394ef0fbcb45eb3bc87c8dc453d0f
 +      return false;
 +    }
 +
-+    // Resolve the type before taking sLock: it may perform PackageManager IPC.
++    // Resolve the type before taking the locks: it may perform PackageManager IPC.
 +    int resolvedType = ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE;
 +    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
 +      resolvedType = model.getAndroid().getForegroundServiceType();
@@ -32,63 +32,44 @@ index bda1ee4fa7a6ddd94d6e0dee948fa72ad9dda3d1..af4394ef0fbcb45eb3bc87c8dc453d0f
 +      }
 +    }
 +
-+    synchronized (sLock) {
-+      if (mCurrentNotificationId == null || !mCurrentNotificationId.equals(model.getId())) {
-+        return false;
++    try {
++      synchronized (sLifecycleLock) {
++        synchronized (sLock) {
++          ForegroundService owner = sInstance;
++          if (owner == null
++              || !owner.mForegroundActive
++              || sStateOwner != owner
++              || (owner.mForegroundEpoch != null && owner.mForegroundEpoch.retiring)
++              || sStopRequest != null
++              || !sPendingStarts.isEmpty()
++              || mCurrentNotificationId == null
++              || !mCurrentNotificationId.equals(model.getId())) {
++            return false;
++          }
++          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
++              && resolvedType != mCurrentForegroundServiceType) {
++            return false;
++          }
++          mCurrentNotification = notification;
++          mCurrentNotificationBundle = model.toBundle();
++          mCurrentHashCode = hashCode;
++          NotificationManagerCompat.from(context).notify(hashCode, notification);
++          return true;
++        }
 +      }
-+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-+          && resolvedType != mCurrentForegroundServiceType) {
-+        return false;
-+      }
-+      mCurrentNotification = notification;
-+      mCurrentNotificationBundle = model.toBundle();
-+      mCurrentHashCode = hashCode;
++    } finally {
++      publishTimeoutEventsIfUnlocked();
 +    }
-+
-+    NotificationManagerCompat.from(context).notify(hashCode, notification);
-+    return true;
 +  }
 +
    static void start(int hashCode, Notification notification, Bundle notificationBundle) {
-     Context context = ContextHolder.getApplicationContext();
-     if (context == null) {
-@@ -326,6 +369,31 @@ public class ForegroundService extends Service {
-     return null;
-   }
- 
-+  /**
-+   * Clears the process-wide notification state when this service instance goes away.
-+   *
-+   * <p>The state below is static, so a teardown that does not run through the STOP action, the
-+   * headless-task callback or {@link #handleTimeout} would leave it pointing at a service that no
-+   * longer exists. The next start would then take the "already running" path in {@link
-+   * #onStartCommand} and never call {@code startForeground()}, which Android punishes with
-+   * ForegroundServiceDidNotStartInTimeException. Android destroys a service instance before
-+   * creating its replacement, so clearing here cannot discard a newer instance's state.
-+   */
-+  @Override
-+  public void onDestroy() {
-+    if (mStartForegroundCalled) {
-+      synchronized (sLock) {
-+        mCurrentNotificationId = null;
-+        mCurrentForegroundServiceType = -1;
-+        mCurrentNotificationBundle = null;
-+        mCurrentNotification = null;
-+        mCurrentHashCode = 0;
-+      }
-+    }
-+
-+    super.onDestroy();
-+  }
-+
-   /**
-    * Called by the system on API 34 (Android 14) when a foreground service of type {@code
-    * shortService} exceeds its timeout. Stops the service gracefully to prevent ANR.
+     app.notifee.core.model.NotificationAndroidModel android =
+         NotificationModel.fromBundle(notificationBundle).getAndroid();
 diff --git a/android/src/main/java/app/notifee/core/NotificationManager.java b/android/src/main/java/app/notifee/core/NotificationManager.java
-index 1549dcef1ea22264eda457e15fdbcbed2bd03df4..23757f6baafee523ae806f905d4ee88038e675ad 100644
+index 61200d03b2b006c43847769f66fd44b21db500aa..ea420858aad81fa700c7fc044705bd9b5f0c3617 100644
 --- a/android/src/main/java/app/notifee/core/NotificationManager.java
 +++ b/android/src/main/java/app/notifee/core/NotificationManager.java
-@@ -705,11 +705,19 @@ class NotificationManager {
+@@ -711,11 +711,19 @@ class NotificationManager {
                  }
  
                  if (androidBundle.getAsForegroundService()) {

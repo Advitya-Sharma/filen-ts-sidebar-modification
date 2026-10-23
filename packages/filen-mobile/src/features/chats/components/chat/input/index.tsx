@@ -1,10 +1,10 @@
 import { useTranslation } from "react-i18next"
 import { type Chat } from "@/types"
 import { useRef, useEffect, Fragment } from "react"
-import { TextInput, useWindowDimensions, type TextInputSelectionChangeEvent, type ScaledSize } from "react-native"
+import { TextInput, useWindowDimensions, type TextInputInstance, type TextInputSelectionChangeEvent, type ScaledSize } from "react-native"
 import View, { KeyboardStickyView, CrossGlassContainerView } from "@/components/ui/view"
 import { useSafeAreaInsets } from "react-native-safe-area-context"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { AnimatedView } from "@/components/ui/animated"
 import { FadeIn, FadeOut } from "react-native-reanimated"
 import useViewLayout from "@/hooks/useViewLayout"
@@ -43,7 +43,7 @@ import logger from "@/lib/logger"
 type ChatTextInputProps = {
 	chatInputValue: string
 	onChangeText: (text: string) => void
-	inputRef: React.RefObject<TextInput | null>
+	inputRef: React.RefObject<TextInputInstance | null>
 	onKeyPress: () => void
 	onFocus: () => void
 	onBlur: () => void
@@ -141,7 +141,7 @@ const Input = ({ chat }: { chat: Chat }) => {
 	const textForeground = useResolveClassNames("text-foreground")
 	const windowDimensions = useWindowDimensions()
 	const [chatInputValue, setChatInputValue] = useSecureStore<string>(chatInputValueKey(chat.uuid), "")
-	const inputRef = useRef<TextInput>(null)
+	const inputRef = useRef<TextInputInstance>(null)
 	const isSendingRef = useRef(false)
 	const stringifiedClient = useStringifiedClient()
 	const [chatReplyTo, setChatReplyTo] = useSecureStore<ChatMessageWithInflightId | null>(chatReplyToKey(chat.uuid), null)

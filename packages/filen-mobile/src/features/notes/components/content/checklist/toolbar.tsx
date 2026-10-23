@@ -1,6 +1,6 @@
 import View, { KeyboardStickyView, CrossGlassContainerView } from "@/components/ui/view"
 import { useKeyboardState, KeyboardController } from "react-native-keyboard-controller"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import Ionicons from "@expo/vector-icons/Ionicons"
 import { useSafeAreaInsets } from "react-native-safe-area-context"
 import { PressableScale } from "@/components/ui/pressables"

@@ -2,7 +2,7 @@ import Image from "@/components/ui/image"
 import View from "@/components/ui/view"
 import { cn } from "@filen/shared"
 import Ionicons from "@expo/vector-icons/Ionicons"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { useRecyclingState } from "@shopify/flash-list"
 
 const Avatar = (props: {
@@ -19,14 +19,14 @@ const Avatar = (props: {
 
 	return (
 		<View className="bg-transparent flex-row items-center justify-center shrink-0">
-			{props.lastActive && (
+			{props.lastActive ? (
 				<View
 					className={cn(
 						"size-3 absolute rounded-full z-100 bottom-0 right-0",
-						!props.lastActive ? false : props.lastActive > new Date().getTime() - 300000 ? "bg-green-500" : "bg-gray-500"
+						props.lastActive > new Date().getTime() - 300000 ? "bg-green-500" : "bg-gray-500"
 					)}
 				/>
-			)}
+			) : null}
 			<View
 				className={cn(
 					"flex-row overflow-hidden rounded-full bg-background-tertiary items-center justify-center shrink-0",

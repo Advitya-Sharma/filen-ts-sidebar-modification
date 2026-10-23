@@ -1,4 +1,5 @@
-import { withUniwind, useResolveClassNames } from "uniwind"
+import { withUniwind } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { type StyleProp, type ViewStyle, Platform } from "react-native"
 import { MenuView, type NativeActionEvent, type MenuAction } from "@react-native-menu/menu"
 import {

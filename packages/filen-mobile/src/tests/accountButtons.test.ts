@@ -111,7 +111,7 @@ vi.mock("@/lib/share", () => ({
 }))
 
 vi.mock("@/lib/tmp", () => ({
-	writeTmpFile: vi.fn(() => ({
+	writeTmpFile: vi.fn(async () => ({
 		file: {
 			uri: "file:///tmp/file.txt",
 			name: "file.txt"
@@ -148,7 +148,7 @@ import type { TFunction } from "i18next"
 
 const t = ((key: string) => key) as TFunction
 
-const textRed500 = { color: "#ef4444" } as ReturnType<typeof import("uniwind").useResolveClassNames>
+const textRed500 = { color: "#ef4444" } as import("@/hooks/useResolveClassNames").ResolvedStyle
 
 type AccountQuerySuccess = Parameters<typeof buildDangerZoneButtons>[0]["accountQuery"]
 

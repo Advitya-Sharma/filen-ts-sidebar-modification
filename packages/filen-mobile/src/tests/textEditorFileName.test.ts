@@ -12,10 +12,10 @@ import { render } from "@testing-library/react"
 
 // ─── Capture spy for the props TextEditorDOM receives ────────────────────────
 
-const { domPropsSpy, nativePostMessageSpy, beforeRemoveListeners, appStateListeners } = vi.hoisted(() => ({
+const { domPropsSpy, nativePostMessageSpy, removePreventedListeners, appStateListeners } = vi.hoisted(() => ({
 	domPropsSpy: vi.fn(),
 	nativePostMessageSpy: vi.fn(),
-	beforeRemoveListeners: [] as Array<() => void>,
+	removePreventedListeners: [] as Array<() => void>,
 	appStateListeners: [] as Array<(state: string) => void>
 }))
 
@@ -34,13 +34,13 @@ vi.mock("@/components/textEditor/dom", () => ({
 // The wrapper owns the chunked-document write target, which stages a save to a temp file.
 vi.mock("expo-crypto", async () => await import("@/tests/mocks/expoCrypto"))
 
-// The wrapper now subscribes to beforeRemove for the content-flush belt (#67) — stub the
+// The wrapper subscribes to removePrevented for the content-flush belt (#67) — stub the
 // navigator surface it needs (expo-router's source is untranspilable in vitest).
 vi.mock("expo-router", () => ({
 	useNavigation: () => ({
 		addListener: (event: string, listener: () => void) => {
-			if (event === "beforeRemove") {
-				beforeRemoveListeners.push(listener)
+			if (event === "removePrevented") {
+				removePreventedListeners.push(listener)
 			}
 
 			return () => {}
@@ -130,16 +130,16 @@ describe("TextEditor forwards fileName to TextEditorDOM", () => {
 describe("TextEditor content-flush triggers (#67)", () => {
 	beforeEach(() => {
 		nativePostMessageSpy.mockClear()
-		beforeRemoveListeners.length = 0
+		removePreventedListeners.length = 0
 		appStateListeners.length = 0
 	})
 
-	it("posts a composition-committing flush when the screen starts leaving", () => {
+	it("posts a composition-committing flush when a pop of the screen is blocked", () => {
 		renderEditor({ type: "text" })
 
-		expect(beforeRemoveListeners).toHaveLength(1)
+		expect(removePreventedListeners).toHaveLength(1)
 
-		beforeRemoveListeners[0]?.()
+		removePreventedListeners[0]?.()
 
 		expect(nativePostMessageSpy).toHaveBeenCalledWith({
 			type: "flushContent",
@@ -179,7 +179,7 @@ describe("TextEditor content-flush triggers (#67)", () => {
 	it("subscribes nothing for a read-only editor", () => {
 		render(createElement(TextEditor, { initialValue: "x", type: "text", readOnly: true }))
 
-		expect(beforeRemoveListeners).toHaveLength(0)
+		expect(removePreventedListeners).toHaveLength(0)
 		expect(appStateListeners).toHaveLength(0)
 	})
 })

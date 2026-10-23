@@ -1,0 +1,238 @@
+diff --git a/android/src/main/java/expo/modules/audio/AudioPlayer.kt b/android/src/main/java/expo/modules/audio/AudioPlayer.kt
+index fb2d0b57fb8718df04e5c073b70837b2658f2c16..7b69599f4d6ec750f3a6aada80928802a3a00052 100644
+--- a/android/src/main/java/expo/modules/audio/AudioPlayer.kt
++++ b/android/src/main/java/expo/modules/audio/AudioPlayer.kt
+@@ -25,6 +25,10 @@ private const val PLAYBACK_STATUS_UPDATE = "playbackStatusUpdate"
+ private const val AUDIO_SAMPLE_UPDATE = "audioSampleUpdate"
+ private const val SEEK_JUMP_INTERVAL_MS: Long = 10_000
+ 
++// Patched (filen): remote previous/next track events, see `nextTrack()` below.
++private const val REMOTE_NEXT_TRACK = "remoteNextTrack"
++private const val REMOTE_PREVIOUS_TRACK = "remotePreviousTrack"
++
+ @UnstableApi
+ class AudioPlayer(
+   context: Context,
+@@ -69,6 +73,20 @@ class AudioPlayer(
+   override var mediaSession: MediaSession = buildBasicMediaSession(context, ref) { requestPlay() }
+   override val serviceConnection = AudioPlaybackServiceConnection(WeakReference(this), appContext)
+ 
++  // Patched (filen): a single AudioPlayer has no native queue, but the app drives its own playlist
++  // around it. Report track navigation as supported and hand the lock-screen / notification
++  // previous / next presses to JS as events instead of acting on the player.
++  override val supportsNextTrack = true
++  override val supportsPreviousTrack = true
++
++  override fun nextTrack() {
++    emit(REMOTE_NEXT_TRACK)
++  }
++
++  override fun previousTrack() {
++    emit(REMOTE_PREVIOUS_TRACK)
++  }
++
+   override val isLive: Boolean
+     get() = ref.isCurrentMediaItemLive
+ 
+diff --git a/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt b/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
+index 255baad7cac7aaf28efd5d6a17b3b57537d4b8d8..59c01dc574f6f9c05d704c29a13f60ea1b0a5bd5 100644
+--- a/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
++++ b/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
+@@ -24,6 +24,7 @@ import androidx.media3.session.MediaSessionService
+ import androidx.media3.session.MediaStyleNotificationHelper
+ import androidx.media3.session.SessionCommand
+ import expo.modules.audio.AudioLockScreenOptions
++import expo.modules.audio.AudioPlayer
+ import expo.modules.audio.LockScreenPlayable
+ import expo.modules.audio.Metadata
+ import expo.modules.audio.PlayRequestingPlayer
+@@ -196,7 +197,7 @@ class AudioControlsService : MediaSessionService() {
+       val compactViewIndices = mutableListOf<Int>()
+       var currentIndex = 0
+ 
+-      if (currentOptions?.showPreviousTrack == true && currentPlayable?.supportsPreviousTrack == true) {
++      if (showsPreviousTrack()) {
+         builder.addAction(
+           NotificationCompat.Action(
+             androidx.media3.session.R.drawable.media3_icon_previous,
+@@ -242,7 +243,7 @@ class AudioControlsService : MediaSessionService() {
+       compactViewIndices.add(currentIndex)
+       currentIndex++
+ 
+-      if (currentOptions?.showNextTrack == true && currentPlayable?.supportsNextTrack == true) {
++      if (showsNextTrack()) {
+         builder.addAction(
+           NotificationCompat.Action(
+             androidx.media3.session.R.drawable.media3_icon_next,
+@@ -273,9 +274,7 @@ class AudioControlsService : MediaSessionService() {
+     val session = mediaSession ?: return
+     val mediaButtons = mutableListOf<CommandButton>()
+ 
+-    val playable = currentPlayable
+-
+-    if (currentOptions?.showPreviousTrack == true && playable?.supportsPreviousTrack == true) {
++    if (showsPreviousTrack()) {
+       mediaButtons.add(
+         CommandButton.Builder(CommandButton.ICON_PREVIOUS)
+           .setDisplayName("Previous Track")
+@@ -316,7 +315,7 @@ class AudioControlsService : MediaSessionService() {
+         .build()
+     )
+ 
+-    if (currentOptions?.showNextTrack == true && playable?.supportsNextTrack == true) {
++    if (showsNextTrack()) {
+       mediaButtons.add(
+         CommandButton.Builder(CommandButton.ICON_NEXT)
+           .setDisplayName("Next Track")
+@@ -558,6 +557,28 @@ class AudioControlsService : MediaSessionService() {
+     return currentPlayable?.supportsPreviousTrack == true
+   }
+ 
++  // Patched (filen): a single AudioPlayer always shows previous / next (the app's queue lives in JS
++  // and is driven by the remoteNextTrack / remotePreviousTrack events), regardless of the
++  // showNextTrack / showPreviousTrack options. Playlists keep the upstream opt-in.
++  private fun showsPreviousTrack(): Boolean {
++    val playable = currentPlayable ?: return false
++    return playable.supportsPreviousTrack &&
++      (currentOptions?.showPreviousTrack == true || playable is AudioPlayer)
++  }
++
++  private fun showsNextTrack(): Boolean {
++    val playable = currentPlayable ?: return false
++    return playable.supportsNextTrack &&
++      (currentOptions?.showNextTrack == true || playable is AudioPlayer)
++  }
++
++  // Patched (filen): a single AudioPlayer has no native queue, so Player.COMMAND_SEEK_TO_* must not be
++  // offered to controllers — System UI / media buttons would call ExoPlayer.seekToNext/seekToPrevious
++  // on the one loaded item instead of the custom previous / next session commands.
++  fun hasNativeTrackQueue(): Boolean {
++    return currentPlayable !is AudioPlayer
++  }
++
+   private fun loadArtworkFromUrl(url: URL, callback: (Bitmap?) -> Unit) {
+     if (url != currentArtworkUrl) {
+       currentArtworkUrl = url
+diff --git a/android/src/main/java/expo/modules/audio/service/AudioMediaSessionCallback.kt b/android/src/main/java/expo/modules/audio/service/AudioMediaSessionCallback.kt
+index ee83be1fa02e01f15d9040e6f5fedb3c7e1ac34a..07363409352992437d377511456ae34f320577df 100644
+--- a/android/src/main/java/expo/modules/audio/service/AudioMediaSessionCallback.kt
++++ b/android/src/main/java/expo/modules/audio/service/AudioMediaSessionCallback.kt
+@@ -24,13 +24,21 @@ class AudioMediaSessionCallback(
+         .add(Player.COMMAND_SEEK_FORWARD)
+         .add(Player.COMMAND_SEEK_BACK)
+         .apply {
+-          if (service.supportsPreviousTrack()) {
+-            add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+-            add(Player.COMMAND_SEEK_TO_PREVIOUS)
+-          }
+-          if (service.supportsNextTrack()) {
+-            add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+-            add(Player.COMMAND_SEEK_TO_NEXT)
++          // Patched (filen): see AudioControlsService.hasNativeTrackQueue.
++          if (!service.hasNativeTrackQueue()) {
++            remove(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
++            remove(Player.COMMAND_SEEK_TO_PREVIOUS)
++            remove(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
++            remove(Player.COMMAND_SEEK_TO_NEXT)
++          } else {
++            if (service.supportsPreviousTrack()) {
++              add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
++              add(Player.COMMAND_SEEK_TO_PREVIOUS)
++            }
++            if (service.supportsNextTrack()) {
++              add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
++              add(Player.COMMAND_SEEK_TO_NEXT)
++            }
+           }
+         }
+         .build()
+diff --git a/build/AudioModule.types.d.ts b/build/AudioModule.types.d.ts
+index 0d63c9b949cfae7a101902fc3bb70fcf46094f68..7584a6136399accd5938508ce6b3000d6b8e6a00 100644
+--- a/build/AudioModule.types.d.ts
++++ b/build/AudioModule.types.d.ts
+@@ -222,6 +222,10 @@ export type AudioEvents = {
+     playbackStatusUpdate(status: AudioStatus): void;
+     /** Fired when audio sampling is enabled and new sample data is available. */
+     audioSampleUpdate(data: AudioSample): void;
++    /** Fired when the user taps the "next track" control on the lockscreen / remote command center. */
++    remoteNextTrack(): void;
++    /** Fired when the user taps the "previous track" control on the lockscreen / remote command center. */
++    remotePreviousTrack(): void;
+ };
+ export declare class AudioRecorder extends SharedObject<RecordingEvents> {
+     /**
+diff --git a/ios/AudioPlayer.swift b/ios/AudioPlayer.swift
+index 0f68a52003416eb0e7be03d44dba1be76cd38116..505505c91fbe2d4bb01e28ea39a2d9b99ea4e47c 100644
+--- a/ios/AudioPlayer.swift
++++ b/ios/AudioPlayer.swift
+@@ -4,6 +4,9 @@ import Combine
+ private enum AudioConstants {
+   static let playbackStatus = "playbackStatusUpdate"
+   static let audioSample = "audioSampleUpdate"
++  // Patched (filen): remote previous/next track events, see `nextTrack()` below.
++  static let remoteNextTrack = "remoteNextTrack"
++  static let remotePreviousTrack = "remotePreviousTrack"
+ }
+ 
+ public class AudioPlayer: SharedRef<AVPlayer>, Playable, LockScreenPlayable {
+@@ -82,6 +85,25 @@ public class AudioPlayer: SharedRef<AVPlayer>, Playable, LockScreenPlayable {
+     ref
+   }
+ 
++  // Patched (filen): a single AudioPlayer has no native queue, but the app drives its own playlist
++  // around it. Report track navigation as supported and hand the lock-screen / remote-command
++  // previous / next presses to JS as events instead of acting on the player.
++  var supportsNextTrack: Bool {
++    true
++  }
++
++  var supportsPreviousTrack: Bool {
++    true
++  }
++
++  func nextTrack() {
++    emit(event: AudioConstants.remoteNextTrack)
++  }
++
++  func previousTrack() {
++    emit(event: AudioConstants.remotePreviousTrack)
++  }
++
+   var currentOffsetFromLive: Double? {
+     // currentDate() blocks until the item has loaded, and a still-loading item looks live too.
+     guard let item = ref.currentItem, item.status == .readyToPlay, item.duration.isIndefinite,
+diff --git a/ios/MediaController.swift b/ios/MediaController.swift
+index 1f7ca7ea4ec041e4111ab96ffa15b939f6e4d896..708dab98845ee77c7d373580fd47beb6ad09fe14 100644
+--- a/ios/MediaController.swift
++++ b/ios/MediaController.swift
+@@ -387,8 +387,12 @@ class MediaController {
+     remoteCommandCenter.changePlaybackPositionCommand.isEnabled = !isLiveStream
+     let supportsNextTrack = activePlayable?.supportsNextTrack ?? false
+     let supportsPreviousTrack = activePlayable?.supportsPreviousTrack ?? false
+-    let showNextTrack = (options?.showNextTrack ?? false) && supportsNextTrack
+-    let showPreviousTrack = (options?.showPreviousTrack ?? false) && supportsPreviousTrack
++    // Patched (filen): a single AudioPlayer always shows previous / next (the app's queue lives in JS
++    // and is driven by the remoteNextTrack / remotePreviousTrack events), regardless of the
++    // showNextTrack / showPreviousTrack options. Playlists keep the upstream opt-in.
++    let isSingleAudioPlayer = activePlayable is AudioPlayer
++    let showNextTrack = ((options?.showNextTrack ?? false) || isSingleAudioPlayer) && supportsNextTrack
++    let showPreviousTrack = ((options?.showPreviousTrack ?? false) || isSingleAudioPlayer) && supportsPreviousTrack
+ 
+     remoteCommandCenter.skipForwardCommand.isEnabled = (options?.showSeekForward ?? false) && !showNextTrack
+     remoteCommandCenter.skipBackwardCommand.isEnabled = (options?.showSeekBackward ?? false) && !showPreviousTrack
+diff --git a/src/AudioModule.types.ts b/src/AudioModule.types.ts
+index 3194a8ebd1b91793d03a1692c563b5d2e83c2738..8f8245fb219f5b91cf51dc447a3c9c00db51297b 100644
+--- a/src/AudioModule.types.ts
++++ b/src/AudioModule.types.ts
+@@ -281,6 +281,11 @@ export type AudioEvents = {
+   playbackStatusUpdate(status: AudioStatus): void;
+   /** Fired when audio sampling is enabled and new sample data is available. */
+   audioSampleUpdate(data: AudioSample): void;
++  // Patched (filen): lock-screen / remote-command track navigation for a single AudioPlayer.
++  /** Fired when the user taps the "next track" control on the lockscreen / remote command center. */
++  remoteNextTrack(): void;
++  /** Fired when the user taps the "previous track" control on the lockscreen / remote command center. */
++  remotePreviousTrack(): void;
+ };
+ 
+ export declare class AudioRecorder extends SharedObject<RecordingEvents> {

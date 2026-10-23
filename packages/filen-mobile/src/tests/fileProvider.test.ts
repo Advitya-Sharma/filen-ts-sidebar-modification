@@ -73,13 +73,13 @@ vi.mock("@/modules/file-provider-domain", () => ({
 // test env. The mock preserves the observable contract writeUnlocked relies on: the destination
 // ends up holding exactly the sealed payload.
 vi.mock("@/lib/fsAtomic", () => ({
-	atomicWrite: (file: { exists: boolean; delete: () => void; create: () => void; write: (data: unknown) => void }, data: unknown) => {
+	atomicWrite: (file: { exists: boolean; delete: () => void; create: () => void; writeSync: (data: unknown) => void }, data: unknown) => {
 		if (file.exists) {
 			file.delete()
 		}
 
 		file.create()
-		file.write(data)
+		file.writeSync(data)
 
 		return file
 	}
@@ -262,7 +262,7 @@ describe("fileProvider", () => {
 			// Write an auth.json directly with providerEnabled:false to exercise the
 			// branch where the file exists but the flag is explicitly disabled.
 			AUTH_FILE.create()
-			AUTH_FILE.write(
+			AUTH_FILE.writeSync(
 				JSON.stringify({
 					providerEnabled: false,
 					sdkConfig: null,
@@ -280,7 +280,7 @@ describe("fileProvider", () => {
 			// Write an auth.json with providerEnabled:false to test that enabled()
 			// unconditionally syncs the read value back to secureStore regardless of truth.
 			AUTH_FILE.create()
-			AUTH_FILE.write(
+			AUTH_FILE.writeSync(
 				JSON.stringify({
 					providerEnabled: false,
 					sdkConfig: null,
@@ -360,7 +360,7 @@ describe("fileProvider", () => {
 			// Writes a file where maxThumbnailFilesBudget is present but maxCacheFilesBudget is null.
 			// The guard at fileProvider.ts line 85 must treat partial-null the same as both-null.
 			AUTH_FILE.create()
-			AUTH_FILE.write(
+			AUTH_FILE.writeSync(
 				JSON.stringify({
 					providerEnabled: true,
 					sdkConfig: null,
@@ -377,7 +377,7 @@ describe("fileProvider", () => {
 		it("returns 1 GiB default when only maxThumbnailFilesBudget is null (partial record)", async () => {
 			// Writes a file where maxCacheFilesBudget is present but maxThumbnailFilesBudget is null.
 			AUTH_FILE.create()
-			AUTH_FILE.write(
+			AUTH_FILE.writeSync(
 				JSON.stringify({
 					providerEnabled: true,
 					sdkConfig: null,
@@ -640,7 +640,7 @@ describe("fileProvider", () => {
 			// early-returns freshlyRegistered:false because the domain now exists. Swallowing
 			// the flag here would permanently skip the hint for exactly that cohort.
 			AUTH_FILE.create()
-			AUTH_FILE.write("legacy-plaintext-not-decryptable")
+			AUTH_FILE.writeSync("legacy-plaintext-not-decryptable")
 
 			await expect(fileProvider.ensureEncrypted()).resolves.toEqual({ freshlyRegistered: true })
 
@@ -658,7 +658,7 @@ describe("fileProvider", () => {
 
 		it("reports false when the migration enable() fails", async () => {
 			AUTH_FILE.create()
-			AUTH_FILE.write("legacy-plaintext-not-decryptable")
+			AUTH_FILE.writeSync("legacy-plaintext-not-decryptable")
 			vi.mocked(registerDomain).mockRejectedValueOnce(new Error("fileproviderd wedged"))
 
 			await expect(fileProvider.ensureEncrypted()).resolves.toEqual({ freshlyRegistered: false })
@@ -670,7 +670,7 @@ describe("fileProvider", () => {
 			// warn-and-retried every launch with apiKey/masterKeys in cleartext
 			// inside a backed-up App Group container. Fail closed instead.
 			AUTH_FILE.create()
-			AUTH_FILE.write("legacy-plaintext-not-decryptable")
+			AUTH_FILE.writeSync("legacy-plaintext-not-decryptable")
 			mockSecureStoreData.set("biometric", { enabled: true })
 
 			await expect(fileProvider.ensureEncrypted()).resolves.toEqual({ freshlyRegistered: false })

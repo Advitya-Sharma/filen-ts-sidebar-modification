@@ -57,6 +57,12 @@ export default function useRangeSource(
 
 		let openHandle: FileHandle | null = null
 		let cancelled = false
+		// readBytes is async since expo-file-system 58 and reads at whatever offset the handle has when
+		// it RUNS, and pdf.js issues range reads concurrently. Seek-then-read on the one shared handle is
+		// therefore serialised through this chain, which keeps the I/O off the JS thread without letting
+		// one request's seek move another's read. Teardown closes the handle behind it too, never under
+		// a native read still in flight.
+		let readChain: Promise<unknown> = Promise.resolve()
 
 		const open = async () => {
 			// Yield once before touching the filesystem: opening a handle and reading a header
@@ -115,7 +121,8 @@ export default function useRangeSource(
 				if (magic !== undefined) {
 					openHandle.offset = 0
 
-					const header = Buffer.from(openHandle.readBytes(Math.min(magic.length, handleSize))).toString("latin1")
+					// A few bytes, read synchronously: nothing else holds this handle yet.
+					const header = Buffer.from(openHandle.readBytesSync(Math.min(magic.length, handleSize))).toString("latin1")
 
 					if (!hasMagic(header, magic)) {
 						openHandle.close()
@@ -174,17 +181,30 @@ export default function useRangeSource(
 								throw new Error(`range request refused: ${rejection}`)
 							}
 
-							handle.offset = offset
+							// Reserved at admission, not after the read: requests that are queued behind each
+							// other must not all pass the cumulative check against the same count.
+							bytesReadRef.current += length
 
-							const bytes = handle.readBytes(length)
+							const read = readChain.then(async () => {
+								// Teardown may have run while this request waited its turn.
+								if (handleRef.current !== handle) {
+									throw new Error("range reader used after teardown")
+								}
 
-							if (bytes.byteLength !== length) {
-								throw new Error("short read")
-							}
+								handle.offset = offset
 
-							bytesReadRef.current += bytes.byteLength
+								const bytes = await handle.readBytes(length)
 
-							return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64")
+								if (bytes.byteLength !== length) {
+									throw new Error("short read")
+								}
+
+								return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64")
+							})
+
+							readChain = read.catch(() => undefined)
+
+							return await read
 						}
 					}
 				})
@@ -217,9 +237,19 @@ export default function useRangeSource(
 			cancelled = true
 			handleRef.current = null
 
-			openHandle?.close()
+			const handle = openHandle
 
 			openHandle = null
+
+			if (handle) {
+				readChain.then(() => {
+					try {
+						handle.close()
+					} catch {
+						// The viewer is gone; a failed close has no one left to report to.
+					}
+				})
+			}
 		}
 	}, [uri, maxBytes, magic])
 

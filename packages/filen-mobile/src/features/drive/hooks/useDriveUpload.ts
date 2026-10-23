@@ -450,7 +450,7 @@ export function useDriveUpload({
 				tmpFile.delete()
 			}
 
-			tmpFile.write("", {
+			await tmpFile.write("", {
 				encoding: "utf8"
 			})
 

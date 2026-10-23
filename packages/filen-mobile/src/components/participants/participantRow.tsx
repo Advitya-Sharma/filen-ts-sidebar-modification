@@ -1,5 +1,5 @@
 import View from "@/components/ui/view"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import Ionicons from "@expo/vector-icons/Ionicons"
 import Menu, { type MenuButton } from "@/components/ui/menu"
 import Avatar from "@/components/ui/avatar"

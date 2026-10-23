@@ -115,6 +115,10 @@ describe("transferConfig — buildJsClientConfig", () => {
 		expect(cfg.uploadBandwidthKilobytesPerSec).toBe(5120)
 		expect(cfg.downloadBandwidthKilobytesPerSec).toBeUndefined()
 		expect(cfg.logLevel).toBe("Info")
+		// SDK defaults: no archive jobs run here, and the 5 ms bulk-request window stays on.
+		expect(cfg.archiveCodecMemBudget).toBeUndefined()
+		expect(cfg.archiveJobConcurrency).toBeUndefined()
+		expect(cfg.batchWindowMs).toBeUndefined()
 	})
 })
 

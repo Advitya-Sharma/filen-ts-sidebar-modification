@@ -27,7 +27,9 @@ import logger from "@/lib/logger"
 export function atomicWrite(file: FileSystem.File, data: string | Uint8Array): FileSystem.File {
 	const tmp = newTmpFile(`.tmp-${randomUUID()}`)
 
-	tmp.write(data)
+	// writeSync, NOT write (async since expo-file-system 58): callers rely on sequential writes to the
+	// same destination landing in call order, and the move below must see the full payload.
+	tmp.writeSync(data)
 
 	try {
 		tmp.moveSync(file, {

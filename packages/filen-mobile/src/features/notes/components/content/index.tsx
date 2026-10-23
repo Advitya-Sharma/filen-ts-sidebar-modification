@@ -11,7 +11,7 @@ import { noteCodeTitleExtension, noteTypeToEditorType } from "@/features/notes/u
 import { FadeOut } from "react-native-reanimated"
 import { AnimatedView } from "@/components/ui/animated"
 import { ActivityIndicator, Platform } from "react-native"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import TextEditor from "@/components/textEditor"
 import { useStringifiedClient } from "@/lib/auth"
 import useNotesInflightStore, {

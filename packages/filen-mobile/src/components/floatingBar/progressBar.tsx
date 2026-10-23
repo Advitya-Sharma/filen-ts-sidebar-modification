@@ -1,6 +1,6 @@
 import { useEffect } from "react"
 import Animated, { Easing, useAnimatedStyle, useSharedValue, withTiming, type SharedValue } from "react-native-reanimated"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import View from "@/components/ui/view"
 
 const PROGRESS_BAR_HEIGHT = 3

@@ -54,6 +54,7 @@ vi.mock("@/features/drive/queries/useDriveItems.query", () => ({
 	driveItemsQueryUpdateForNormalParent: vi.fn(),
 	driveItemsQueryUpdateForPhotos: vi.fn(),
 	driveItemsQueryRemoveDirectoryFromPhotos: vi.fn(),
+	driveItemsQueryRemoveDirectoryDescendantsFromRoots: vi.fn(),
 	driveItemsQueryInvalidateAfterDeleteAll: vi.fn(),
 	driveItemsQueryMarkAllStale: vi.fn()
 }))

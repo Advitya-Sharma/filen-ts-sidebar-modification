@@ -1,5 +1,5 @@
 import { type ButtonProps, Button as RNButton } from "react-native"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import useIsOnline from "@/hooks/useIsOnline"
 
 const Button = (

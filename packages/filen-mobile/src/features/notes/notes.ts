@@ -74,7 +74,7 @@ const notes = {
 		const exportName = noteExportFileName(note)
 
 		return {
-			...writeTmpFile(sanitizeFileName(exportName.fileName), content),
+			...(await writeTmpFile(sanitizeFileName(exportName.fileName), content)),
 			// Share MIME matching the typed extension (#83) — callers pass it to the share sheet.
 			mimeType: exportName.mimeType
 		}
@@ -115,7 +115,7 @@ const notes = {
 
 		const buffer = await zip.generateAsync({ type: "uint8array" })
 
-		return writeTmpFile(sanitizeFileName(`notes_export_${Date.now()}.zip`), buffer)
+		return await writeTmpFile(sanitizeFileName(`notes_export_${Date.now()}.zip`), buffer)
 	},
 
 	async createWithOptionalTag({

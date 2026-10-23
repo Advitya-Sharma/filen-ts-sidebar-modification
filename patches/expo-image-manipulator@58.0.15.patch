@@ -1,0 +1,29 @@
+diff --git a/android/src/main/java/expo/modules/imagemanipulator/ImageManipulatorModule.kt b/android/src/main/java/expo/modules/imagemanipulator/ImageManipulatorModule.kt
+index 56e29be232c811af06e703a6d28e6496c047b37d..466ed9897735af5c6c14ab6cc6c206451b6d68a0 100644
+--- a/android/src/main/java/expo/modules/imagemanipulator/ImageManipulatorModule.kt
++++ b/android/src/main/java/expo/modules/imagemanipulator/ImageManipulatorModule.kt
+@@ -37,12 +37,22 @@ class ImageManipulatorModule : Module() {
+ 
+       val bitmap = suspendCancellableCoroutine { continuation ->
+         val resultListener = object : ResultListener {
++          // Patched (filen): expo-image-loader never clears its Glide target and Glide
++          // restarts failed requests when connectivity returns, so these callbacks can
++          // fire again long after the continuation was resumed — a second resume throws
++          // IllegalStateException inside a Glide callback, which Glide escalates to a
++          // fatal CallbackException on the main thread. Glide delivers on the main
++          // thread only, so isActive-then-resume is race-free. Upstreamable.
+           override fun onSuccess(bitmap: Bitmap) {
+-            continuation.resume(bitmap)
++            if (continuation.isActive) {
++              continuation.resume(bitmap)
++            }
+           }
+ 
+           override fun onFailure(cause: Throwable?) {
+-            continuation.resumeWithException(ImageLoadingFailedException(url.toString(), cause.toCodedException()))
++            if (continuation.isActive) {
++              continuation.resumeWithException(ImageLoadingFailedException(url.toString(), cause.toCodedException()))
++            }
+           }
+         }
+         if (maxWidth != null || maxHeight != null) {

@@ -1,7 +1,7 @@
 import { useNavigation } from "expo-router"
 import { router } from "@/lib/router"
 import { useTranslation } from "react-i18next"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { Platform } from "react-native"
 import { useShallow } from "zustand/shallow"
 import { type FetchStatus } from "@tanstack/react-query"

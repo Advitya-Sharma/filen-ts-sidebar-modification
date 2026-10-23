@@ -15,11 +15,11 @@ import PreviewLoadFailedNotice from "@/components/drivePreview/previewLoadFailed
 import { PreviewSpinner } from "@/components/drivePreview/previewStatus"
 import { isUnavailableOffline } from "@/components/drivePreview/previewAvailability"
 import { ImageBackground, Image } from "@/components/ui/image"
-import { useResolveClassNames } from "uniwind"
-import { Gesture, GestureDetector } from "react-native-gesture-handler"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
+import { GestureDetector, type PanGestureConfig, type TapGestureConfig, useExclusiveGestures, usePanGesture, useTapGesture } from "react-native-gesture-handler"
 import { useSafeAreaInsets } from "react-native-safe-area-context"
 import { type SharedValue, useSharedValue, useAnimatedStyle, withSpring, useDerivedValue } from "react-native-reanimated"
-import { runOnJS } from "react-native-worklets"
+import { scheduleOnRN } from "react-native-worklets"
 import { Paths } from "expo-file-system"
 import { type Metadata } from "@/features/audio/audioCache"
 import { type GalleryItemTagged, galleryItemKey } from "@/components/drivePreview/gallery"
@@ -128,13 +128,13 @@ type SliderSharedValues = {
 	thumbScale: SharedValue<number>
 }
 
-function buildSliderPanGesture(sv: SliderSharedValues, trackWidth: number, seekToPosition: (fraction: number) => void) {
-	return Gesture.Pan()
-		.hitSlop({
+function buildSliderPanConfig(sv: SliderSharedValues, trackWidth: number, seekToPosition: (fraction: number) => void): PanGestureConfig {
+	return {
+		hitSlop: {
 			top: HIT_SLOP_VERTICAL,
 			bottom: HIT_SLOP_VERTICAL
-		})
-		.onStart(e => {
+		},
+		onActivate: e => {
 			"worklet"
 
 			sv.isSeeking.value = true
@@ -143,34 +143,47 @@ function buildSliderPanGesture(sv: SliderSharedValues, trackWidth: number, seekT
 			if (trackWidth > 0) {
 				sv.seekProgress.value = Math.max(0, Math.min(1, e.x / trackWidth))
 			}
-		})
-		.onUpdate(e => {
+		},
+		onUpdate: e => {
 			"worklet"
 
 			if (trackWidth > 0) {
 				sv.seekProgress.value = Math.max(0, Math.min(1, e.x / trackWidth))
 			}
-		})
-		.onEnd(() => {
+		},
+		onDeactivate: () => {
 			"worklet"
 
 			sv.isSeeking.value = false
 			sv.thumbScale.value = withSpring(1, THUMB_SPRING)
 
-			runOnJS(seekToPosition)(sv.seekProgress.value)
-		})
+			scheduleOnRN(seekToPosition, sv.seekProgress.value)
+		}
+	}
 }
 
-function buildSliderTapGesture(sv: SliderSharedValues, trackWidth: number, seekToPosition: (fraction: number) => void) {
-	return Gesture.Tap().onEnd(e => {
-		"worklet"
+function buildSliderTapConfig(sv: SliderSharedValues, trackWidth: number, seekToPosition: (fraction: number) => void): TapGestureConfig {
+	return {
+		onDeactivate: e => {
+			"worklet"
 
-		if (trackWidth > 0) {
-			sv.seekProgress.value = Math.max(0, Math.min(1, e.x / trackWidth))
+			if (trackWidth > 0) {
+				sv.seekProgress.value = Math.max(0, Math.min(1, e.x / trackWidth))
 
-			runOnJS(seekToPosition)(sv.seekProgress.value)
+				scheduleOnRN(seekToPosition, sv.seekProgress.value)
+			}
 		}
-	})
+	}
+}
+
+// Hook boundary: the configs are built by plain module-scope functions (the React Compiler leaves their
+// shared-value writes alone) and memoized on these frozen arguments, so the native config is re-sent only
+// when the track width or the seek callback changes.
+function useSliderGesture(sv: SliderSharedValues, trackWidth: number, seekToPosition: (fraction: number) => void) {
+	const panGesture = usePanGesture(buildSliderPanConfig(sv, trackWidth, seekToPosition))
+	const tapGesture = useTapGesture(buildSliderTapConfig(sv, trackWidth, seekToPosition))
+
+	return useExclusiveGestures(panGesture, tapGesture)
 }
 
 export const AudioSlider = ({
@@ -214,10 +227,7 @@ export const AudioSlider = ({
 		thumbScale
 	}
 
-	const gesture = Gesture.Exclusive(
-		buildSliderPanGesture(sv, trackWidth, seekToPosition),
-		buildSliderTapGesture(sv, trackWidth, seekToPosition)
-	)
+	const gesture = useSliderGesture(sv, trackWidth, seekToPosition)
 
 	const fillStyle = useAnimatedStyle(() => {
 		"worklet"

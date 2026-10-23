@@ -6,9 +6,6 @@ export default function Index() {
 	const isAuthed = useIsAuthed()
 	const startScreenHref = useStartScreenHref()
 
-	if (!isAuthed) {
-		return null
-	}
-
-	return <Redirect href={startScreenHref} />
+	// Login and logout both reload the app, so this is the boot route either way.
+	return <Redirect href={isAuthed ? startScreenHref : "/auth/login"} />
 }

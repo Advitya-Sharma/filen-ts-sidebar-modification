@@ -817,15 +817,19 @@ function isDriveRootUuid(uuid: string | null): boolean {
 }
 
 // A normal parent's listing keys. The root's listing is observed under either `uuid: rootUuid` or `uuid: null`
-// depending on entry path, so both are returned for it.
+// depending on entry path, so both are returned for it. Any other directory can also be browsed from the
+// Favorites or Links root, whose `{ uuid }` listings list that same directory (fetchData's listDir), so they
+// take the same patch. Its sharedOut listing holds share-stamped rows a normal row can't stand in for.
 function normalParentListings(parentUuid: string): UseDriveItemsQueryParams[] {
-	const listings: UseDriveItemsQueryParams[] = [{ path: { type: "drive", uuid: parentUuid } }]
-
 	if (isDriveRootUuid(parentUuid)) {
-		listings.push({ path: { type: "drive", uuid: null } })
+		return [{ path: { type: "drive", uuid: parentUuid } }, { path: { type: "drive", uuid: null } }]
 	}
 
-	return listings
+	return [
+		{ path: { type: "drive", uuid: parentUuid } },
+		{ path: { type: "favorites", uuid: parentUuid } },
+		{ path: { type: "links", uuid: parentUuid } }
+	]
 }
 
 /**
@@ -1052,17 +1056,16 @@ function cachedAncestryReaches(uuid: string, ancestorUuid: string, memo?: Map<st
 	return result
 }
 
-type CameraRootRelation = "inside" | "outside" | "unknown"
+type AncestryRelation = "inside" | "outside" | "unknown"
 
-// Walks the cached directory tree up from `parentUuid`: "inside" when it is the camera-upload root or a
-// descendant, "outside" when the walk reaches the drive root without passing it, "unknown" on an
-// uncached ancestor.
-function cameraRootRelation(parentUuid: string, rootUuid: string): CameraRootRelation {
-	let current: string | null = parentUuid
+// Walks the cached directory tree up from `uuid`: "inside" when it is `ancestorUuid` or a descendant,
+// "outside" when the walk reaches the drive root without passing it, "unknown" on an uncached ancestor.
+function ancestryRelation(uuid: string, ancestorUuid: string): AncestryRelation {
+	let current: string | null = uuid
 	let guard = 0
 
 	while (current && guard++ < MAX_ANCESTRY_DEPTH) {
-		if (current === rootUuid) {
+		if (current === ancestorUuid) {
 			return "inside"
 		}
 
@@ -1077,7 +1080,7 @@ function cameraRootRelation(parentUuid: string, rootUuid: string): CameraRootRel
 			return "unknown"
 		}
 
-		// Defensive: the map only holds Dir entries; a non-Dir (Root) entry is never under the camera root.
+		// Defensive: the map only holds Dir entries; a non-Dir (Root) entry is under no directory.
 		if (anyDir.tag !== AnyNormalDir_Tags.Dir) {
 			return "outside"
 		}
@@ -1099,7 +1102,7 @@ function cameraRootRelation(parentUuid: string, rootUuid: string): CameraRootRel
 // uncached ancestor counts as outside — a miss (the item just shows on the next fetch) is acceptable; a
 // false insert is not.
 function isUnderCameraUploadRoot(parentUuid: string, rootUuid: string): boolean {
-	return cameraRootRelation(parentUuid, rootUuid) === "inside"
+	return ancestryRelation(parentUuid, rootUuid) === "inside"
 }
 
 type PhotosParams = {
@@ -1203,11 +1206,11 @@ export function driveItemsQueryRemoveDirectoryFromPhotos({
 			// A directory that was outside the tree took no photos out of it: it had none, or it is the
 			// camera-upload root or one of its ancestors, and the whole tree went along. One walk up from
 			// where it was answers most moves without reading the grid.
-			if (previousParentUuid && cameraRootRelation(previousParentUuid, rootUuid) === "outside") {
+			if (previousParentUuid && ancestryRelation(previousParentUuid, rootUuid) === "outside") {
 				return
 			}
 
-			if (cameraRootRelation(newParentUuid, rootUuid) !== "outside") {
+			if (ancestryRelation(newParentUuid, rootUuid) !== "outside") {
 				return
 			}
 		}
@@ -1233,6 +1236,61 @@ export function driveItemsQueryRemoveDirectoryFromPhotos({
 			false
 		)
 	})
+}
+
+// The virtual roots that list items from anywhere in the own drive.
+const DESCENDANT_ROOT_TYPES = ["favorites", "links", "sharedOut"] as const
+
+// A trashed or deleted directory takes its whole subtree out of the Favorites, Links and Shared-out roots,
+// while a uuid filter only sees the directory itself: every row whose cached ancestry passes through it is
+// removed. A row whose ancestry isn't cached (or a shared-out root row whose own drive view isn't) stays
+// until that root's next read, as in Photos: refetching it here would race the server applying the trash
+// and could land the row again.
+export function driveItemsQueryRemoveDirectoryDescendantsFromRoots(dirUuid: string): void {
+	// Per parent directory: whether its cached ancestry passes through dirUuid.
+	const inside = new Map<string, boolean>()
+	const isInside = (item: DriveItem): boolean => {
+		const uuid = item.data.uuid
+
+		if (uuid === dirUuid) {
+			return true
+		}
+
+		// Shared-out root rows carry no parent; their own drive views may.
+		const parent =
+			"parent" in item.data
+				? item.data.parent
+				: (cache.getNormalDir(uuid)?.parent ?? cache.fileUuidToNormalFile.get(uuid)?.parent)
+		const parentUuid = parent === undefined ? null : unwrapParentUuid(parent)
+
+		// Unplaceable, or not under a directory (e.g. already in the trash).
+		if (!parentUuid) {
+			return false
+		}
+
+		let result = inside.get(parentUuid)
+
+		if (result === undefined) {
+			result = ancestryRelation(parentUuid, dirUuid) === "inside"
+
+			inside.set(parentUuid, result)
+		}
+
+		return result
+	}
+
+	for (const type of DESCENDANT_ROOT_TYPES) {
+		updateListing(
+			{
+				path: {
+					type,
+					uuid: null
+				}
+			},
+			prev => prev.filter(item => !isInside(item)),
+			false
+		)
+	}
 }
 
 // Optimistically update the recursive photos-grid query. It is a SEPARATE query from any `drive`

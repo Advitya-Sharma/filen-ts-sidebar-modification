@@ -548,14 +548,19 @@ describe("driveItemsQueryUpdateRoot", () => {
 describe("driveItemsQueryUpdateForNormalParent", () => {
 	const ITEM = { type: "file", data: { uuid: "item-1" } } as unknown as DriveItem
 
-	it("calls driveItemsQueryUpdate once when parentUuid does not match cache.rootUuid", () => {
+	it("patches the directory's drive, favorites and links listings when parentUuid does not match cache.rootUuid", () => {
 		mockCacheRootUuid.value = "root-uuid-999"
 
 		driveItemsQueryUpdateForNormalParent({ parentUuid: "other-uuid", updater: [ITEM] })
 
 		const calls = mockQueryUpdaterSet.mock.calls.filter(c => (c[0] as unknown[])[0] === BASE_QUERY_KEY)
+		const paths = calls.map(c => ((c[0] as unknown[])[1] as Record<string, unknown>)["path"])
 
-		expect(calls).toHaveLength(1)
+		expect(paths).toEqual([
+			{ type: "drive", uuid: "other-uuid" },
+			{ type: "favorites", uuid: "other-uuid" },
+			{ type: "links", uuid: "other-uuid" }
+		])
 	})
 
 	it("calls driveItemsQueryUpdate twice when parentUuid matches cache.rootUuid", () => {
@@ -574,14 +579,15 @@ describe("driveItemsQueryUpdateForNormalParent", () => {
 		expect(uuids).toContain(null)
 	})
 
-	it("calls driveItemsQueryUpdate once when cache.rootUuid is null", () => {
+	it("patches the directory's three listings, never the null root key, when cache.rootUuid is null", () => {
 		mockCacheRootUuid.value = null
 
 		driveItemsQueryUpdateForNormalParent({ parentUuid: "some-parent", updater: [ITEM] })
 
 		const calls = mockQueryUpdaterSet.mock.calls.filter(c => (c[0] as unknown[])[0] === BASE_QUERY_KEY)
+		const uuids = calls.map(c => (((c[0] as unknown[])[1] as Record<string, unknown>)["path"] as Record<string, unknown>)["uuid"])
 
-		expect(calls).toHaveLength(1)
+		expect(uuids).toEqual(["some-parent", "some-parent", "some-parent"])
 	})
 
 	it("forwards the resolved update to both calls when root match occurs", () => {

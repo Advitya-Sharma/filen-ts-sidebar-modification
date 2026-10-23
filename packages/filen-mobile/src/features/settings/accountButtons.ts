@@ -1,6 +1,6 @@
 import { type Button } from "@/components/ui/settingsGroup"
 import { type TFunction } from "i18next"
-import { useResolveClassNames } from "uniwind"
+import { type ResolvedStyle } from "@/hooks/useResolveClassNames"
 import useAccountQuery, { accountQueryPatch } from "@/queries/useAccount.query"
 import { formatBytes } from "@filen/shared"
 import { confirmPrompt, inputPrompt } from "@/lib/promptFlow"
@@ -35,7 +35,7 @@ export function buildDangerZoneButtons({
 }: {
 	t: TFunction
 	accountQuery: AccountQuerySuccess
-	textRed500: ReturnType<typeof useResolveClassNames>
+	textRed500: ResolvedStyle
 }): Button[] {
 	return [
 		{
@@ -386,7 +386,7 @@ export function buildProfileButtons({
 				const result = await runWithLoading(async () => {
 					const { authedSdkClient } = await auth.getSdkClients()
 
-					return writeTmpFile(
+					return await writeTmpFile(
 						`gdpr_${accountQuery.data.email}.txt`,
 						JSON.stringify(convertBigInts(await authedSdkClient.getGdprInfo()), null, 4)
 					)

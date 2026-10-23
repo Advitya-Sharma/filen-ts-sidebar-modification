@@ -8,7 +8,8 @@ import {
 	driveItemsQueryUpdateRoot,
 	driveItemsQueryUpdateForNormalParent,
 	driveItemsQueryGet,
-	driveItemsQueryRemoveDirectoryFromPhotos
+	driveItemsQueryRemoveDirectoryFromPhotos,
+	driveItemsQueryRemoveDirectoryDescendantsFromRoots
 } from "@/features/drive/queries/useDriveItems.query"
 import socketCreateBatcher from "@/features/drive/socketCreateBatcher"
 import { driveItemVersionsQueryUpdate } from "@/features/drive/queries/useDriveItemVersions.query"
@@ -83,6 +84,8 @@ export async function trash({ item }: { item: DriveItem }) {
 		driveItemsQueryRemoveDirectoryFromPhotos({
 			dirUuid: item.data.uuid
 		})
+
+		driveItemsQueryRemoveDirectoryDescendantsFromRoots(item.data.uuid)
 	}
 
 	// Recents is intentionally not re-added here: the global update above already

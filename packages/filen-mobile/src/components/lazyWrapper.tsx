@@ -1,7 +1,7 @@
 import View from "@/components/ui/view"
 import { useIsFocused } from "expo-router"
 import { useRef } from "react"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { ActivityIndicator } from "react-native"
 
 function LazyFallback() {

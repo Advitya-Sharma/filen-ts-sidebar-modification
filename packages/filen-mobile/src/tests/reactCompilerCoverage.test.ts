@@ -143,7 +143,7 @@ describe("the compiled drive Header", () => {
 			"expo-router": { useNavigation: () => navigation },
 			"@/lib/router": { router: { push: () => {}, back: () => {} } },
 			"react-i18next": { useTranslation: () => translation },
-			uniwind: { useResolveClassNames: () => classNames },
+			"@/hooks/useResolveClassNames": { useResolveClassNames: () => classNames },
 			"react-native": { Platform: { OS: "ios" } },
 			"zustand/shallow": { useShallow: (selector: unknown) => selector },
 			"@/components/ui/header": withDefault("StackHeader"),
@@ -302,7 +302,8 @@ describe("the compiled Menu", () => {
 			"react/jsx-runtime": {
 				jsx: (type: unknown, props: Record<string, unknown>): Element => ({ type, props })
 			},
-			uniwind: { withUniwind: (component: unknown) => component, useResolveClassNames: () => ({}) },
+			uniwind: { withUniwind: (component: unknown) => component },
+			"@/hooks/useResolveClassNames": { useResolveClassNames: () => ({}) },
 			"react-native": { Platform: { OS: "ios" } },
 			"@react-native-menu/menu": { MenuView: "MenuView" },
 			"react-native-ios-context-menu": { ContextMenuView: "ContextMenuView", ContextMenuButton: "ContextMenuButton" },

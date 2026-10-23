@@ -15,7 +15,7 @@ const tmpFile = vi.hoisted(() => ({
 const tmpCleanup = vi.hoisted(() => vi.fn())
 
 const tmpMock = vi.hoisted(() => ({
-	writeTmpFile: vi.fn((_name: string, data: string | Uint8Array) => {
+	writeTmpFile: vi.fn(async (_name: string, data: string | Uint8Array) => {
 		tmpFile.write(data)
 
 		return {

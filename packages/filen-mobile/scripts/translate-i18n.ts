@@ -54,7 +54,7 @@ import { SUPPORTED_LANGUAGES } from "@/locales/languages"
 // Paths & constants
 // ---------------------------------------------------------------------------
 
-const MODEL = "claude-opus-5"
+const MODEL = "claude-opus-5-5"
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_DIR = join(SCRIPT_DIR, "..")
 const EN_SOURCE_DIR = join(PACKAGE_DIR, "src", "locales", "en")
@@ -346,9 +346,13 @@ async function translateBatch(args: {
 	// Stable, cached system prefix (instructions + full English source) is reused across every batch
 	// and all eight languages — the first call writes the cache, the rest read it. The varying part
 	// (the batch subset + the target language name) lives in the per-language user message.
-	const response = await client.messages.create({
+	// Thinking is always on for this model and counts against max_tokens; "default" fallbacks route a
+	// refused request to another model inside the same call.
+	const response = await client.beta.messages.create({
 		model: MODEL,
-		max_tokens: 8192,
+		max_tokens: 16000,
+		betas: ["server-side-fallback-2026-07-01"],
+		fallbacks: "default",
 		system: [
 			{
 				type: "text",
@@ -359,6 +363,7 @@ async function translateBatch(args: {
 			}
 		],
 		output_config: {
+			effort: "high",
 			format: {
 				type: "json_schema",
 				schema: buildOutputSchema(Object.keys(batch))
@@ -381,6 +386,10 @@ async function translateBatch(args: {
 			}
 		]
 	})
+
+	if (response.stop_reason === "refusal" || response.stop_reason === "max_tokens") {
+		throw new Error(`Translation for ${lang} stopped early (${response.stop_reason})`)
+	}
 
 	const block = response.content.find(part => part.type === "text")
 

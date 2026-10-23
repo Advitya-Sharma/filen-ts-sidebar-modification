@@ -97,6 +97,24 @@ export function canonicalRemoteName(name: string): string | null {
 	return canonical
 }
 
+// Which iOS Photos version getUri() resolves (Android ignores the option). Pinned to what the
+// pipeline has always uploaded, because expo-media-library 58 moved the default for VIDEOS from the
+// original to the current version: for an edited video that means different bytes (an md5 shield miss
+// and a second upload), and for a slow-motion or trimmed one a full AVAssetExportSession re-encode per
+// call, into a tmp file the library never deletes — work no background window can afford. Images keep
+// CURRENT, the version with the user's edits rendered in, which is what they resolved to before.
+const VIDEO_URI_OPTIONS: MediaLibrary.AssetUriOptions = {
+	version: MediaLibrary.AssetUriVersion.ORIGINAL
+}
+
+const IMAGE_URI_OPTIONS: MediaLibrary.AssetUriOptions = {
+	version: MediaLibrary.AssetUriVersion.CURRENT
+}
+
+export function assetUriOptionsFor(mediaType: MediaLibrary.MediaType): MediaLibrary.AssetUriOptions {
+	return mediaType === MediaLibrary.MediaType.VIDEO ? VIDEO_URI_OPTIONS : IMAGE_URI_OPTIONS
+}
+
 export type LocalFile = {
 	info: {
 		mediaType: MediaLibrary.MediaType
@@ -1690,7 +1708,9 @@ class CameraUpload {
 						// Reconstruct the Asset on demand (synchronous constructor — race-free)
 						// instead of holding a shared object per pending delta across the whole
 						// sync; the retry shields the one remaining async shared-object call (#40).
-						const assetUri = await withReleasedSharedObjectRetry(() => new MediaLibrary.Asset(localFile.info.id).getUri())
+						const assetUri = await withReleasedSharedObjectRetry(() =>
+							new MediaLibrary.Asset(localFile.info.id).getUri(assetUriOptionsFor(localFile.info.mediaType))
+						)
 
 						if (!assetUri) {
 							throw new Error(i18n.t("camera_upload_file_missing"))

@@ -20,7 +20,7 @@ import useBlockedUsers from "@/features/contacts/hooks/useBlockedUsers"
 import useRevealedBlockedMessages from "@/features/chats/store/useRevealedBlockedMessages.store"
 import { PressableOpacity } from "@/components/ui/pressables"
 import Ionicons from "@expo/vector-icons/Ionicons"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 
 function computeIsMessageOnlyLink(message: string | undefined): boolean {
 	if (!message) {

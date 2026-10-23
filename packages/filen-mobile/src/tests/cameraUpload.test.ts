@@ -121,7 +121,7 @@ import { getPermissionsAsync } from "expo-media-library/legacy"
 import auth from "@/lib/auth"
 import transfers from "@/features/transfers/transfers"
 import { unwrapFileMeta } from "@/lib/sdkUnwrap"
-import { ml, MediaType } from "@/tests/mocks/expoMediaLibrary"
+import { ml, MediaType, AssetUriVersion } from "@/tests/mocks/expoMediaLibrary"
 import { mockParseName } from "@/tests/mocks/sdkName"
 import {
 	mockSetSyncing,
@@ -967,8 +967,7 @@ describe("sync flow", () => {
 			// `exists` does NOT catch it: the expo File API resolves the URI through `URL(string:).path`,
 			// which excludes the fragment, so the guard above the hash passes and only the hash fails.
 			const uri = "file:///media/IMG_1840.medium-hdr.MOV"
-			const fragment =
-				"#YnBsaXN0MDDRAQJfEBtSZWNvbW1lbmRlZEZvckltbWVyc2l2ZU1vZGUQAAgLKQAAAAAAAAEBAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAr"
+			const fragment = "#YnBsaXN0MDDRAQJfEBtSZWNvbW1lbmRlZEZvckltbWVyc2l2ZU1vZGUQAAgLKQAAAAAAAAEBAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAr"
 
 			vi.mocked(secureStore.get).mockResolvedValueOnce({ ...ENABLED_CONFIG, includeVideos: true })
 
@@ -990,6 +989,26 @@ describe("sync flow", () => {
 			expect(mockFileHash).toHaveBeenCalledWith(uri, expect.objectContaining({ algorithm: "MD5" }))
 			expect(transfers.upload).toHaveBeenCalledTimes(1)
 			expect(mockAddError).not.toHaveBeenCalled()
+		})
+
+		it("resolves videos to the ORIGINAL Photos version and images to the CURRENT one", async () => {
+			// expo-media-library 58 moved the iOS default for videos to CURRENT: an edited video would hash
+			// to different bytes and re-upload, and a slow-motion one would be re-encoded on every call.
+			vi.mocked(secureStore.get).mockResolvedValueOnce({ ...ENABLED_CONFIG, includeVideos: true })
+
+			ml.addAlbum({ id: "album-1", title: "Camera Roll", assetIds: ["v1", "p1"] })
+			ml.addAsset({ id: "v1", filename: "clip.MOV", mediaType: MediaType.VIDEO, creationTime: 1000, modificationTime: 2000 })
+			ml.addAsset({ id: "p1", filename: "photo.jpg", mediaType: MediaType.IMAGE, creationTime: 1000, modificationTime: 2000 })
+
+			fs.set("file:///media/v1", new Uint8Array([1, 2, 3]))
+			fs.set("file:///media/p1", new Uint8Array([4, 5, 6]))
+
+			await cameraUpload.sync()
+
+			const versionFor = (id: string) => ml.uriRequests.find(request => request.id === id)?.version
+
+			expect(versionFor("v1")).toBe(AssetUriVersion.ORIGINAL)
+			expect(versionFor("p1")).toBe(AssetUriVersion.CURRENT)
 		})
 
 		it("stores the returned hash verbatim, so existing ledger entries keep shielding", async () => {

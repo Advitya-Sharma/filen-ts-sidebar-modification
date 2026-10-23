@@ -81,7 +81,7 @@ const diagnostics = {
 			type: "uint8array"
 		})
 
-		const { file, cleanup } = writeTmpFile(`filen-logs-${Date.now()}.zip`, buffer)
+		const { file, cleanup } = await writeTmpFile(`filen-logs-${Date.now()}.zip`, buffer)
 
 		return {
 			uri: file.uri,

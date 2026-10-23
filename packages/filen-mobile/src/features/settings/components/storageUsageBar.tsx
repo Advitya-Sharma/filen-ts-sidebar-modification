@@ -2,7 +2,7 @@ import View from "@/components/ui/view"
 import Text from "@/components/ui/text"
 import { formatBytes, clampedRatio, storageUsageLevel, deriveStorageBreakdown } from "@filen/shared"
 import { useTranslation } from "react-i18next"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 
 // Segmented storage bar + wrapping legend for the More-screen account header. Files is colored by
 // fullness (green → yellow → red), versioned is a fixed blue, free is the track. Colors are resolved

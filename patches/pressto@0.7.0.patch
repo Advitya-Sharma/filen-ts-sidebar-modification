@@ -1,0 +1,106 @@
+diff --git a/lib/commonjs/pressables/base.js b/lib/commonjs/pressables/base.js
+index 7a01311..be42c0a 100644
+--- a/lib/commonjs/pressables/base.js
++++ b/lib/commonjs/pressables/base.js
+@@ -11,7 +11,10 @@ var _reactNativeReanimated = _interopRequireWildcard(require("react-native-reani
+ var _index = require("../provider/index.js");
+ var _jsxRuntime = require("react/jsx-runtime");
+ function _interopRequireWildcard(e, t) { if ("function" == typeof WeakMap) var r = new WeakMap(), n = new WeakMap(); return (_interopRequireWildcard = function (e, t) { if (!t && e && e.__esModule) return e; var o, i, f = { __proto__: null, default: e }; if (null === e || "object" != typeof e && "function" != typeof e) return f; if (o = t ? n : r) { if (o.has(e)) return o.get(e); o.set(e, f); } for (const t in e) "default" !== t && {}.hasOwnProperty.call(e, t) && ((i = (o = Object.defineProperty) && Object.getOwnPropertyDescriptor(e, t)) && (i.get || i.set) ? o(f, t, i) : f[t] = e[t]); return f; })(e, t); }
+-const AnimatedBaseButton = _reactNativeReanimated.default.createAnimatedComponent(_reactNativeGestureHandler.BaseButton);
++// Patched (filen): RNGH 3 rebound `BaseButton` to a hook-based button that ignores
++// onBegan/onActivated/onEnded/onFailed/onCancelled, which drive the press animation below.
++// The v2 button lives on as `LegacyBaseButton`. Upstream: pressto#37.
++const AnimatedBaseButton = _reactNativeReanimated.default.createAnimatedComponent(_reactNativeGestureHandler.LegacyBaseButton);
+ const cursorStyle = _reactNative.Platform.OS === 'web' ? {
+   cursor: 'pointer'
+ } : {};
+diff --git a/lib/module/pressables/base.js b/lib/module/pressables/base.js
+index daeabb6..a1dfdfb 100644
+--- a/lib/module/pressables/base.js
++++ b/lib/module/pressables/base.js
+@@ -2,7 +2,10 @@
+ 
+ import React, { useCallback, useId, useMemo } from 'react';
+ import { Platform } from 'react-native';
+-import { BaseButton } from 'react-native-gesture-handler';
++// Patched (filen): RNGH 3 rebound `BaseButton` to a hook-based button that ignores
++// onBegan/onActivated/onEnded/onFailed/onCancelled, which drive the press animation below.
++// The v2 button lives on as `LegacyBaseButton`. Upstream: pressto#37.
++import { LegacyBaseButton as BaseButton } from 'react-native-gesture-handler';
+ import Animated, { useAnimatedStyle, useDerivedValue, useSharedValue, withSpring, withTiming } from 'react-native-reanimated';
+ import { useLastTouchedPressable, usePressablesConfig } from "../provider/index.js";
+ import { jsx as _jsx } from "react/jsx-runtime";
+diff --git a/lib/typescript/commonjs/src/pressables/base.d.ts b/lib/typescript/commonjs/src/pressables/base.d.ts
+index 5176b74..559cd85 100644
+--- a/lib/typescript/commonjs/src/pressables/base.d.ts
++++ b/lib/typescript/commonjs/src/pressables/base.d.ts
+@@ -3,7 +3,7 @@ import { type ViewStyle } from 'react-native';
+ import { type AnimatableValue, type SharedValue } from 'react-native-reanimated';
+ import type { PressableConfig } from '../provider/constants';
+ import type { AnimatedPressableOptions, PressableContextType } from '../provider/context';
+-declare const AnimatedBaseButton: React.FunctionComponent<import("react-native-reanimated").AnimatedProps<Omit<import("react-native-gesture-handler").BaseButtonProps, "innerRef"> & React.RefAttributes<React.ComponentType<{}>>>>;
++declare const AnimatedBaseButton: React.FunctionComponent<import("react-native-reanimated").AnimatedProps<Omit<import("react-native-gesture-handler").LegacyBaseButtonProps, "innerRef"> & React.RefAttributes<React.ComponentType<{}>>>>;
+ type AnimatedPressableProps = ComponentProps<typeof AnimatedBaseButton>;
+ export type AnimatedPressableStyleOptions<TMetadata = unknown> = {
+     isPressed: boolean;
+diff --git a/lib/typescript/commonjs/src/provider/constants.d.ts b/lib/typescript/commonjs/src/provider/constants.d.ts
+index a721216..1ce54c3 100644
+--- a/lib/typescript/commonjs/src/provider/constants.d.ts
++++ b/lib/typescript/commonjs/src/provider/constants.d.ts
+@@ -1,5 +1,5 @@
+ import type { ComponentProps } from 'react';
+-import type { BaseButton } from 'react-native-gesture-handler';
++import type { LegacyBaseButton as BaseButton } from 'react-native-gesture-handler';
+ /**
+  * Props that can be set globally via PressablesConfig and applied to all pressables.
+  * These are "passthrough" props that don't conflict with internally managed props
+diff --git a/lib/typescript/module/src/pressables/base.d.ts b/lib/typescript/module/src/pressables/base.d.ts
+index 5176b74..559cd85 100644
+--- a/lib/typescript/module/src/pressables/base.d.ts
++++ b/lib/typescript/module/src/pressables/base.d.ts
+@@ -3,7 +3,7 @@ import { type ViewStyle } from 'react-native';
+ import { type AnimatableValue, type SharedValue } from 'react-native-reanimated';
+ import type { PressableConfig } from '../provider/constants';
+ import type { AnimatedPressableOptions, PressableContextType } from '../provider/context';
+-declare const AnimatedBaseButton: React.FunctionComponent<import("react-native-reanimated").AnimatedProps<Omit<import("react-native-gesture-handler").BaseButtonProps, "innerRef"> & React.RefAttributes<React.ComponentType<{}>>>>;
++declare const AnimatedBaseButton: React.FunctionComponent<import("react-native-reanimated").AnimatedProps<Omit<import("react-native-gesture-handler").LegacyBaseButtonProps, "innerRef"> & React.RefAttributes<React.ComponentType<{}>>>>;
+ type AnimatedPressableProps = ComponentProps<typeof AnimatedBaseButton>;
+ export type AnimatedPressableStyleOptions<TMetadata = unknown> = {
+     isPressed: boolean;
+diff --git a/lib/typescript/module/src/provider/constants.d.ts b/lib/typescript/module/src/provider/constants.d.ts
+index a721216..1ce54c3 100644
+--- a/lib/typescript/module/src/provider/constants.d.ts
++++ b/lib/typescript/module/src/provider/constants.d.ts
+@@ -1,5 +1,5 @@
+ import type { ComponentProps } from 'react';
+-import type { BaseButton } from 'react-native-gesture-handler';
++import type { LegacyBaseButton as BaseButton } from 'react-native-gesture-handler';
+ /**
+  * Props that can be set globally via PressablesConfig and applied to all pressables.
+  * These are "passthrough" props that don't conflict with internally managed props
+diff --git a/src/pressables/base.tsx b/src/pressables/base.tsx
+index b655d9f..a12dc0c 100644
+--- a/src/pressables/base.tsx
++++ b/src/pressables/base.tsx
+@@ -1,6 +1,9 @@
+ import React, { useCallback, useId, useMemo, type ComponentProps } from 'react';
+ import { Platform, type ViewStyle } from 'react-native';
+-import { BaseButton } from 'react-native-gesture-handler';
++// Patched (filen): RNGH 3 rebound `BaseButton` to a hook-based button that ignores
++// onBegan/onActivated/onEnded/onFailed/onCancelled, which drive the press animation below.
++// The v2 button lives on as `LegacyBaseButton`. Upstream: pressto#37.
++import { LegacyBaseButton as BaseButton } from 'react-native-gesture-handler';
+ import Animated, {
+   useAnimatedStyle,
+   useDerivedValue,
+diff --git a/src/provider/constants.ts b/src/provider/constants.ts
+index 10d9fbb..5ee966b 100644
+--- a/src/provider/constants.ts
++++ b/src/provider/constants.ts
+@@ -1,5 +1,5 @@
+ import type { ComponentProps } from 'react';
+-import type { BaseButton } from 'react-native-gesture-handler';
++import type { LegacyBaseButton as BaseButton } from 'react-native-gesture-handler';
+ import { Easing } from 'react-native-reanimated';
+ 
+ /**

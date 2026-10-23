@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { cn } from "@filen/shared"
 import Ionicons from "@expo/vector-icons/Ionicons"
 import View from "@/components/ui/view"

@@ -1,7 +1,7 @@
 import View from "@/components/ui/view"
 import Text from "@/components/ui/text"
 import Ionicons from "@expo/vector-icons/Ionicons"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import Button from "@/components/ui/button"
 import { useTranslation } from "react-i18next"
 

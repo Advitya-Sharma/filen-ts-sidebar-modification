@@ -81,7 +81,15 @@ export enum ErrorKind {
 	Enter2fa,
 	Wrong2fa,
 	StaleState,
-	MissingStableUuid
+	MissingStableUuid,
+	ArchiveCorrupt,
+	ArchiveUnsupported,
+	ArchiveTooLarge,
+	ArchiveWorkerDied,
+	ArchivePasswordRequired,
+	ArchiveWrongPassword,
+	ArchiveSolidSkipExceeded,
+	LockLost
 }
 
 export enum NonRootNormalItem_Tags {

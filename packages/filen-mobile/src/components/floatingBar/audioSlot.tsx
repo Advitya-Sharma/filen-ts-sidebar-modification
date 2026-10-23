@@ -4,7 +4,7 @@ import audio, { useAudioLoading, useAudioPlaying, useAudioQueue } from "@/featur
 import View from "@/components/ui/view"
 import Text from "@/components/ui/text"
 import { PressableScale } from "@/components/ui/pressables"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import Ionicons from "@expo/vector-icons/Ionicons"
 import AudioThumbnail from "@/components/ui/audioThumbnail"
 import useNowPlayingDisplay from "@/features/audio/hooks/useNowPlayingDisplay"

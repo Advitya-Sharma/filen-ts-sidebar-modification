@@ -43,8 +43,11 @@ const LinkMedia = ({ link, fromSelf, maxWidth, getFileUrl, onLoadFailed }: LinkM
 		}
 
 		case "video": {
+			// Keyed by url: since expo-video 58, useVideoPlayer swaps a changed source in with replaceAsync and
+			// never re-runs setup, so a recycled row would keep the previous file's verdict listener.
 			return (
 				<VideoAttachment
+					key={media.url}
 					url={media.url}
 					name={media.name}
 					maxWidth={maxWidth}

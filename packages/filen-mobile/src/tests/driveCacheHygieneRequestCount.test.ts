@@ -114,7 +114,8 @@ import {
 	driveItemsQueryKey,
 	driveItemsQueryRefetchAfterSocketGap,
 	driveItemsQueryRemoveDirectoryFromPhotos,
-	driveItemsQueryUpdateForNormalParent
+	driveItemsQueryUpdateForNormalParent,
+	driveItemsQueryUpsertManyForNormalParent
 } from "@/features/drive/queries/useDriveItems.query"
 import socketCreateBatcher, { SOCKET_CREATE_FLUSH_MS } from "@/features/drive/socketCreateBatcher"
 import copyActivity from "@/features/drive/copyActivity"
@@ -563,5 +564,114 @@ describe("after a copy outran the socket", () => {
 
 		expect(invalidated(driveKey(null))).toBe(true)
 		expect(invalidated(driveKey("root"))).toBe(true)
+	})
+})
+
+describe("a create inside a directory browsed from Favorites or Links", () => {
+	const favoritesKey = (uuid: string | null) => driveItemsQueryKey({ path: { type: "favorites", uuid } } as Params)
+	const linksKey = (uuid: string | null) => driveItemsQueryKey({ path: { type: "links", uuid } } as Params)
+
+	it("lands in every read listing of that directory, never in the virtual roots", () => {
+		queryClient.setQueryData(favoritesKey("fav-dir"), [])
+		queryClient.setQueryData(linksKey("fav-dir"), [])
+		queryClient.setQueryData(favoritesKey(null), [])
+		queryClient.setQueryData(linksKey(null), [])
+
+		driveItemsQueryUpdateForNormalParent({ parentUuid: "fav-dir", updater: prev => [...prev, file("new", "fav-dir")] })
+
+		expect(listing(favoritesKey("fav-dir"))?.map(item => item.data.uuid)).toEqual(["new"])
+		expect(listing(linksKey("fav-dir"))?.map(item => item.data.uuid)).toEqual(["new"])
+		expect(listing(favoritesKey(null))).toEqual([])
+		expect(listing(linksKey(null))).toEqual([])
+		expect(listing(driveKey("fav-dir"))).toBeUndefined()
+	})
+
+	it("a create at the drive root leaves the Favorites and Links roots alone", () => {
+		queryClient.setQueryData(driveKey(null), [])
+		queryClient.setQueryData(favoritesKey(null), [])
+
+		driveItemsQueryUpdateForNormalParent({ parentUuid: "root", updater: prev => [...prev, file("new", "root")] })
+
+		expect(listing(driveKey(null))).toHaveLength(1)
+		expect(listing(favoritesKey(null))).toEqual([])
+	})
+
+	// The batched socket create echoes and upload completions write through this bulk upsert.
+	it("a batched upsert reaches the Favorites listing too", () => {
+		queryClient.setQueryData(favoritesKey("fav-dir"), [])
+
+		driveItemsQueryUpsertManyForNormalParent({ parentUuid: "fav-dir", items: [file("echoed", "fav-dir")] })
+
+		expect(listing(favoritesKey("fav-dir"))?.map(item => item.data.uuid)).toEqual(["echoed"])
+	})
+})
+
+describe("Favorites, Links and Shared-out roots: a directory leaving the drive", () => {
+	const rootKey = (type: "favorites" | "links" | "sharedOut") => driveItemsQueryKey({ path: { type, uuid: null } } as Params)
+
+	function dir(uuid: string, parent: string): DriveItem {
+		return { type: "directory", data: { uuid, parent, decryptedMeta: { name: uuid } } } as unknown as DriveItem
+	}
+
+	function uuids(key: unknown[]): string[] {
+		return (listing(key) ?? []).map(item => item.data.uuid)
+	}
+
+	function invalidated(key: unknown[]): boolean | undefined {
+		return queryClient.getQueryState(key)?.isInvalidated
+	}
+
+	beforeEach(() => {
+		// root ─ a ─ b, root ─ c. Like production, the directory map holds no entry for the drive root.
+		seedCacheDir("a", "root")
+		seedCacheDir("b", "a")
+		seedCacheDir("c", "root")
+	})
+
+	it("trashing a directory drops its favorited descendants, keeps the rest, fetches nothing", async () => {
+		queryClient.setQueryData(rootKey("favorites"), [dir("a", "root"), dir("b", "a"), file("in-b", "b"), file("in-c", "c")])
+
+		await handleDriveEvent({ event: event("FolderTrash", { uuid: "a", parent: "root" }) })
+
+		expect(uuids(rootKey("favorites"))).toEqual(["in-c"])
+		expect(invalidated(rootKey("favorites"))).toBe(false)
+		expect(h.sdk.listDir).not.toHaveBeenCalled()
+	})
+
+	it("does the same for the Links root", async () => {
+		queryClient.setQueryData(rootKey("links"), [file("in-b", "b"), file("in-c", "c")])
+
+		await handleDriveEvent({ event: event("FolderDeletedPermanent", { uuid: "a" }) })
+
+		expect(uuids(rootKey("links"))).toEqual(["in-c"])
+	})
+
+	it("places a parentless shared-out root row by its own cached drive view", async () => {
+		const sharedRow = { type: "sharedRootDirectory", data: { uuid: "b", decryptedMeta: { name: "b" } } } as unknown as DriveItem
+		const sharedOther = { type: "sharedRootDirectory", data: { uuid: "c", decryptedMeta: { name: "c" } } } as unknown as DriveItem
+
+		queryClient.setQueryData(rootKey("sharedOut"), [sharedRow, sharedOther])
+
+		await handleDriveEvent({ event: event("FolderTrash", { uuid: "a", parent: "root" }) })
+
+		expect(uuids(rootKey("sharedOut"))).toEqual(["c"])
+		expect(invalidated(rootKey("sharedOut"))).toBe(false)
+	})
+
+	it("a row whose ancestry isn't cached stays until its root's next read; nothing is fetched or invalidated", async () => {
+		queryClient.setQueryData(rootKey("favorites"), [file("in-b", "b"), file("deep", "uncached")])
+
+		await handleDriveEvent({ event: event("FolderTrash", { uuid: "a", parent: "root" }) })
+
+		expect(uuids(rootKey("favorites"))).toEqual(["deep"])
+		expect(invalidated(rootKey("favorites"))).toBe(false)
+		expect(h.sdk.listDir).not.toHaveBeenCalled()
+	})
+
+	it("an unread root stays unread", async () => {
+		await handleDriveEvent({ event: event("FolderTrash", { uuid: "a", parent: "root" }) })
+
+		expect(listing(rootKey("favorites"))).toBeUndefined()
+		expect(allWrites()).toBe(0)
 	})
 })

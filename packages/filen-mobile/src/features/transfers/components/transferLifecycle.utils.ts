@@ -1,4 +1,4 @@
-import { type AppStateStatus } from "react-native"
+import { type AppState, type AppStateStatus } from "react-native"
 
 // Should we cancel foreground-scoped transfers (manual transfers and copies) on this AppState transition?
 // Pure for testability. Act ONLY on the real "background" state, never the transient "inactive" (iOS
@@ -8,7 +8,7 @@ import { type AppStateStatus } from "react-native"
 // notification-permission prompt, a picker, the share sheet), which is not the user leaving; iOS reports
 // those as "inactive", so there a "background" is always real.
 export function shouldCancelForegroundOnBackground(
-	nextAppState: AppStateStatus,
+	nextAppState: AppStateStatus | (typeof AppState)["currentState"],
 	platformOS: string,
 	fgsRunning: boolean,
 	presentationActive: boolean
@@ -29,7 +29,8 @@ export function shouldCancelForegroundOnBackground(
 // judged as if the presentation had never been there.
 export function shouldCancelAfterPresentation(
 	backgroundedBehindPresentation: boolean,
-	currentAppState: AppStateStatus,
+	// `AppState.currentState` (string | null | undefined since RN 0.88) — only "background" ever cancels.
+	currentAppState: AppStateStatus | (typeof AppState)["currentState"],
 	platformOS: string,
 	fgsRunning: boolean
 ): boolean {

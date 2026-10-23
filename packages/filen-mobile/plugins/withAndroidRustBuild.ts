@@ -1,7 +1,11 @@
-import { ConfigPlugin, ExportedConfigWithProps } from "@expo/config-plugins"
-import { ManifestIntentFilter } from "@expo/config-plugins/build/android/Manifest.js"
-import { withAndroidManifest, withAppBuildGradle } from "@expo/config-plugins/build/plugins/android-plugins"
-import { withDangerousMod } from "@expo/config-plugins/build/plugins/withDangerousMod"
+import {
+	type ConfigPlugin,
+	type ExportedConfigWithProps,
+	withAndroidManifest,
+	withAppBuildGradle,
+	withDangerousMod,
+	AndroidConfig
+} from "expo/config-plugins"
 import { execSync } from "child_process"
 import * as fs from "fs"
 import * as path from "path"
@@ -18,7 +22,7 @@ export type ManifestProvider = {
 		"android:grantUriPermissions": boolean
 		"android:permission": string
 	}
-	"intent-filter": ManifestIntentFilter[]
+	"intent-filter": AndroidConfig.Manifest.ManifestIntentFilter[]
 }
 
 export type AndroidRustBuildPluginProps = {

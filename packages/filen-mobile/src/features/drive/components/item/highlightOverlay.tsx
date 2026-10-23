@@ -1,6 +1,6 @@
 import { useEffect } from "react"
 import { useSharedValue, useAnimatedStyle, withDelay, withTiming } from "react-native-reanimated"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { AnimatedView } from "@/components/ui/animated"
 import { HIGHLIGHT_FADE_MS, HIGHLIGHT_HOLD_MS, HIGHLIGHT_TINT_OPACITY } from "@/features/drive/driveHighlight"
 

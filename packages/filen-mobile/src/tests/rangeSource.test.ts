@@ -101,8 +101,8 @@ describe("useRangeSource", () => {
 			const handle = realOpen.call(this, mode)
 			const readBytes = handle.readBytes
 
-			handle.readBytes = (length: number) => {
-				const bytes = readBytes(length)
+			handle.readBytes = async (length: number) => {
+				const bytes = await readBytes(length)
 				const padded = new Uint8Array(bytes.byteLength + 16).fill(0xff)
 
 				padded.set(bytes, 8)
@@ -117,6 +117,20 @@ describe("useRangeSource", () => {
 
 		expect(File.prototype.open).toHaveBeenCalled()
 		expect(base64ToBytes(await source.readRange(500, 7))).toEqual(pattern(7, 500))
+	})
+
+	it("keeps concurrent range reads on the one handle from moving each other's offset", async () => {
+		// readBytes is async and reads at the offset the handle has when it runs, so unserialised
+		// seek-then-read pairs issued together would all read from the last seek.
+		seed(pattern(1000))
+
+		const source = ready((await open()).current)
+
+		const [a, b, c] = await Promise.all([source.readRange(0, 4), source.readRange(500, 4), source.readRange(996, 4)])
+
+		expect(base64ToBytes(a)).toEqual(pattern(4, 0))
+		expect(base64ToBytes(b)).toEqual(pattern(4, 500))
+		expect(base64ToBytes(c)).toEqual(pattern(4, 996))
 	})
 
 	it("refuses a read outside the file rather than returning short", async () => {

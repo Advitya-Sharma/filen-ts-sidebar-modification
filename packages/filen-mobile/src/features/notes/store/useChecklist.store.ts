@@ -1,7 +1,7 @@
 import { createStore, type StoreApi } from "zustand"
 import { createContext } from "react"
 import type { Checklist, ChecklistItem } from "@filen/shared"
-import type { TextInput } from "react-native"
+import type { TextInputInstance } from "react-native"
 
 export type ChecklistStore = {
 	parsed: Checklist
@@ -10,7 +10,7 @@ export type ChecklistStore = {
 	byId: Map<string, ChecklistItem>
 	// Mutated in place and never replaced: nothing subscribes to it, so a reactive `set` would only
 	// re-run every row selector on each row mount/unmount.
-	inputRefs: Map<string, React.RefObject<TextInput | null>>
+	inputRefs: Map<string, React.RefObject<TextInputInstance | null>>
 	setParsed: (fn: Checklist | ((prev: Checklist) => Checklist)) => void
 }
 

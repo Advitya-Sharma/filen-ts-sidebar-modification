@@ -1,4 +1,4 @@
-import { withAndroidManifest, type ConfigPlugin, AndroidConfig } from "@expo/config-plugins"
+import { withAndroidManifest, type ConfigPlugin, AndroidConfig } from "expo/config-plugins"
 
 /**
  * `<application>` attributes Expo's config schema does not expose.

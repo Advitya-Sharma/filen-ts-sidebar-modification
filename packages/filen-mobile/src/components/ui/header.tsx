@@ -1,4 +1,4 @@
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames, type ResolvedColor } from "@/hooks/useResolveClassNames"
 import { Stack } from "expo-router"
 import { View } from "@/components/ui/view"
 import { cn } from "@filen/shared"
@@ -59,7 +59,7 @@ const HeaderItemButton = ({
 	...props
 }: React.ComponentProps<typeof PressableScale> & {
 	icon?: React.ComponentProps<typeof Ionicons>
-	iconColor: ColorValue | undefined
+	iconColor: ResolvedColor | undefined
 	text?: React.ComponentProps<typeof Text>
 }) => {
 	return (
@@ -92,7 +92,7 @@ export const HeaderLeftRightWrapper = ({
 	isLeft?: boolean
 	isRight?: boolean
 	items?: HeaderItem[]
-	iconColor: ColorValue | undefined
+	iconColor: ResolvedColor | undefined
 }) => {
 	return (
 		<View

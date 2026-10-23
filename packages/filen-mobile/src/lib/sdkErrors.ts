@@ -58,7 +58,9 @@ const ERROR_KEY_BY_KIND: Partial<Record<ErrorKind, keyof typeof en>> = {
 	[ErrorKind.Unauthenticated]: "unauthenticated",
 	[ErrorKind.Walk]: "fs_directory_walk_error",
 	[ErrorKind.StaleState]: "stale_state",
-	[ErrorKind.MissingStableUuid]: "item_not_modifiable"
+	[ErrorKind.MissingStableUuid]: "item_not_modifiable",
+	// Its inner text names the Rust resource lock, which says nothing to a user.
+	[ErrorKind.LockLost]: "lock_lost"
 }
 
 // Produces the user-facing string for an SDK error. Priority: (1) SERVER/API errors show the

@@ -121,12 +121,19 @@ describe("getDriveEmptyState", () => {
 		["photos", "folder-open-outline", "folder_is_empty"],
 		["linked", "folder-open-outline", "folder_is_empty"]
 	] as const)("%s → %s / %s", (type, icon, titleKey) => {
-		expect(getDriveEmptyState(type)).toEqual({
+		expect(getDriveEmptyState(type, null)).toEqual({
 			icon,
 			titleKey,
 			descriptionKey: `${titleKey}_description`
 		})
 	})
+
+	it.each(["favorites", "links", "sharedIn", "sharedOut", "offline", "drive"] as const)(
+		"%s subdirectory → the empty-directory state",
+		type => {
+			expect(getDriveEmptyState(type, "dir-uuid").titleKey).toBe("folder_is_empty")
+		}
+	)
 })
 
 // ---------------------------------------------------------------------------

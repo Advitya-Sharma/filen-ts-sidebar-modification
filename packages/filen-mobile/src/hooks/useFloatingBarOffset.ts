@@ -12,7 +12,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context"
 // Android: BottomNavigationView (Material) overlays content; the floating bar
 // must clear both the system nav bar (insets.bottom under edge-to-edge) AND
 // the BottomNavigationView height. The Material 3 default is 80dp; older
-// Material implementations use 56dp. expo-router unstable-native-tabs renders
+// Material implementations use 56dp. expo-router native-tabs renders
 // at the Material 3 default, so 80dp is the right baseline. Tune here if the
 // bar visually overlaps on a specific device.
 //

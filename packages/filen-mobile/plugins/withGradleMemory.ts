@@ -1,5 +1,4 @@
-import { ConfigPlugin } from "@expo/config-plugins"
-import { withGradleProperties } from "@expo/config-plugins/build/plugins/android-plugins"
+import { type ConfigPlugin, withGradleProperties } from "expo/config-plugins"
 
 const withGradleMemory: ConfigPlugin = config => {
 	return withGradleProperties(config, config => {

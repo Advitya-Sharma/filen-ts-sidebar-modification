@@ -513,7 +513,7 @@ describe("useDrivePreviewStore — session handover", () => {
 			initialItem: makeInitialDriveItem("img1", "first.jpg")
 		})
 
-		// beforeRemove fired, then the unsaved-changes guard vetoed the pop.
+		// The gallery committed to leaving, then the unsaved-changes guard vetoed the pop.
 		useDrivePreviewStore.getState().setLeaving(true)
 		useDrivePreviewStore.getState().open({
 			items: [makeDriveGalleryItem("img2", "second.jpg")],

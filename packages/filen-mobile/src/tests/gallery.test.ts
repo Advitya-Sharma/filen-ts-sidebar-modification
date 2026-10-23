@@ -35,15 +35,11 @@ vi.mock("expo-screen-orientation", () => ({
 
 vi.mock("react-native-gesture-handler", () => ({
 	GestureDetector: () => null,
-	Gesture: {
-		Pan: () => ({
-			manualActivation: () => ({
-				onTouchesDown: () => ({
-					onTouchesMove: () => ({ onStart: () => ({ onUpdate: () => ({ onEnd: () => ({ enabled: vi.fn() }) }) }) })
-				})
-			})
-		})
-	}
+	GestureStateManager: {
+		activate: vi.fn(),
+		fail: vi.fn()
+	},
+	usePanGesture: (config: unknown) => config
 }))
 
 vi.mock("react-native-reanimated", () => ({
@@ -60,7 +56,7 @@ vi.mock("react-native-reanimated", () => ({
 }))
 
 vi.mock("react-native-worklets", () => ({
-	runOnJS: (fn: unknown) => fn
+	scheduleOnRN: vi.fn()
 }))
 
 vi.mock("@shopify/flash-list", () => ({

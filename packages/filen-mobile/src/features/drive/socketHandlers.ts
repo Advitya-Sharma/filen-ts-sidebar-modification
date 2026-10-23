@@ -6,6 +6,7 @@ import {
 	driveItemsQueryUpdateForNormalParent,
 	driveItemsQueryUpdateForPhotos,
 	driveItemsQueryRemoveDirectoryFromPhotos,
+	driveItemsQueryRemoveDirectoryDescendantsFromRoots,
 	driveItemsQueryInvalidateAfterDeleteAll,
 	driveItemsQueryMarkAllStale
 } from "@/features/drive/queries/useDriveItems.query"
@@ -40,7 +41,7 @@ const SIZE_NEUTRAL_TAGS = new Set<DriveEvent_Tags>([
 // Applied in batches per parent (socketCreateBatcher), which also marks sizes stale once per batch.
 const BATCHED_CREATE_TAGS = new Set<DriveEvent_Tags>([DriveEvent_Tags.FileNew, DriveEvent_Tags.FolderSubCreated])
 
-// Any of these may change which directory a fresh listing of the root or ".filen" returns.
+// Any of these may change which directory a name lookup under the root or ".filen" finds.
 const FOLDER_STRUCTURE_TAGS = new Set<DriveEvent_Tags>([
 	DriveEvent_Tags.FolderTrash,
 	DriveEvent_Tags.FolderMove,
@@ -239,6 +240,8 @@ export async function handleDriveEvent({ event }: { event: DriveSocketEvent }): 
 			driveItemsQueryRemoveDirectoryFromPhotos({
 				dirUuid: inner.uuid
 			})
+
+			driveItemsQueryRemoveDirectoryDescendantsFromRoots(inner.uuid)
 
 			cache.forgetItem(inner.uuid)
 			dropDriveItem(inner.uuid)
@@ -446,6 +449,8 @@ export async function handleDriveEvent({ event }: { event: DriveSocketEvent }): 
 			driveItemsQueryRemoveDirectoryFromPhotos({
 				dirUuid: inner.uuid
 			})
+
+			driveItemsQueryRemoveDirectoryDescendantsFromRoots(inner.uuid)
 
 			const fromCache = cache.getNormalDir(inner.uuid)
 

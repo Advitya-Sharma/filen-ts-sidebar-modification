@@ -1,3 +1,44 @@
+diff --git a/build/pathUtilities/url.js b/build/pathUtilities/url.js
+index 1364f5f4a4d69e4a63676937ffe9841f0708a937..165977f762c265259814c1a7a393e1a69b41b06a 100644
+--- a/build/pathUtilities/url.js
++++ b/build/pathUtilities/url.js
+@@ -27,6 +27,18 @@ const tabRegEx = /\t/g;
+ const questionRegex = /\?/g;
+ const hashRegex = /#/g;
+ const spaceRegEx = / /g;
++const doubleQuoteRegEx = /"/g;
++const lessThanRegEx = /</g;
++const greaterThanRegEx = />/g;
++const backtickRegEx = /`/g;
++const leftBraceRegEx = /\{/g;
++const rightBraceRegEx = /\}/g;
++const leftBracketRegEx = /\[/g;
++const rightBracketRegEx = /\]/g;
++const caretRegEx = /\^/g;
++const pipeRegEx = /\|/g;
++// Patched (filen): see src/pathUtilities/url.ts.
++const controlCharRegEx = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
+ function encodePathChars(filepath) {
+     if (filepath.indexOf('%') !== -1) filepath = filepath.replace(percentRegEx, '%25');
+     // In posix, backslash is a valid character in paths:
+@@ -35,6 +47,17 @@ function encodePathChars(filepath) {
+     if (filepath.indexOf('\r') !== -1) filepath = filepath.replace(carriageReturnRegEx, '%0D');
+     if (filepath.indexOf('\t') !== -1) filepath = filepath.replace(tabRegEx, '%09');
+     if (filepath.indexOf(' ') !== -1) filepath = filepath.replace(spaceRegEx, '%20');
++    if (filepath.indexOf('"') !== -1) filepath = filepath.replace(doubleQuoteRegEx, '%22');
++    if (filepath.indexOf('<') !== -1) filepath = filepath.replace(lessThanRegEx, '%3C');
++    if (filepath.indexOf('>') !== -1) filepath = filepath.replace(greaterThanRegEx, '%3E');
++    if (filepath.indexOf('`') !== -1) filepath = filepath.replace(backtickRegEx, '%60');
++    if (filepath.indexOf('{') !== -1) filepath = filepath.replace(leftBraceRegEx, '%7B');
++    if (filepath.indexOf('}') !== -1) filepath = filepath.replace(rightBraceRegEx, '%7D');
++    if (filepath.indexOf('[') !== -1) filepath = filepath.replace(leftBracketRegEx, '%5B');
++    if (filepath.indexOf(']') !== -1) filepath = filepath.replace(rightBracketRegEx, '%5D');
++    if (filepath.indexOf('^') !== -1) filepath = filepath.replace(caretRegEx, '%5E');
++    if (filepath.indexOf('|') !== -1) filepath = filepath.replace(pipeRegEx, '%7C');
++    filepath = filepath.replace(controlCharRegEx, (char)=>'%' + char.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
+     return filepath;
+ }
+ export function encodeURLChars(path) {
 diff --git a/src/pathUtilities/url.ts b/src/pathUtilities/url.ts
 index 1a9d5794d72394e9b262c1ac6c99ec091f45deb8..35dbc73050f6fdc038f42f101ad3c6717be856cd 100644
 --- a/src/pathUtilities/url.ts

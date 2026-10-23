@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { isNetworkClassErrorKind, isRetryableAuthErrorKind, isPermanentRejection } from "@filen/shared"
+import { isNetworkClassErrorKind, isRetryableAuthErrorKind, isRetryableLockErrorKind, isPermanentRejection } from "@filen/shared"
 
 describe("isNetworkClassErrorKind", () => {
 	it("matches the three network-class kinds", () => {
@@ -23,6 +23,14 @@ describe("isRetryableAuthErrorKind", () => {
 	})
 })
 
+describe("isRetryableLockErrorKind", () => {
+	it("matches only LockLost", () => {
+		expect(isRetryableLockErrorKind("LockLost")).toBe(true)
+		expect(isRetryableLockErrorKind("Server")).toBe(false)
+		expect(isRetryableLockErrorKind(undefined)).toBe(false)
+	})
+})
+
 describe("isPermanentRejection", () => {
 	it("short-circuits false when there is no SDK error at all", () => {
 		expect(isPermanentRejection({ hasSdkError: false, kind: "Server" })).toBe(false)
@@ -37,6 +45,10 @@ describe("isPermanentRejection", () => {
 
 	it("keeps a recoverable-auth SDK error for retry", () => {
 		expect(isPermanentRejection({ hasSdkError: true, kind: "Unauthenticated" })).toBe(false)
+	})
+
+	it("keeps a lost-lock SDK error for retry", () => {
+		expect(isPermanentRejection({ hasSdkError: true, kind: "LockLost" })).toBe(false)
 	})
 
 	it("is permanent for any other SDK error kind", () => {

@@ -45,6 +45,7 @@ vi.mock("@filen/sdk-rs", () => {
 		Wrong2fa: "Wrong2fa",
 		StaleState: "StaleState",
 		MissingStableUuid: "MissingStableUuid",
+		LockLost: "LockLost",
 		// HeifError is referenced in the utils.ts switch but absent from the SDK published type union.
 		// We set it to "HeifError" so the mock property resolves; whether the SDK emits this value
 		// at runtime is the open question flagged in the deferred section.
@@ -119,6 +120,7 @@ describe("errors catalog", () => {
 			"server_error",
 			"unauthenticated",
 			"fs_directory_walk_error",
+			"lock_lost",
 			"error_generic"
 		]
 

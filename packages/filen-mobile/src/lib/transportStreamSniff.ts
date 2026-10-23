@@ -127,7 +127,8 @@ export function readRangeFromUrl(url: string, signal: AbortSignal): ReadRange {
 			try {
 				handle.offset = start
 
-				const bytes = handle.readBytes(length)
+				// Own handle, closed in the finally: nothing else can seek it while the read is in flight.
+				const bytes = await handle.readBytes(length)
 
 				if (bytes.byteLength !== length) {
 					throw new Error("short read")

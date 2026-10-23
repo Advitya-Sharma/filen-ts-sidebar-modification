@@ -1,7 +1,7 @@
 import { Fragment, useState } from "react"
 import { Trans, useTranslation } from "react-i18next"
 import useDismissStack from "@/hooks/useDismissStack"
-import { useResolveClassNames } from "uniwind"
+import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { cn, isPasswordStrongEnough, isValidEmail, ratePasswordStrength, type PasswordStrength } from "@filen/shared"
 import Ionicons from "@expo/vector-icons/Ionicons"
 import SafeAreaView from "@/components/ui/safeAreaView"

@@ -62,9 +62,36 @@ export default function useChunkedWriteTarget(config: {
 		configRef.current = config
 	})
 
+	// The write in flight, if any. Closing a handle under a native write that has not landed is not
+	// something to rely on, so close() defers to it.
+	const pendingWriteRef = useRef<Promise<void> | null>(null)
+
 	const close = () => {
-		handleRef.current?.close()
+		const handle = handleRef.current
+		const pending = pendingWriteRef.current
+
 		handleRef.current = null
+		pendingWriteRef.current = null
+
+		if (!handle) {
+			return
+		}
+
+		if (pending) {
+			const closeLater = () => {
+				try {
+					handle.close()
+				} catch {
+					// Nothing is left to report to: the save this handle belonged to is already over.
+				}
+			}
+
+			pending.then(closeLater, closeLater)
+
+			return
+		}
+
+		handle.close()
 	}
 
 	// Built ONCE. Consumers hold this in effect dependencies to arm and disarm a save, so a fresh
@@ -102,9 +129,24 @@ export default function useChunkedWriteTarget(config: {
 				throw new Error("save exceeds the size limit")
 			}
 
-			handle.writeBytes(new Uint8Array(bytes))
-
+			// Reserved BEFORE the write: writeBytes is async since expo-file-system 58, so counting after
+			// it would let calls the WebView overlaps all pass the bound above before any of them counted.
 			writtenRef.current += bytes.byteLength
+
+			// Off the JS thread. Overlapping calls would land in completion order, but the only caller
+			// (writeAllBytes) awaits each chunk, and a WebView that overlaps its own save only corrupts
+			// that save, which the magic check and the bound still contain.
+			const write = handle.writeBytes(new Uint8Array(bytes))
+
+			pendingWriteRef.current = write
+
+			try {
+				await write
+			} finally {
+				if (pendingWriteRef.current === write) {
+					pendingWriteRef.current = null
+				}
+			}
 		},
 		begin: () => {
 			close()
@@ -141,7 +183,7 @@ export default function useChunkedWriteTarget(config: {
 				const readHandle = new File(file.uri).open()
 
 				try {
-					if (!hasMagic(Buffer.from(readHandle.readBytes(magic.length)).toString("latin1"), magic)) {
+					if (!hasMagic(Buffer.from(readHandle.readBytesSync(magic.length)).toString("latin1"), magic)) {
 						file.delete()
 
 						return null
