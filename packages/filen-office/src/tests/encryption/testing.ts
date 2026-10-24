@@ -3,8 +3,24 @@ import { passwordDataSpaces } from "../../core/encryption/index"
 import type { EncryptedStreams } from "./generate"
 
 // Test support for apps (@filen/office/testing/encryption): encrypted packages built with Node's crypto,
-// independently of the package's own WebCrypto backend, and the compound file Word writes around them. Node only.
+// independently of the package's own WebCrypto backend, and the compound file Word writes around them; Excel 97–2003
+// workbooks built record by record, plain or encrypted. Node only.
 
+export {
+	encryptedXlsStream,
+	xlsBof,
+	xlsChart,
+	xlsFile,
+	xlsLabel,
+	xlsNumber,
+	xlsRecord,
+	xlsWorkbookStream,
+	XLS_CHART,
+	XLS_WORKSHEET,
+	type XlsEncryptOptions,
+	type XlsScheme,
+	type XlsSheetSpec
+} from "./xls"
 export { agileInfo, agileStreams, decryptAgileStreams, standardStreams, type AgileOptions, type EncryptedStreams } from "./generate"
 
 export interface EncryptedFileStreams {

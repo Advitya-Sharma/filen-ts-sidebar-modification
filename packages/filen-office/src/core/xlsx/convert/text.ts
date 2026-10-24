@@ -67,7 +67,8 @@ export function textCellNumber(text: string): number | null {
 }
 
 // The file's name as a sheet name Excel takes: the characters it forbids (\ / ? * [ ] :) dropped, no apostrophe
-// first or last, at most 31 characters; Excel's "Sheet1" when nothing is left, or for the reserved "History".
+// first or last, at most 31 characters; Excel's "Sheet1" when nothing but spaces is left, or for the reserved
+// "History". Spaces are kept where they are: a name may start or end with one.
 export function textSheetName(name: string): string {
 	let allowed = ""
 
@@ -79,9 +80,9 @@ export function textSheetName(name: string): string {
 		allowed += char
 	}
 
-	const kept = allowed.replace(/^'+|'+$/g, "").trim()
+	const kept = allowed.replace(/^'+|'+$/g, "")
 
-	return kept.length === 0 || kept.toUpperCase() === "HISTORY" ? DEFAULT_SHEET_NAME : kept
+	return kept.trim().length === 0 || kept.toUpperCase() === "HISTORY" ? DEFAULT_SHEET_NAME : kept
 }
 
 function preserved(text: string): string {

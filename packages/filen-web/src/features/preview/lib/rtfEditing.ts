@@ -1,9 +1,22 @@
 import { DocxSaveError, prepareDocxSave, writerProof, type DocxPreparedSave } from "@filen/office/core/docx/write"
 import { joinBytes } from "@filen/office/core/opc"
 import type { DocxLaterProof } from "@filen/office/dom/docx/editing"
-import { DocxRtfRefusal, rtfBlockProof, type DocxRtfDocument, type RtfLockedBlock } from "@filen/office/dom/docx/rtf"
+import { DocxRtfRefusal, rtfBlockProof, type DocxRtfDocument, type DocxRtfSaved, type RtfLockedBlock } from "@filen/office/dom/docx/rtf"
 import type { DocxZipper } from "@filen/office/dom/docx/save"
 import type { DocxEditingBackend } from "@/features/preview/lib/docxEditing"
+import type { PreviewKey } from "@/lib/i18n"
+
+// A refusal of what the file's format cannot hold at all, whichever blocks are taken back (a reply to a comment or
+// a resolved comment in RTF, whose annotations have neither): the toast says what to change.
+export class FormatSaveError extends DocxSaveError {
+	readonly messageKey: PreviewKey
+
+	constructor(messageKey: PreviewKey, message: string) {
+		super("write", message)
+		this.name = "FormatSaveError"
+		this.messageKey = messageKey
+	}
+}
 
 // RTF and OpenDocument text documents in the docx editor: edited as the package they read as (taken from the docx
 // worker, which holds it with the file), saved by writing the parts the docx writer wrote back into the file's own
@@ -30,12 +43,16 @@ export function rtfEditingBackend(
 	locked: Promise<readonly RtfLockedBlock[]>,
 	format: "RTF" | "ODT" = "RTF"
 ): DocxEditingBackend {
-	const written = new WeakMap<DocxPreparedSave, Uint8Array>()
-	const write = async (prepared: DocxPreparedSave): Promise<Uint8Array> => {
+	const written = new WeakMap<DocxPreparedSave, DocxRtfSaved>()
+	const write = async (prepared: DocxPreparedSave): Promise<DocxRtfSaved> => {
 		try {
 			return await document.write(await rtfEdits(prepared))
 		} catch (error) {
 			if (error instanceof DocxRtfRefusal) {
+				if (error.reason === "comment") {
+					throw new FormatSaveError("previewDocxSaveRefusedRtfComments", `${format}: ${error.message}`)
+				}
+
 				throw new DocxSaveError("write", `${format}: ${error.message}`)
 			}
 
@@ -45,9 +62,15 @@ export function rtfEditingBackend(
 	const zipper = (): DocxZipper => ({
 		async zip(prepared) {
 			const started = performance.now()
-			const bytes = written.get(prepared as DocxPreparedSave) ?? (await write(prepared as DocxPreparedSave))
+			const { bytes, notices } = written.get(prepared as DocxPreparedSave) ?? (await write(prepared as DocxPreparedSave))
 
-			return { bytes, changedParts: [], zipMs: performance.now() - started, verifyZipMs: 0 }
+			return {
+				bytes,
+				changedParts: [],
+				zipMs: performance.now() - started,
+				verifyZipMs: 0,
+				...(notices === undefined || notices.length === 0 ? {} : { notices })
+			}
 		},
 		dispose() {
 			// The document is released by its viewer (rtfDocument.tsx).

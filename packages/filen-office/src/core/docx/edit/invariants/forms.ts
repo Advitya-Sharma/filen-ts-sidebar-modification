@@ -33,7 +33,16 @@ import {
 import { sessionOfDoc } from "../../forms/sessions"
 import type { StoryPart } from "../../model/index"
 import type { DocxEditContext } from "../context"
-import { SetMarkSetsStep, SetMarksStep, isAddMarkLike, isMarkStep, type MarkPiece, type MarksPiece, type PieceStep } from "../marks"
+import {
+	SetMarkSetsStep,
+	SetMarksStep,
+	isAddMarkLike,
+	isMarkStep,
+	markStepTypes,
+	type MarkPiece,
+	type MarksPiece,
+	type PieceStep
+} from "../marks"
 import { builtInStyleId } from "../formats"
 import { lockedStyleViolation, protectionOf, protectionViolation } from "../protection"
 import { NO_SOURCE, docxSchema, type MarkerList } from "../schema"
@@ -76,6 +85,8 @@ const madeIn = new WeakSet<DocxEditorSession>()
 // What placeholder text keeps of the content it stands in for.
 const DROPPED_MARKS = new Set<string>(["insertion", "deletion", "move_from", "move_to", "format_change", "link"])
 const PLACEHOLDER_STYLE = "Placeholder Text"
+// Marks a tracked deletion of content sets.
+const DELETIONS: ReadonlySet<string> = new Set(["deletion", "move_from"])
 
 export const FORMS_STAGE: InvariantStage | null = {
 	name: "forms",
@@ -668,7 +679,15 @@ function checked(tr: Transaction, session: DocxEditorSession): Transaction {
 	const lock = lockViolation(tr, part)
 
 	if (lock !== undefined) return refuse(tr, lock, session)
-	if (isInternal(tr) || isCommand(tr) || invariantViolation(tr) !== undefined) return tr
+	if (isInternal(tr) || invariantViolation(tr) !== undefined) return tr
+
+	// A command (a tracked deletion is the review stage's): part of a placeholder deleted or marked deleted turns it
+	// into text too.
+	if (isCommand(tr)) {
+		realizePlaceholders(tr, session, tr.steps.length, new Set())
+
+		return tr
+	}
 
 	const before = tr.steps.length
 
@@ -1770,6 +1789,9 @@ function placeholders(tr: Transaction, session: DocxEditorSession, forms: boolea
 		replacePlaceholder(tr, session, around, from, to)
 	}
 
+	// Exactly all of an inline control's content deleted, it shows its placeholder again (below).
+	realizePlaceholders(tr, session, before, new Set([...seen, ...emptied.map(entry => controlKey(entry.mark))]))
+
 	// Emptied block controls (every paragraph empty): the placeholder again.
 	const points = inserted.length > 0 ? inserted.filter((_pos, k) => k % 2 === 0) : [tr.selection.from]
 
@@ -1799,6 +1821,155 @@ function placeholders(tr: Transaction, session: DocxEditorSession, forms: boolea
 	}
 
 	return tr.steps.length > before
+}
+
+// A comment anchored (by `tr`, the session's own step) in a control showing its placeholder turns that into the
+// control's text: LibreOffice reads a placeholder's text as its building block's, the anchor lost.
+export function commentedPlaceholders(tr: Transaction, session: DocxEditorSession): void {
+	if (mayHoldControls(session)) realizePlaceholders(tr, session, tr.steps.length, new Set(), true)
+}
+
+// Part of a placeholder deleted (tracked or not) or commented by the first `count` steps: what is left is the
+// control's text, no longer its placeholder (ECMA-376 §17.5.2.39). `done`: controls already seen to.
+function realizePlaceholders(tr: Transaction, session: DocxEditorSession, count: number, done: Set<string>, commentsOnly = false): void {
+	const part = session.story.part
+
+	for (const { around, pos, index } of placeholderEdits(tr, part, count, commentsOnly)) {
+		const key = controlKey(around.holder)
+
+		if (done.has(key)) continue
+
+		const at = Math.min(tr.mapping.slice(index).map(pos, -1), tr.doc.content.size)
+		const mapped = mappedAround(tr, around, at, at)
+
+		if (mapped === undefined) continue
+
+		const info = controlOf(part, mapped.holder)
+
+		if (info === undefined || !info.showingPlaceholder || typeable(info) !== undefined) continue
+
+		done.add(key)
+		replacePlaceholder(tr, session, { ...mapped, info }, mapped.from, mapped.to)
+	}
+}
+
+// Controls showing their placeholder that a step of `tr` (the first `count`) deleted part of or marked part of
+// deleted (a range over one of its edges too), or (`commentsOnly`) anchored a comment in: the control as it was
+// then, a position in it and the step's index.
+function placeholderEdits(
+	tr: Transaction,
+	part: StoryPart,
+	count: number,
+	commentsOnly: boolean
+): { around: ControlAround; pos: number; index: number }[] {
+	const out: { around: ControlAround; pos: number; index: number }[] = []
+	const partly = (start: number, end: number, from: number, to: number): boolean =>
+		start < to && end > from && !(from <= start && to >= end)
+	const note = (doc: Node, from: number, to: number, index: number): void => {
+		// Only a control at an end of the range is partly in it.
+		if (to <= from) return
+
+		const keys = new Set<string>()
+		const add = (around: ControlAround): void => {
+			const key = controlKey(around.holder)
+
+			if (keys.has(key) || !around.info.showingPlaceholder) return
+
+			keys.add(key)
+			out.push({ around, pos: Math.max(from, around.from), index })
+		}
+
+		for (const at of [from, to]) {
+			const $at = doc.resolve(at)
+
+			if ($at.parent.inlineContent) {
+				for (const span of controlSpans($at.parent, $at.start())) {
+					const info = controlOf(part, span.mark)
+
+					if (info !== undefined && partly(span.from, span.to, from, to))
+						add({ kind: "inline", holder: span.mark, info, from: span.from, to: span.to, pos: span.from })
+				}
+			}
+
+			for (let depth = $at.depth; depth > 0; depth--) {
+				const node = $at.node(depth)
+
+				if (node.type !== nodes.sdt) continue
+
+				const pos = $at.before(depth)
+				const info = controlOf(part, node)
+
+				if (info !== undefined && partly(pos + 1, pos + node.nodeSize - 1, from, to))
+					add({ kind: "block", holder: node, info, from: pos + 1, to: pos + node.nodeSize - 1, pos })
+			}
+		}
+	}
+
+	// A comment anchored in it.
+	const commented = (doc: Node, at: number, slice: Slice, index: number): void => {
+		const keys = new Set<string>()
+
+		slice.content.descendants(node => {
+			if (node.type !== nodes.comment_ref) return true
+
+			for (const mark of node.marks) {
+				const info = mark.type === marks.content_control ? controlOf(part, mark) : undefined
+
+				if (info === undefined || !info.showingPlaceholder || keys.has(controlKey(mark))) continue
+
+				keys.add(controlKey(mark))
+				out.push({ around: { kind: "inline", holder: mark, info, from: at, to: at, pos: at }, pos: at, index })
+			}
+
+			return false
+		})
+
+		const $at = doc.resolve(at)
+
+		for (let depth = $at.depth; depth > 0 && keys.size === 0; depth--) {
+			const node = $at.node(depth)
+			const info = node.type === nodes.sdt ? controlOf(part, node) : undefined
+
+			if (info === undefined || !info.showingPlaceholder) continue
+
+			let anchored = false
+
+			slice.content.descendants(child => {
+				anchored ||= child.type === nodes.comment_ref
+
+				return !anchored
+			})
+
+			if (!anchored) break
+
+			const pos = $at.before(depth)
+
+			out.push({ around: { kind: "block", holder: node, info, from: pos + 1, to: pos + node.nodeSize - 1, pos }, pos: at, index })
+
+			break
+		}
+	}
+
+	for (let index = 0; index < count; index++) {
+		const step = tr.steps[index] as Step
+		const doc = tr.docs[index] as Node
+
+		if (step instanceof ReplaceStep) {
+			for (const replace of replacesOf(step)) {
+				if (commentsOnly) commented(doc, replace.from, replace.slice, index)
+				else note(doc, replace.from, replace.to, index)
+			}
+		} else if (
+			!commentsOnly &&
+			isMarkStep(step) &&
+			!(step instanceof RemoveMarkStep) &&
+			markStepTypes(step).some(type => DELETIONS.has(type.name))
+		) {
+			note(doc, step.from, step.to, index)
+		}
+	}
+
+	return out
 }
 
 // Whether [from, to] holds range markers only (a bookmark put around a heading): nothing typed, so a placeholder

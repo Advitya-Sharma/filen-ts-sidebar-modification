@@ -10,8 +10,8 @@ import {
 import type { Slicing } from "../../core/slicing"
 import type { DocEncryptionScheme } from "../../core/doc/errors"
 import { PackageSealError, packageSealer } from "../encryption/seal"
+import { decryptionOf } from "../encryption/legacyDecryption"
 import { passwordOfficeKey, releaseOfficeKey } from "../encryption/webCrypto"
-import { decryptionOf } from "./legacy"
 import { macrotaskYield } from "./host"
 import type { DocxAbortSignal } from "./protection"
 

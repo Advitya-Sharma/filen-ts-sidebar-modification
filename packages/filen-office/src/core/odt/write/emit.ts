@@ -1,5 +1,5 @@
 import { decodeUtf8, encodeUtf8, parseXml, type XmlDocument } from "../../xml/index"
-import type { OdfElement, OdfStyle, OdfStyleSheet, StyleScope } from "../../odf/index"
+import { OdfNs, type OdfElement, type OdfStyle, type OdfStyleSheet, type StyleScope } from "../../odf/index"
 import { runProperties, type Attributes } from "../props"
 import { StyleMapper } from "../styles"
 import { esc, escText } from "../wml"
@@ -507,6 +507,9 @@ export interface EmitContext {
 	// The document's ODF version has text:continue-list: new in ODF 1.2 (Part 1 §19.780, Appendix G.1); ODF 1.0 (second
 	// edition) and 1.1 give text:list only text:style-name and text:continue-numbering (§4.3.1 List Block).
 	readonly continuesLists: boolean
+	// The document's ODF version (office:version; none: 1.1, ODF 1.2 Part 1 Appendix G.1); undefined: 1.3, a document
+	// written anew.
+	readonly version?: number
 	// The w:num of the list before a paragraph of the body in the edit's order (undefined: none, or not the body's).
 	precedingList?: (document: XmlDocument, paragraph: number) => string | undefined
 	note(kind: "footnote" | "endnote", id: string): { readonly document: XmlDocument; readonly node: number } | undefined
@@ -1471,7 +1474,9 @@ export class OdfEmitter {
 						if (atom.name !== undefined) this.annotationEnds.set(id, atom.name)
 						else this.pointComments.add(id)
 					} else {
-						const range = this.newAnnotation(id)
+						const next = document.nextSiblingElement(at)
+						const point = next >= 0 && document.localName(next) === "commentRangeEnd" && document.attribute(next, "w:id") === id
+						const range = this.newAnnotation(id, point)
 
 						state.out += range.markup
 
@@ -2115,10 +2120,17 @@ export class OdfEmitter {
 		return `${shell.bytes.slice(0, start)}${markup}${shell.bytes.slice(end)}`
 	}
 
-	private newAnnotation(id: string): { markup: string; name: string | undefined } {
+	// A new comment as office:annotation (Part 3 §14.1), named when it marks a range: office:name and
+	// office:annotation-end (§14.2) are new in ODF 1.2, so an ODF 1.0 or 1.1 annotation marks a point. Its author's
+	// initials are meta:creator-initials, new in ODF 1.3; before it, LibreOffice's own loext:sender-initials, which
+	// LibreOffice and the translator read: a foreign element (ODF 1.2 Part 1 §3.17, ODF 1.1 §1.5) whose content
+	// office:process-content false keeps out of the annotation's text for any other reader.
+	private newAnnotation(id: string, point: boolean): { markup: string; name: string | undefined } {
 		const comment = this.context.comment(id)
 
 		if (comment === undefined) return this.refuse("comment", "a comment without content")
+		if (!point && (this.context.version ?? 1.3) < 1.2)
+			return this.refuse("comment", "a comment over a range (ODF 1.0 and 1.1 annotations mark a point)")
 
 		const { document, node } = comment
 		const author = document.attribute(node, "w:author") ?? ""
@@ -2128,7 +2140,7 @@ export class OdfEmitter {
 
 		for (let at = document.firstChildElement(node); at >= 0; at = document.nextSiblingElement(at)) blocks.push(at)
 
-		const name = this.context.registry.name("__Annotation__", true)
+		const name = point ? undefined : this.context.registry.name("__Annotation__", true)
 		const notes = this.context.notes
 		let body: string
 
@@ -2141,7 +2153,7 @@ export class OdfEmitter {
 		}
 
 		return {
-			markup: `<office:annotation office:name="${esc(name)}"><dc:creator>${escText(author)}</dc:creator>${date === undefined ? "" : `<dc:date>${escText(date.replace(/Z$/u, ""))}</dc:date>`}${initials === undefined ? "" : `<meta:creator-initials>${escText(initials)}</meta:creator-initials>`}${body}</office:annotation>`,
+			markup: `<office:annotation${name === undefined ? "" : ` office:name="${esc(name)}"`}><dc:creator>${escText(author)}</dc:creator>${date === undefined ? "" : `<dc:date>${escText(date.replace(/Z$/u, ""))}</dc:date>`}${initials === undefined ? "" : (this.context.version ?? 1.3) >= 1.3 ? `<meta:creator-initials>${escText(initials)}</meta:creator-initials>` : `<loext:sender-initials office:process-content="false" xmlns:loext="${OdfNs.loext}">${escText(initials)}</loext:sender-initials>`}${body}</office:annotation>`,
 			name
 		}
 	}

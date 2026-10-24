@@ -15,6 +15,8 @@ export const previewSheetViewer = {
 	previewSheetEditAnyway: "Edit anyway",
 	/** Spreadsheet viewer — note beside the cell contents when the file needs its author's password to be modified */
 	previewSheetReadOnlyModifyPassword: "Read-only here: this file needs a password to be modified.",
+	/** Spreadsheet viewer — note beside the cell contents when a CSV or text file has more rows than a sheet holds (1,048,576, as in Excel): only its first rows are shown, and it can't be saved or copied to another format here, which would drop the rest */
+	previewSheetReadOnlyIncomplete: "Read-only here: this file has more rows than a sheet holds, so only the first 1,048,576 are shown.",
 	/** Toast — the sheet is protected, or the cell is locked on a protected sheet */
 	previewSheetProtectedSheet: "This sheet is protected, so that can't be changed.",
 	/** Toast — the workbook's structure is protected: sheets can't be added, renamed or moved */

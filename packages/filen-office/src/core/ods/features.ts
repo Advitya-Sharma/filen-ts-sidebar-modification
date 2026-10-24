@@ -3,7 +3,7 @@ import { parseColor } from "../odf/units"
 import { parseRelationships, type Relationship } from "../opc/relationships"
 import { escapeAttribute, escapeText } from "../xml/index"
 import type { XlsxDefinedName, XlsxDxf, XlsxSection } from "../xlsx/model/types"
-import { columnText, rangeAddress, sheetRef, translateExpression } from "./formula/toXlsx"
+import { columnText, rangeAddress, rangeAddresses, sheetRef, translateExpression, withoutSheet } from "./formula/toXlsx"
 import type { OdsIssues } from "./issues"
 import type { UnheldCollector } from "./unheld"
 import { capturedText, parseCaptured } from "./read/captured"
@@ -701,7 +701,7 @@ function conditionalSections(table: OdsTable, styles: OdsCellStyles, issues: Ods
 		for (const format of container.children) {
 			if (format.name !== "calcext:conditional-format") continue
 
-			const target = rangeAddress(format.attributes.get("calcext:target-range-address") ?? "")
+			const target = rangeAddresses(format.attributes.get("calcext:target-range-address") ?? "")
 
 			if ("refused" in target) {
 				issues.add("conditionalFormat", table.name, "target range")
@@ -709,10 +709,7 @@ function conditionalSections(table: OdsTable, styles: OdsCellStyles, issues: Ods
 				continue
 			}
 
-			const sqref = target.text
-				.split(",")
-				.map(part => part.slice(part.lastIndexOf("!") + 1).replaceAll("$", ""))
-				.join(" ")
+			const sqref = target.parts.map(part => withoutSheet(part).replaceAll("$", "")).join(" ")
 			const rules: string[] = []
 			const first = sqref.split(" ")[0]?.split(":")[0] ?? "A1"
 

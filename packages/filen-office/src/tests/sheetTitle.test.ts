@@ -43,6 +43,13 @@ describe("a workbook's own title", () => {
 		expect((await opened(odsBytes({ body }), "ods")).title).toBeUndefined()
 	})
 
+	it("is none, and the spreadsheet still opens, when meta.xml's title holds an invalid character reference", async () => {
+		const body = table("Sheet1", '<table:table-row><table:table-cell office:value-type="float" office:value="1"/></table:table-row>')
+		const data = new TextEncoder().encode(META.replace("Stock count", "a&#x1;b"))
+
+		expect((await opened(odsBytes({ body, extra: [{ name: "meta.xml", data }] }), "ods")).title).toBeUndefined()
+	})
+
 	it("is none for a text file", async () => {
 		expect((await opened(new TextEncoder().encode("a,b\n1,2\n"), "csv")).title).toBeUndefined()
 	})

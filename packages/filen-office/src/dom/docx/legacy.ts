@@ -1,11 +1,11 @@
-import type { DocDecryption } from "../../core/doc/decrypt"
 import { DocError, type DocEncryptionScheme, type DocErrorCode } from "../../core/doc/index"
 import { convertDocToDocx, docxPackage, withProtectionHash, type DocNotConverted } from "../../core/doc/toDocx/index"
 import { nativeDeflate } from "../../core/docx/write/zip"
 import { bytesSource, memorySink, OpcPackage, writeZip, type ByteSource } from "../../core/opc/index"
 import { decodeUtf8, encodeUtf8 } from "../../core/xml/index"
 import { OfficeCryptoError } from "../encryption/errors"
-import { digest, subtle } from "../encryption/subtle"
+import { decryptionOf } from "../encryption/legacyDecryption"
+import { subtle } from "../encryption/subtle"
 import { hashLegacyProtectionKey } from "../protection"
 import type { DocxEngineServices } from "./engine"
 import { inThreadDocxHost, type DocxHost } from "./host"
@@ -78,20 +78,6 @@ function refusalOf(error: DocError): DocxLegacyRefusal {
 		reason: error.code,
 		...(error.encryption === undefined ? {} : { encryption: error.encryption }),
 		...(error.nFib === undefined ? {} : { nFib: error.nFib })
-	}
-}
-
-// CryptoAPI RC4 keys hash with SHA-1 on the platform's WebCrypto; without it the file cannot be decrypted here.
-export function decryptionOf(password: string): DocDecryption {
-	return {
-		password,
-		sha1: data =>
-			digest("SHA-1", data).catch((error: unknown) => {
-				if (error instanceof OfficeCryptoError)
-					throw new DocError("encrypted", "SHA-1 is not available here", { encryption: "cryptoApiRc4" })
-
-				throw error
-			})
 	}
 }
 

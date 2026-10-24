@@ -34,6 +34,7 @@ import {
 	type DocxUnlockedDocument
 } from "@filen/office/dom/docx"
 import type { DocxEditingHost, DocxSealer } from "@filen/office/dom/docx/editing"
+import type { DocxSaveNotice } from "@filen/office/dom/docx/save"
 import { useDocxDocument, type DocxSource } from "@filen/office/react/docx"
 import {
 	DocxEditor,
@@ -49,6 +50,7 @@ import "@filen/office/css/docx-objects.css"
 import "@filen/office/css/docx-reflow.css"
 import { DOCX_FONT_URLS } from "@/features/preview/lib/docxEngine"
 import { readEditorClipboard, writeEditorClipboard } from "@/features/preview/lib/docxClipboard"
+import { FormatSaveError } from "@/features/preview/lib/rtfEditing"
 import {
 	assertSealedUpload,
 	docxEditingHost,
@@ -247,6 +249,8 @@ interface SaveSourceOptions {
 	onLocked: (locked: { count: number; text: string; reverted: number }) => void
 	// The search for the blocks the writer refuses runs (it runs the writer several times): shown meanwhile.
 	onSearch: (searching: boolean) => void
+	// The file's own writer stored something otherwise than the editor has it (told once stored).
+	onNotices: (notices: readonly DocxSaveNotice[]) => void
 }
 
 // The document's text as edited, for keeping edits a save could not write: the body (list numbers
@@ -273,7 +277,7 @@ function documentText(editor: PagedEditor): string {
 // the writer refuses on an explicit save are written as last saved and taken back once the file is stored (the
 // user is told then); a refusal nothing resolves keeps the document open and unsaved, with its text to copy. An
 // autosave never searches: a refusal holds autosave, quietly.
-function docxSaveSource({ host, editor, encrypted, onSaved, onRefused, onLocked, onSearch }: SaveSourceOptions): DocxSaveSource {
+function docxSaveSource({ host, editor, encrypted, onSaved, onRefused, onLocked, onSearch, onNotices }: SaveSourceOptions): DocxSaveSource {
 	return async (options = {}) => {
 		const auto = options.auto === true
 
@@ -302,6 +306,10 @@ function docxSaveSource({ host, editor, encrypted, onSaved, onRefused, onLocked,
 					if (written.locked !== undefined) {
 						onLocked(written.locked)
 					}
+
+					if (written.notices !== undefined && written.notices.length > 0) {
+						onNotices(written.notices)
+					}
 				}
 			}
 		} catch (error) {
@@ -315,7 +323,7 @@ function docxSaveSource({ host, editor, encrypted, onSaved, onRefused, onLocked,
 
 				const text = documentText(editor)
 
-				throw new SaveRefusedError("previewDocxSaveRefused", {
+				throw new SaveRefusedError(error instanceof FormatSaveError ? error.messageKey : "previewDocxSaveRefused", {
 					action: {
 						labelKey: "previewDocxSaveRefusedCopy",
 						run: () => {
@@ -675,6 +683,12 @@ export function DocxEditView({
 					toast.loading(t("previewDocxSaveSearching"), { id: SEARCH_TOAST })
 				} else {
 					toast.dismiss(SEARCH_TOAST)
+				}
+			},
+			onNotices: notices => {
+				// One kind so far: comments an ODF 1.0 or 1.1 file keeps at the start of their text.
+				for (const { count } of notices) {
+					toast.warning(t("previewDocxSaveCommentPoint", { count }), { duration: Infinity })
 				}
 			},
 			onLocked: ({ count, text, reverted }) => {

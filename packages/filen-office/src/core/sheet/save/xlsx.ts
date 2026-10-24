@@ -20,11 +20,14 @@ export const saveAsXlsxFeature = defineSheetFeature<TextSheetDocument>({
 	id: "saveAs.xlsx",
 	queries: {
 		"saveAs.xlsx": {
+			// A file only partly read is refused: the copy would leave its other rows out.
 			run: (context, request): Promise<TextWorkbookResult> =>
-				textWorkbookXlsx(context.doc.rows, request.name, {
-					...(context.slicing !== undefined && { slicing: context.slicing }),
-					...(context.signal !== undefined && { signal: context.signal })
-				})
+				!context.doc.complete
+					? Promise.resolve({ ok: false, refusal: { reason: "tooLarge", detail: "incomplete" } })
+					: textWorkbookXlsx(context.doc.rows, request.name, {
+							...(context.slicing !== undefined && { slicing: context.slicing }),
+							...(context.signal !== undefined && { signal: context.signal })
+						})
 		}
 	}
 })

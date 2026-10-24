@@ -437,7 +437,9 @@ export interface SheetLayoutPatch {
 //   signed         digitally signed: an edit would break the signature
 //   readOnlyRecommended  the author asked for read-only (fileSharing) and the user did not choose to edit
 //   modifyPassword the file's password to modify was not given
-export type SheetViewOnlyReason = "legacyFormat" | "lossy" | "tooLarge" | "unsafe" | "signed" | "readOnlyRecommended" | "modifyPassword"
+//   incomplete     a text file longer than a sheet: only its first SHEET_MAX_ROWS records were read
+export type SheetViewOnlyReason =
+	"legacyFormat" | "lossy" | "tooLarge" | "unsafe" | "signed" | "readOnlyRecommended" | "modifyPassword" | "incomplete"
 
 // A workbook opens unproven: the gate runs once the app says the user set out to edit (SheetSessionApi.intent),
 // and an edit sent before the verdict waits for it.
@@ -865,8 +867,10 @@ export type SheetOpenResult =
 // A password-protected workbook waiting for its password. Excel's default password ("VelvetSweatshop") was tried
 // first: a file it opens never asks.
 export interface SheetLockedFile {
-	readonly scheme: "standard" | "agile"
-	// Hash iterations an unlock costs: what an "Unlocking…" state waits on.
+	// An encrypted package's ([MS-OFFCRYPTO] §2.3.4), or an Excel 97–2003 workbook's password to open (XOR, RC4 or
+	// CryptoAPI RC4: §2.3.7, §2.3.6, §2.3.5).
+	readonly scheme: "standard" | "agile" | "xor" | "rc4" | "cryptoApiRc4"
+	// Hash iterations an unlock costs: what an "Unlocking…" state waits on (0 for an Excel 97–2003 workbook).
 	readonly spinCount: number
 	// One try at a time; may be called again after a wrong password or an abort.
 	unlock(

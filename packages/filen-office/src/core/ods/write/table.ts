@@ -2,7 +2,7 @@ import { SHEET_MAX_COLS, SHEET_MAX_ROWS } from "../../sheet/protocol"
 import { ColFlag, RowFlag, type XlsxColRange, type XlsxSheetEntry, type XlsxSheetModel } from "../../xlsx/model/types"
 import { decodeUtf8, escapeAttribute } from "../../xml/index"
 import type { OdsCellStyles } from "../styles/cell"
-import type { OdsTableSource } from "../source"
+import type { OdsSourceRowProps, OdsTableSource } from "../source"
 import { SourceAxis } from "./axis"
 import { CellRefused, cellMarkup, sameContent, Value, type CellValue } from "./cells"
 import { decodeRows, type DecodedRows } from "./decode"
@@ -72,6 +72,15 @@ interface SourceRowProps {
 	readonly pageBreak: boolean
 	readonly hidden: boolean
 	readonly outline: number
+}
+
+const NO_ROW_PROPS: OdsSourceRowProps = {
+	heightPt: Number.NaN,
+	custom: false,
+	pageBreak: false,
+	hidden: false,
+	outline: 0,
+	defaultCellStyle: undefined
 }
 
 interface CellExtras {
@@ -484,15 +493,87 @@ export class TableWriter {
 		}
 	}
 
+	// The format the cells of source row `row` take without naming one (-1: their column's), before the rows go out;
+	// null for a row the source has none of.
+	plannedRowXf(row: number): number | null {
+		const source = this.source
+
+		if (source === null) return null
+
+		const at = this.rowAxis.source(row)
+
+		if (at < 0 || at >= source.rows) return null
+
+		const defaultCell = source.rowProps.at(at)?.defaultCellStyle
+
+		return this.view.rowStyle(row) >= 0 || defaultCell === undefined ? -1 : this.context.cellStyles.xf(defaultCell)
+	}
+
+	// Every row style the source's rows are written with, before the rows go out: a row whose properties are not its
+	// tag's any more has its tag given the model's. Once per stretch of rows alike in both; yields as it goes.
+	*sourceRowStyles(visit: (heightPt: number, custom: boolean, pageBreak: boolean) => void): Generator<void, void> {
+		const source = this.source
+
+		if (source === null) return
+
+		const end = Math.min(source.rows, SHEET_MAX_ROWS)
+		let steps = 0
+
+		for (let at = 0; at < end;) {
+			const target = this.rowAxis.target(at)
+
+			if (target < 0) {
+				const kept = this.rowAxis.nextKept(at)
+
+				at = kept < 0 || kept <= at ? end : kept
+
+				continue
+			}
+
+			const run = Math.max(1, Math.min(end - at, this.rowAxis.runFrom(at), source.rowProps.runFrom(at)))
+			const stop = target + run
+			const props = source.rowProps.at(at) ?? NO_ROW_PROPS
+			const points = new Set<number>([target])
+
+			for (const row of this.view.storeRowsIn(target, stop)) {
+				points.add(row)
+				if (row + 1 < stop) points.add(row + 1)
+			}
+
+			for (const runRow of this.view.runsIn(target, stop)) {
+				points.add(Math.max(target, runRow.first))
+				if (runRow.last + 1 < stop) points.add(runRow.last + 1)
+			}
+
+			for (const row of points) {
+				if (this.sameProps(props, row)) continue
+
+				const rowProps = this.view.rowProps(row)
+
+				visit(this.view.height(rowProps), (rowProps.flags & RowFlag.CUSTOM_HEIGHT) !== 0, props.pageBreak)
+			}
+
+			at += run
+
+			if (++steps % 256 === 0 || points.size > 256) yield
+		}
+	}
+
+	// Whether a cell of format `xf` names its style, in a row whose cells take `rowXf` without one (-1: their column's).
+	namesStyle(xf: number, col: number, rowXf: number): boolean {
+		return xf !== (rowXf >= 0 ? rowXf : this.columnXf(col))
+	}
+
 	private sameProps(source: SourceRowProps, row: number): boolean {
 		const props = this.view.rowProps(row)
+		// A row of none has the sheet's default; a source row whose style gives none was read at LibreOffice's.
 		const fallback = this.model.format.defaultRowHeight
-		const height = (value: number): number => (Number.isNaN(value) ? fallback : value)
+		const height = Number.isNaN(props.heightPt) ? fallback : props.heightPt
 
 		return (
 			((props.flags & RowFlag.HIDDEN) !== 0) === source.hidden &&
 			(props.flags & RowFlag.OUTLINE_MASK) >> RowFlag.OUTLINE_SHIFT === source.outline &&
-			height(props.heightPt) === height(source.heightPt) &&
+			height === (Number.isNaN(source.heightPt) ? DEFAULT_ROW_PT : source.heightPt) &&
 			this.view.rowStyle(row) < 0
 		)
 	}
@@ -911,7 +992,8 @@ export class TableWriter {
 		if (out.length > 0) yield out.join("")
 	}
 
-	private lastModelRow(): number {
+	// The last row the model has anything on.
+	lastModelRow(): number {
 		let last = Math.max(this.view.store.rowExtent, this.model.styleRuns?.rowExtent ?? 0) - 1
 		const runs = this.model.rowRuns
 

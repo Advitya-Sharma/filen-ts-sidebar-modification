@@ -10,6 +10,7 @@ import {
 } from "../../core/opc/index"
 import { DocxSaveError, isDocxSaveFailure } from "../../core/docx/write/failure"
 import { zipDocxSave, type DocxPartChanges } from "../../core/docx/write/zip"
+import type { OdtWriteNotice } from "../../core/odt/write/writer"
 import type { DocxWorkerLike, DocxWorkerScope } from "./host"
 
 // The zip half of a save (zipDocxSave: the checked parts written into the original archive, then the zip half
@@ -24,7 +25,12 @@ export interface DocxZipped {
 	readonly changedParts: readonly string[]
 	readonly zipMs: number
 	readonly verifyZipMs: number
+	// What the file's own writer wrote otherwise than the edit has it, for the user to be told (an ODF 1.1 file's
+	// comments marking points).
+	readonly notices?: readonly DocxSaveNotice[]
 }
+
+export type DocxSaveNotice = OdtWriteNotice
 
 // One open document's zip writer.
 export interface DocxZipper {

@@ -10,8 +10,12 @@ declare module "../protocol" {
 	interface SheetQueryMap {
 		// The cells as UTF-8 tab-separated values with a BOM, a value quoted (RFC 4180) when it holds a tab, a quote
 		// or a line end, or when it starts the file with a BOM of its own (a reader takes that for the hand-off's):
-		// opened as a TSV, it reads back as the same cells.
-		"saveAs.cells": { request: Record<string, never>; result: { readonly bytes: Uint8Array } }
+		// opened as a TSV, it reads back as the same cells. Refused (tooLarge) for a file only partly read: a copy would
+		// leave its other rows out.
+		"saveAs.cells": {
+			request: Record<string, never>
+			result: { readonly ok: true; readonly bytes: Uint8Array } | { readonly ok: false; readonly refusal: SheetRefusal }
+		}
 	}
 }
 
@@ -39,6 +43,11 @@ export function textCellsTsv(rows: readonly (readonly string[])[]): Uint8Array {
 export const saveAsCellsFeature = defineSheetFeature<TextSheetDocument>({
 	id: "saveAs.cells",
 	queries: {
-		"saveAs.cells": { run: context => ({ bytes: textCellsTsv(context.doc.rows) }) }
+		"saveAs.cells": {
+			run: context =>
+				context.doc.complete
+					? { ok: true, bytes: textCellsTsv(context.doc.rows) }
+					: { ok: false, refusal: { reason: "tooLarge", detail: "incomplete" } }
+		}
 	}
 })

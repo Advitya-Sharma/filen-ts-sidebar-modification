@@ -110,7 +110,8 @@ export interface SheetSessionDocument {
 	}): Promise<
 		Exclude<SheetSaveResult, { ok: true }> | { readonly ok: true; readonly bytes: Uint8Array; readonly changedParts: readonly string[] }
 	>
-	csv(sheet: SheetId): Uint8Array | null
+	// The sheet as a CSV; a refusal when it cannot be made whole (too large), null when the sheet has no cells to give.
+	csv(sheet: SheetId): Uint8Array | SheetRefusal | null
 	// The first rows of a sheet before its parse ends (tiles and its layout show them): whether there are some.
 	preview?(sheet: SheetId): Promise<boolean>
 	previewCovers?(sheet: SheetId, tileRows: readonly number[]): boolean
@@ -1340,11 +1341,18 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 
 			const sheet = options?.sheet ?? this.document.activeSheet()
 
-			await this.document.ready(sheet, this.slicing)
+			// A sheet that cannot be read (its part missing or damaged) gives no CSV: refused, never an error left open.
+			try {
+				await this.document.ready(sheet, this.slicing)
+			} catch {
+				return { ok: false, refusal: { reason: "unsupported", detail: "unreadable" } } as const
+			}
 
 			const bytes = this.document.csv(sheet)
 
-			return bytes === null ? ({ ok: false, refusal: { reason: "unsupported" } } as const) : ({ ok: true, bytes } as const)
+			if (bytes === null) return { ok: false, refusal: { reason: "unsupported" } } as const
+
+			return bytes instanceof Uint8Array ? ({ ok: true, bytes } as const) : ({ ok: false, refusal: bytes } as const)
 		})
 	}
 

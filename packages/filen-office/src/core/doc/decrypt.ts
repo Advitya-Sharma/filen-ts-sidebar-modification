@@ -27,6 +27,11 @@ export interface DocKey {
 // [MS-DOC] §2.2.6.1–§2.2.6.3: FibBase (68 bytes) stays clear; RC4 rekeys every 512 bytes from the stream's start.
 export const CLEAR_WORD_BYTES = 68
 const BLOCK = 512
+
+// Where the key derivation is shared with another binary format: the bytes RC4 rekeys after ([MS-XLS] §2.2.10: 1024).
+export interface DocKeyOptions {
+	readonly block?: number
+}
 // §2.3.6.2 and §2.3.5.2: at most 255 Unicode characters.
 const MAX_PASSWORD = 255
 const SALT = 16
@@ -59,7 +64,13 @@ function le32Bytes(value: number): Uint8Array {
 // The key for `scheme` checked against the file's verifier: a DocError "wrongPassword" when it does not match, "corrupt"
 // when the EncryptionHeader is malformed, "encrypted" (unknown) for an RC4 CryptoAPI variant this reader does not do.
 // `table` is the raw Table stream; `lKey` is FibBase.lKey.
-export async function docKey(scheme: DocCipherScheme, lKey: number, table: Uint8Array, decryption: DocDecryption): Promise<DocKey> {
+export async function docKey(
+	scheme: DocCipherScheme,
+	lKey: number,
+	table: Uint8Array,
+	decryption: DocDecryption,
+	options: DocKeyOptions = {}
+): Promise<DocKey> {
 	if (decryption.password.length > MAX_PASSWORD) throw wrong()
 
 	// The EncryptionHeader lies inside the Table stream ([MS-DOC] §2.2.6.2–§2.2.6.3).
@@ -69,9 +80,9 @@ export async function docKey(scheme: DocCipherScheme, lKey: number, table: Uint8
 		case "xor":
 			return xorKey(lKey, decryption.password)
 		case "rc4":
-			return rc4Key(lKey, table, decryption.password)
+			return rc4Key(lKey, table, decryption.password, options.block ?? BLOCK)
 		case "cryptoApiRc4":
-			return cryptoApiKey(lKey, table, decryption)
+			return cryptoApiKey(lKey, table, decryption, options.block ?? BLOCK)
 	}
 }
 
@@ -113,9 +124,9 @@ function xorArray(password: Uint8Array, key: number): Uint8Array {
 	return out
 }
 
-// [MS-DOC] §2.2.6.1: FibBase.lKey holds CreatePasswordVerifier_Method2 (§2.3.7.4); the streams went through XOR Data
-// Transformation Method 2 (§2.3.7.6), indexed from the start of each stream.
-function xorKey(lKey: number, password: string): DocKey {
+// The XorArray (§2.3.7.2) of the single-byte form of `password` whose CreatePasswordVerifier_Method2 (§2.3.7.4: XorKey
+// high, verifier low) is `lKey`; a DocError "wrongPassword" when none is.
+export function xorObfuscationArray(lKey: number, password: string): Uint8Array {
 	if (password.length === 0) throw wrong()
 
 	let array: Uint8Array | undefined
@@ -131,7 +142,13 @@ function xorKey(lKey: number, password: string): DocKey {
 
 	if (array === undefined) throw wrong()
 
-	const key = array
+	return array
+}
+
+// [MS-DOC] §2.2.6.1: FibBase.lKey holds CreatePasswordVerifier_Method2 (§2.3.7.4); the streams went through XOR Data
+// Transformation Method 2 (§2.3.7.6), indexed from the start of each stream.
+function xorKey(lKey: number, password: string): DocKey {
+	const key = xorObfuscationArray(lKey, password)
 
 	return {
 		scheme: "xor",
@@ -160,6 +177,7 @@ function xorKey(lKey: number, password: string): DocKey {
 
 function rc4Stream(
 	scheme: "rc4" | "cryptoApiRc4",
+	block: number,
 	blockKeys: (first: number, count: number) => Promise<Uint8Array[]>,
 	wipe: () => void
 ): DocKey {
@@ -167,16 +185,16 @@ function rc4Stream(
 		scheme,
 		async decrypt(input, clear) {
 			const out = new Uint8Array(input.length)
-			const blocks = Math.ceil(input.length / BLOCK)
+			const blocks = Math.ceil(input.length / block)
 
 			for (let first = 0; first < blocks; first += KEY_BATCH) {
 				const keys = await blockKeys(first, Math.min(KEY_BATCH, blocks - first))
 
 				keys.forEach((key, k) => {
-					const at = (first + k) * BLOCK
+					const at = (first + k) * block
 					const cipher = new Rc4(key)
 
-					cipher.apply(input, out, at, at, Math.min(BLOCK, input.length - at))
+					cipher.apply(input, out, at, at, Math.min(block, input.length - at))
 					cipher.wipe()
 					key.fill(0)
 				})
@@ -192,7 +210,7 @@ function rc4Stream(
 
 // §2.3.6.1 RC4 EncryptionHeader: Version 1.1, Salt, EncryptedVerifier, EncryptedVerifierHash (16 bytes each).
 // §2.3.6.2: H0 = MD5(password), H1 = MD5(16 × (H0[0..5] + salt)), key(block) = MD5(H1[0..5] + block).
-async function rc4Key(lKey: number, table: Uint8Array, password: string): Promise<DocKey> {
+async function rc4Key(lKey: number, table: Uint8Array, password: string, blockSize: number): Promise<DocKey> {
 	if (lKey < RC4_HEADER || table.length < RC4_HEADER) throw corrupt("the RC4 EncryptionHeader is truncated")
 
 	const salt = table.subarray(4, 4 + SALT)
@@ -240,6 +258,7 @@ async function rc4Key(lKey: number, table: Uint8Array, password: string): Promis
 
 	return rc4Stream(
 		"rc4",
+		blockSize,
 		(first, count) => Promise.resolve(Array.from({ length: count }, (_, k) => blockKey(first + k))),
 		() => digest1.fill(0)
 	)
@@ -277,7 +296,7 @@ export function cryptoApiHeaderProblem(table: Uint8Array, lKey: number): string 
 	return undefined
 }
 
-async function cryptoApiKey(lKey: number, table: Uint8Array, decryption: DocDecryption): Promise<DocKey> {
+async function cryptoApiKey(lKey: number, table: Uint8Array, decryption: DocDecryption, blockSize: number): Promise<DocKey> {
 	const end = lKey
 	const problem = cryptoApiHeaderProblem(table, lKey)
 
@@ -342,6 +361,7 @@ async function cryptoApiKey(lKey: number, table: Uint8Array, decryption: DocDecr
 
 	return rc4Stream(
 		"cryptoApiRc4",
+		blockSize,
 		(first, count) => Promise.all(Array.from({ length: count }, (_, k) => blockKey(first + k))),
 		() => h0.fill(0)
 	)

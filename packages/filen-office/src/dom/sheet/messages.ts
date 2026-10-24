@@ -1,4 +1,11 @@
-import type { SheetEncryptionRefusal, SheetEvent, SheetOpenFailure, SheetOpenOptions, SheetWorkbookInfo } from "../../core/sheet/protocol"
+import type {
+	SheetEncryptionRefusal,
+	SheetEvent,
+	SheetLockedFile,
+	SheetOpenFailure,
+	SheetOpenOptions,
+	SheetWorkbookInfo
+} from "../../core/sheet/protocol"
 
 // The messages between a page and a sheet worker. `s` names the open (one file, then its session); `id` names a
 // call on it. Answers and events for one open come in the order the worker made them.
@@ -23,7 +30,7 @@ export type ToSheetWorker =
 
 export type SheetWorkerOpened =
 	| { readonly kind: "opened"; readonly info: SheetWorkbookInfo }
-	| { readonly kind: "needsPassword"; readonly scheme: "standard" | "agile"; readonly spinCount: number }
+	| { readonly kind: "needsPassword"; readonly scheme: SheetLockedFile["scheme"]; readonly spinCount: number }
 	| { readonly kind: "refused"; readonly reason: SheetEncryptionRefusal }
 	| { readonly kind: "failed"; readonly reason: SheetOpenFailure; readonly message: string }
 	| { readonly kind: "aborted" }

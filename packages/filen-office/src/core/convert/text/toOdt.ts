@@ -83,6 +83,82 @@ const IMAGE_TYPES: Readonly<Record<string, string>> = {
 	webp: "image/webp"
 }
 const EMU_PER_CM = 360_000
+// LibreOffice's layout compatibility settings. A set it reads that misses one takes the value a document from before
+// that setting would have (no external leading, the former line spacing, printer metrics), so every one is written:
+// the values LibreOffice 7.5's Word import sets for a Word 2013 document (TabsRelativeToIndent false among them, as Word
+// measures tab stops from the page margin), then what the document's own options change (below). Printing, the
+// printer, the database, font embedding, saving and session ids are no layout and left out; protection is written
+// when the source sets it.
+const COMPATIBILITY_SETTINGS: readonly (readonly [name: string, type: string, value: string])[] = [
+	["AddExternalLeading", "boolean", "true"],
+	["AddFrameOffsets", "boolean", "false"],
+	["AddParaLineSpacingToTableCells", "boolean", "true"],
+	["AddParaSpacingToTableCells", "boolean", "true"],
+	["AddParaTableSpacing", "boolean", "false"],
+	["AddParaTableSpacingAtStart", "boolean", "true"],
+	["AddVerticalFrameOffsets", "boolean", "true"],
+	["AlignTabStopPosition", "boolean", "true"],
+	["ApplyParagraphMarkFormatToNumbering", "boolean", "true"],
+	["AutoFirstLineIndentDisregardLineSpace", "boolean", "true"],
+	["BackgroundParaOverDrawings", "boolean", "true"],
+	["CharacterCompressionType", "short", "0"],
+	["ClipAsCharacterAnchoredWriterFlyFrames", "boolean", "false"],
+	["ClippedPictures", "boolean", "true"],
+	["CollapseEmptyCellPara", "boolean", "true"],
+	["ConsiderTextWrapOnObjPos", "boolean", "true"],
+	["ContinuousEndnotes", "boolean", "false"],
+	["DisableOffPagePositioning", "boolean", "true"],
+	["DoNotCaptureDrawObjsOnPage", "boolean", "false"],
+	["DoNotJustifyLinesWithManualBreak", "boolean", "false"],
+	["DoNotResetParaAttrsForNumFont", "boolean", "false"],
+	["DropCapPunctuation", "boolean", "true"],
+	["EmptyDbFieldHidesPara", "boolean", "true"],
+	["FloattableNomargins", "boolean", "true"],
+	["FootnoteInColumnToPageEnd", "boolean", "true"],
+	["FrameAutowidthWithMorePara", "boolean", "true"],
+	["GutterAtTop", "boolean", "false"],
+	["HeaderSpacingBelowLastPara", "boolean", "true"],
+	["IgnoreFirstLineIndentInNumbering", "boolean", "false"],
+	["IgnoreTabsAndBlanksForLineCalculation", "boolean", "true"],
+	["InvertBorderSpacing", "boolean", "true"],
+	["IsKernAsianPunctuation", "boolean", "false"],
+	["MathBaselineAlignment", "boolean", "true"],
+	["MsWordCompMinLineHeightByFly", "boolean", "false"],
+	["MsWordCompTrailingBlanks", "boolean", "true"],
+	["NoNumberingShowFollowBy", "boolean", "true"],
+	["OutlineLevelYieldsNumbering", "boolean", "false"],
+	["PrinterIndependentLayout", "string", "high-resolution"],
+	["PropLineSpacingShrinksFirstLine", "boolean", "true"],
+	["SmallCapsPercentage66", "boolean", "false"],
+	["SubtractFlysAnchoredAtFlys", "boolean", "false"],
+	["SurroundTextWrapSmall", "boolean", "true"],
+	["TabAtLeftIndentForParagraphsInList", "boolean", "true"],
+	["TabOverMargin", "boolean", "false"],
+	["TabOverSpacing", "boolean", "true"],
+	["TabOverflow", "boolean", "true"],
+	["TableRowKeep", "boolean", "true"],
+	["TabsRelativeToIndent", "boolean", "false"],
+	["TreatSingleColumnBreakAsPageBreak", "boolean", "true"],
+	["UnbreakableNumberings", "boolean", "true"],
+	["UnxForceZeroExtLeading", "boolean", "false"],
+	["UseFormerLineSpacing", "boolean", "false"],
+	["UseFormerObjectPositioning", "boolean", "false"],
+	["UseFormerTextWrapping", "boolean", "false"],
+	["UseOldNumbering", "boolean", "false"],
+	["UseOldPrinterMetrics", "boolean", "false"],
+	["WordLikeWrapForAsCharFlys", "boolean", "true"]
+]
+// Word's compatibility options (ECMA-376 Part 1 §17.15.3, Part 4 §14.8.3) and the setting LibreOffice 7.5's Word
+// import gives each.
+const COMPATIBILITY_OPTIONS: Readonly<Record<string, readonly [name: string, value: string]>> = {
+	doNotExpandShiftReturn: ["DoNotJustifyLinesWithManualBreak", "true"],
+	doNotUseHTMLParagraphAutoSpacing: ["AddParaTableSpacing", "true"],
+	noLeading: ["AddExternalLeading", "false"],
+	usePrinterMetrics: ["PrinterIndependentLayout", "disabled"]
+}
+// What LibreOffice 7.5's Word import sets for a layout before Word 2013's (compatibilityMode below 15, or none).
+const BEFORE_WORD_2013 = ["AddFrameOffsets", "MsWordCompMinLineHeightByFly", "TabOverMargin"]
+const WORD_URI = "http://schemas.microsoft.com/office/word"
 
 function cm(emu: number): string {
 	return `${String(Math.round((emu / EMU_PER_CM) * 10_000) / 10_000)}cm`
@@ -561,14 +637,48 @@ class Converter {
 		const settingsXml =
 			// LibreOffice reads the set's name as a qualified name: without the ooo prefix declared it applies none of it.
 			`${XML_DECLARATION}<office:document-settings ${ROOT_NAMESPACES} xmlns:ooo="http://openoffice.org/2004/office" office:version="1.3"><office:settings>` +
-			// Word measures tab stops from the page margin, not the paragraph's indent.
-			'<config:config-item-set config:name="ooo:configuration-settings"><config:config-item config:name="TabsRelativeToIndent" config:type="boolean">false</config:config-item>' +
+			`<config:config-item-set config:name="ooo:configuration-settings">${this.compatibility(settings)}` +
 			(protection.readOnly ? '<config:config-item config:name="LoadReadonly" config:type="boolean">true</config:config-item>' : "") +
 			(protection.forms ? '<config:config-item config:name="ProtectForm" config:type="boolean">true</config:config-item>' : "") +
 			"</config:config-item-set>" +
 			"</office:settings></office:document-settings>"
 
 		return this.packageOf(contentXml, stylesXml, settingsXml, await this.metaXml())
+	}
+
+	// The layout compatibility settings for this document: its compatibility mode and options as LibreOffice's Word
+	// import reads them (ECMA-376 Part 1 §17.15.1.50 gutterAtTop, §17.15.1.21 compat, §17.15.3.4 compatSetting).
+	private compatibility(settings: XmlDocument | undefined): string {
+		const changed = new Map<string, string>()
+		const root = settings?.documentElement() ?? -1
+		const compat = settings === undefined ? -1 : child(settings, root, "compat")
+		let mode = Number.NaN
+
+		if (settings !== undefined && compat >= 0)
+			for (const option of children(settings, compat)) {
+				const local = settings.localName(option)
+				const setting = COMPATIBILITY_OPTIONS[local]
+
+				if (setting !== undefined && isOn(settings, option)) changed.set(setting[0], setting[1])
+				else if (
+					local === "compatSetting" &&
+					settings.attribute(option, "w:name") === "compatibilityMode" &&
+					settings.attribute(option, "w:uri") === WORD_URI
+				)
+					mode = Number(settings.attribute(option, "w:val")?.trim() ?? "")
+			}
+
+		if (!(mode >= 15)) for (const name of BEFORE_WORD_2013) changed.set(name, "true")
+		// Without settings LibreOffice keeps the fixed spacing that w:doNotUseHTMLParagraphAutoSpacing asks for.
+		if (settings === undefined) changed.set("AddParaTableSpacing", "true")
+		if (settings !== undefined && isOn(settings, child(settings, root, "gutterAtTop"))) changed.set("GutterAtTop", "true")
+
+		let out = ""
+
+		for (const [name, type, value] of COMPATIBILITY_SETTINGS)
+			out += `<config:config-item config:name="${name}" config:type="${type}">${changed.get(name) ?? value}</config:config-item>`
+
+		return out
 	}
 
 	// Word's editing restriction (w:documentProtection, when enforced) and its recommendation to open read-only

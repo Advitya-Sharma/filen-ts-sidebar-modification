@@ -105,12 +105,13 @@ describe("RTF writer", () => {
 		const out = strFromU8(written.bytes, true)
 
 		expect(written.rounds).toBeGreaterThanOrEqual(1)
-		// A heading style added to the style sheet; a table with borders, cells merged, a table nested in a cell; a
-		// section break and the page set up again; a PNG in \shppict with its metafile copy.
+		// A heading style added to the style sheet; a table with borders, cells merged (one cell over the edge the row
+		// below keeps), a table nested in a cell; a section break and the page set up again; a PNG in \shppict with its
+		// metafile copy.
 		expect(out).toMatch(/\{\\s\d+\\sbasedon0\\snext0[^}]*heading 1;\}/u)
 		expect(out).toContain("\\trbrdrt\\brdrs\\brdrw10")
-		expect(out).toContain("\\clmgf")
-		expect(out).toContain("\\clmrg")
+		expect(out).toContain("\\clwWidth6108\\cellx6000{")
+		expect(out).not.toContain("\\clmrg")
 		expect(out).toContain("{\\*\\nesttableprops\\trowd")
 		expect(out).toContain("\\sect")
 		expect(out).toContain("\\lndscpsxn")

@@ -129,8 +129,15 @@ function reportIssues(
 
 // Dates before 1900-03-01: OpenDocument counts from 1899-12-30, the 1900 date system counts a 1900-02-29 that was
 // not (ECMA-376 Part 1 §18.17.4.1), so their serials are a day lower in SpreadsheetML. Earlier than its day 1 a
-// date has no serial there: such cells are reported, their numbers kept.
-function shiftEarlyDates(model: XlsxSheetModel, codeOf: (xf: number) => string, sheet: string, report: SheetLossyReport): void {
+// date has no serial there: such cells are reported, their numbers kept. The 1904 date system has no such day
+// (§18.17.4.2): its serials are OpenDocument's from a 1904-01-01 null date, and only a date before that is reported.
+function shiftEarlyDates(
+	model: XlsxSheetModel,
+	codeOf: (xf: number) => string,
+	sheet: string,
+	report: SheetLossyReport,
+	date1904: boolean
+): void {
 	const memo = new Map<string, boolean>()
 	const xfs = new Map<number, boolean>()
 	const writes: CellWrite[] = []
@@ -144,13 +151,19 @@ function shiftEarlyDates(model: XlsxSheetModel, codeOf: (xf: number) => string, 
 
 				const value = block.values[k] ?? 0
 
-				if (value >= 61) continue
+				if (value >= (date1904 ? 0 : 61)) continue
 
 				const xf = block.styles[k] ?? 0
 				let date = xfs.get(xf)
 
 				if (date === undefined) xfs.set(xf, (date = showsDate(codeOf(xf), memo)))
 				if (!date) continue
+
+				if (date1904) {
+					report.note("other", sheet)
+
+					continue
+				}
 
 				if (value < 1) {
 					if (Math.floor(value) !== 0 || value < 0) report.note("other", sheet)
@@ -824,7 +837,7 @@ export async function odsToXlsx(source: Uint8Array, options: SheetConvertOptions
 			return { ok: false, reason: "tooLarge", message: `${entry.name} has more formatted rows than a conversion lays out` }
 		if (!placeRowRuns(model, rowBudget))
 			return { ok: false, reason: "tooLarge", message: `${entry.name} has more rows of their own than a conversion lays out` }
-		shiftEarlyDates(model, xf => probe.styles.numFmtCode(xf), entry.name, report)
+		shiftEarlyDates(model, xf => probe.styles.numFmtCode(xf), entry.name, report, ods.date1904)
 
 		// Content hidden on a protected sheet (style:cell-protect="hidden-and-protected", ODF 1.3 Part 3 §20.253):
 		// SpreadsheetML hides a formula, never the value.

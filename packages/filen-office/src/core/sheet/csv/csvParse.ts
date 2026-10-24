@@ -31,15 +31,22 @@ function fieldEnd(text: string, from: number, separator: number): number {
 }
 
 // How much a parse may build: past any of these it throws, before the rest is read (an empty record counts as one
-// cell).
+// cell). `keepFirstRows`: a record past maxRows ends the parse instead, its first maxRows records kept (as Excel and
+// LibreOffice open a file longer than a sheet).
 export interface CsvLimits {
 	readonly maxCells?: number
 	readonly maxRows?: number
 	readonly maxColumns?: number
+	readonly keepFirstRows?: boolean
 }
 
 // The records of `text`, separated by `delimiter` (one character).
 export function parseCsv(text: string, delimiter: string, limits: CsvLimits = {}): string[][] {
+	return parseCsvRecords(text, delimiter, limits).rows
+}
+
+// The records of `text`; `complete` is false when keepFirstRows stopped the parse before the end of the text.
+export function parseCsvRecords(text: string, delimiter: string, limits: CsvLimits = {}): { rows: string[][]; complete: boolean } {
 	const separator = delimiter.charCodeAt(0)
 	const maxCells = limits.maxCells ?? Infinity
 	const maxRows = limits.maxRows ?? Infinity
@@ -53,6 +60,12 @@ export function parseCsv(text: string, delimiter: string, limits: CsvLimits = {}
 	let i = 0
 
 	while (i < length) {
+		if (width === 0 && rows.length >= maxRows) {
+			if (limits.keepFirstRows === true) return { rows, complete: false }
+
+			throw new Error("spreadsheet: too many rows")
+		}
+
 		let field: string
 
 		if (text.charCodeAt(i) === QUOTE) {
@@ -100,8 +113,6 @@ export function parseCsv(text: string, delimiter: string, limits: CsvLimits = {}
 
 		if (++cellCount > maxCells) throw new Error("spreadsheet: too many cells")
 
-		if (width === 0 && rows.length >= maxRows) throw new Error("spreadsheet: too many rows")
-
 		fields[width++] = field
 
 		if (width > maxColumns) throw new Error("spreadsheet: too many columns")
@@ -109,7 +120,7 @@ export function parseCsv(text: string, delimiter: string, limits: CsvLimits = {}
 		if (i >= length) {
 			rows.push(fields.slice(0, width))
 
-			return rows
+			return { rows, complete: true }
 		}
 
 		const code = text.charCodeAt(i++)
@@ -124,7 +135,7 @@ export function parseCsv(text: string, delimiter: string, limits: CsvLimits = {}
 
 				rows.push(fields.slice(0, width))
 
-				return rows
+				return { rows, complete: true }
 			}
 
 			continue
@@ -138,7 +149,7 @@ export function parseCsv(text: string, delimiter: string, limits: CsvLimits = {}
 		width = 0
 	}
 
-	return rows
+	return { rows, complete: true }
 }
 
 const DELIMITERS = [",", ";", "\t", "|"]

@@ -161,6 +161,20 @@ describe("fo:padding of an ODT paragraph", () => {
 			expect(pitch(await lines(three(first, second)), "One", "Two")).toBeCloseTo(85.8, 0)
 		})
 
+		it("keeps bordered paragraphs apart with style:join-border false on the first", async () => {
+			const bordered = 'fo:border="0.02in solid #000000" fo:padding="0.2in"'
+			const all = await lines(three(`${bordered} style:join-border="false"`, bordered))
+
+			expect(pitch(all, "One", "Two")).toBeCloseTo(45.5, 0)
+		})
+
+		it("keeps padding to the twip, not to the whole point", async () => {
+			const all = await lines(three('fo:padding="0.2in"', 'fo:padding="0.2in" fo:margin-left="0.5in"'))
+
+			expect(pitch(all, "One", "Two")).toBeCloseTo(42.6, 1)
+			expect(shift(all, "Before", "One")).toBeCloseTo(14.4, 1)
+		})
+
 		it("joins when only the second sets style:join-border false", async () => {
 			expect(
 				pitch(await lines(three('fo:padding="0.5in"', 'fo:padding="0.5in" style:join-border="false"')), "One", "Two")
@@ -194,6 +208,34 @@ describe("fo:padding of an ODT paragraph", () => {
 		expect(await kinds('fo:padding-top="0.5in"')).toContain("paragraphPadding")
 		expect(await kinds('fo:border-left="0.02in solid #000000"')).toContain("paragraphPadding")
 		expect(await kinds('fo:border-top="0.02in solid #000000" fo:padding-top="0.1in"')).not.toContain("paragraphPadding")
+	})
+
+	it("is written in whole points to a converted .docx, and a line kept apart is counted", async () => {
+		const converted = async (properties: string): Promise<{ document: string; kinds: string[] }> => {
+			const result = await convertText(odtBytes({ styles: STYLES, ...padded(properties) }), "odt", "docx")
+
+			if (!result.ok) throw new Error(result.refusal.message)
+
+			const archive = await ZipArchive.open(bytesSource(result.bytes))
+			const entry = archive.get("word/document.xml")
+
+			return {
+				document: entry === undefined ? "" : decodeUtf8(await archive.read(entry)),
+				kinds: result.lossy.features.map(feature => feature.kind)
+			}
+		}
+		const sides =
+			'fo:border-top="0.02in solid #000000" fo:border-bottom="0.02in solid #000000" fo:padding-top="0.2in" fo:padding-bottom="0.2in"'
+		const plain = await converted(sides)
+
+		expect(plain.document).toContain('w:space="14"')
+		expect(plain.document).not.toMatch(/w:space="\d+\./u)
+		expect(plain.kinds).not.toContain("paragraphPadding")
+
+		const apart = await converted(`${sides} style:join-border="false"`)
+
+		expect(apart.document).not.toContain("w:frame")
+		expect(apart.kinds).toContain("paragraphPadding")
 	})
 })
 

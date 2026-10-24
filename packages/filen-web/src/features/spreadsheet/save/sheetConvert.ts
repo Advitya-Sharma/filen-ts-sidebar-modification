@@ -31,9 +31,14 @@ export function liveConversion(
 			return unlessAborted(await handle.session.query("saveAs.format", { format, language: browserLanguage() }, { signal }), signal)
 		}
 
-		const { bytes } = await handle.session.query("saveAs.cells", {}, { signal })
+		const cells = await handle.session.query("saveAs.cells", {}, { signal })
+
+		if (!cells.ok) {
+			return unlessAborted({ ok: false, reason: cells.refusal.reason, message: "The cells could not all be read" }, signal)
+		}
+
 		// The workbook worker takes no signal for this step: a Cancel meanwhile is read once it answers.
-		const xlsx = await textToXlsx(bytes, fileStem(name))
+		const xlsx = await textToXlsx(cells.bytes, fileStem(name))
 
 		if (signal.aborted) {
 			return ABORTED

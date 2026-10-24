@@ -3,7 +3,9 @@ import { SHEET_MAX_COLS, SHEET_MAX_ROWS, type SheetProtectedAction, type SheetRa
 import type { AxisShift } from "../xlsx/refs/axis"
 import { SourceAxis } from "./write/axis"
 import { DEFAULT_FORMAT, DEFAULT_VIEW, XlsxSheet } from "../xlsx/read/worksheet"
-import type { SheetStore } from "../xlsx/model/store"
+import { SheetStore } from "../xlsx/model/store"
+import { SheetStrings } from "../xlsx/model/strings"
+import { FormulaTable } from "../xlsx/model/formulas"
 import {
 	rowRunAt,
 	type XlsxDefinedName,
@@ -17,7 +19,7 @@ import {
 	type XlsxWorkbookProtection
 } from "../xlsx/model/types"
 import type { OdsIssues } from "./issues"
-import { rangeAddress, sheetRef } from "./formula/toXlsx"
+import { rangeAddresses, sheetRef, withoutSheet } from "./formula/toXlsx"
 import type { OdsContent, OdsTable, OdsTableProtection } from "./read/content"
 import { NULL_DATE_1899, NULL_DATE_1904 } from "./read/values"
 import type { OdsCellStyles } from "./styles/cell"
@@ -278,13 +280,13 @@ export function* buildSheetsSteps(
 		models.push(model)
 
 		if (table.printRanges !== undefined && table.printRanges.trim() !== "") {
-			const translated = rangeAddress(table.printRanges)
+			const translated = rangeAddresses(table.printRanges)
 
-			if ("text" in translated) {
+			if ("parts" in translated) {
 				definedNames.push({
 					name: "_xlnm.Print_Area",
 					sheet: id,
-					formula: anchored(translated.text, table.name),
+					formula: anchored(translated.parts, table.name),
 					hidden: false,
 					source: null
 				})
@@ -308,6 +310,28 @@ export function* buildSheetsSteps(
 		if (titles.length > 0)
 			definedNames.push({ name: "_xlnm.Print_Titles", sheet: id, formula: titles.join(","), hidden: false, source: null })
 	})
+
+	// A spreadsheet of no table (the schema allows none) opens as one empty sheet, as LibreOffice opens it; a save
+	// writes it as a new table.
+	if (entries.length === 0) {
+		const part = "xl/worksheets/sheet1.xml"
+
+		entries.push({ id: 0, name: "Sheet1", state: "visible", kind: "worksheet", sheetId: 1, relationshipId: "rId1", part, model: null })
+		models.push(
+			new XlsxSheet({
+				id: 0,
+				part,
+				store: new SheetStore([], new SheetStrings(), new FormulaTable()),
+				sections: [],
+				relationships: new Relationships([]),
+				rootStart: 0,
+				rootOpenEnd: 0,
+				rootEnd: 0,
+				prefix: "",
+				utf16: false
+			})
+		)
+	}
 
 	if (activeTab >= entries.length) activeTab = 0
 
@@ -354,7 +378,13 @@ export function* buildSheetsSteps(
 		iterate: {
 			enabled: iteration?.attributes.get("table:status") === "enable",
 			count: Number(iteration?.attributes.get("table:steps") ?? "100") || 100,
-			delta: Number(iteration?.attributes.get("table:minimum-difference") ?? "0.001") || 0.001
+			// table:maximum-difference (ODF 1.3 Part 3 §19.635); earlier saves of ours wrote table:minimum-difference.
+			delta:
+				Number(
+					iteration?.attributes.get("table:maximum-difference") ??
+						iteration?.attributes.get("table:minimum-difference") ??
+						"0.001"
+				) || 0.001
 		},
 		parts: features.parts,
 		validationNames: features.sheets.map(sheet => sheet.validationNames)
@@ -362,13 +392,11 @@ export function* buildSheetsSteps(
 }
 
 // A print range as Excel's absolute references on its sheet ("Sheet1!$A$1:$D$20").
-function anchored(text: string, sheet: string): string {
-	return text
-		.split(",")
+function anchored(parts: readonly string[], sheet: string): string {
+	return parts
 		.map(part => {
-			const bang = part.lastIndexOf("!")
-			const prefix = bang < 0 ? sheetRef(sheet) : part.slice(0, bang + 1)
-			const area = bang < 0 ? part : part.slice(bang + 1)
+			const area = withoutSheet(part)
+			const prefix = area.length === part.length ? sheetRef(sheet) : part.slice(0, part.length - area.length)
 
 			return prefix + area.replace(/\$?([A-Z]{1,3})\$?(\d+)/g, "$$$1$$$2")
 		})

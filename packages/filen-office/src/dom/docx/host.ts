@@ -1345,7 +1345,10 @@ function openRtf(
 								throw new Error(reply.t === "rtfWritten" ? (reply.error ?? "") : "The document could not be written")
 							if (!reply.answer.ok) throw new DocxRtfRefusal(reply.answer.reason, reply.answer.message)
 
-							return reply.answer.bytes
+							return {
+								bytes: reply.answer.bytes,
+								...(reply.answer.notices === undefined ? {} : { notices: reply.answer.notices })
+							}
 						},
 						async convertEdited(edits, convertOptions = {}) {
 							const signal = convertOptions.signal

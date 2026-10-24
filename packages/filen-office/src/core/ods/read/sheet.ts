@@ -19,6 +19,7 @@ import {
 import type { OdsCellStyles } from "../styles/cell"
 import type { OdsIssues } from "../issues"
 import { OdsReadError } from "./errors"
+import { OdsSourceRows } from "../source"
 import { StyleRuns, StyleRunsBuilder } from "./runs"
 
 // One table:table read into the xlsx sheet model's parts, row run by row run: content cells are materialised (a
@@ -139,6 +140,7 @@ export interface OdsBuiltSheet {
 	readonly headerCols: readonly [number, number] | null
 	readonly rowBreaks: readonly number[]
 	readonly colBreaks: readonly number[]
+	readonly rowProps: OdsSourceRows
 	readonly recalculate: ReadonlySet<number>
 	// The rows the table's row elements give (their repeats), and the columns its column elements declare.
 	readonly rowCount: number
@@ -199,6 +201,7 @@ export class OdsSheetBuilder {
 	// Rows of each height whose style sets it (not LibreOffice's optimal height).
 	private readonly setHeights = new Map<number, number>()
 	private readonly rowBreaks: number[] = []
+	private readonly rowProps = new OdsSourceRows()
 	private readonly colBreaks: number[] = []
 	headerRows: [number, number] | null = null
 	headerCols: [number, number] | null = null
@@ -443,6 +446,15 @@ export class OdsSheetBuilder {
 		const style = this.styles.row(input.style)
 
 		if (style.pageBreak && first > 0) this.rowBreaks.push(first)
+
+		this.rowProps.add(first, {
+			heightPt: style.heightPt,
+			custom: style.custom,
+			pageBreak: style.pageBreak,
+			hidden: input.hidden,
+			outline: Math.min(7, input.outline),
+			defaultCellStyle: input.defaultCellStyle
+		})
 
 		// A row whose style gives no height has LibreOffice's default (ODF 1.3 Part 3 §17.17.2 leaves it to the
 		// application), whatever the commonest height of the others.
@@ -696,6 +708,7 @@ export class OdsSheetBuilder {
 			headerCols: this.headerCols,
 			rowBreaks: this.rowBreaks,
 			colBreaks: this.colBreaks,
+			rowProps: this.rowProps,
 			recalculate: this.recalculate,
 			rowCount: this.row,
 			columnCount: this.nextColumn

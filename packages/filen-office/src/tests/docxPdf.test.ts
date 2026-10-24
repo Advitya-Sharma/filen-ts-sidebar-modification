@@ -147,6 +147,28 @@ describe("DOCX to PDF", () => {
 		expect(cellOrder([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], source => roles[source] ?? role())).toEqual([0, 1, 4, 2, 3, 7, 6, 5, 8, 9])
 	})
 
+	it("tags a table's rows in row order when a merged cell's content is laid out after later rows", () => {
+		const columns = [
+			{ span: 1, top: 0, end: 3 },
+			{ span: 1, top: 0, end: 0 }
+		]
+		const cell = (row: number, index: number): DocxPdfCell => ({ table: 1, row, cell: index, header: false, columns })
+		const role = (...cells: DocxPdfCell[]): DocxPdfRole => ({ kind: "paragraph", level: 0, list: 0, cells })
+		// A page piece of a table: rows 2 and 3, then the rest of row 1's merged cell (a row of the page before), then
+		// a second table; 0 before the tables, 6 after.
+		const roles: DocxPdfRole[] = [
+			role(),
+			role(cell(2, 1)),
+			role(cell(3, 1)),
+			role(cell(1, 0)),
+			role(cell(1, 1)),
+			role({ table: 2, row: 0, cell: 0, header: false, columns: [{ span: 1, top: 0, end: 0 }] }),
+			role()
+		]
+
+		expect(cellOrder([0, 1, 2, 3, 4, 5, 6], source => roles[source] ?? role())).toEqual([0, 3, 4, 1, 2, 5, 6])
+	})
+
 	it("titles a document without a title of its own by the name it is given", async () => {
 		const pdf = await openPdf((await pdfOf(await snapshotOf(structuredDocx({ title: false }), { title: "Budget 2026" }))).bytes)
 

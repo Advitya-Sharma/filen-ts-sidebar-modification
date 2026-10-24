@@ -15,6 +15,8 @@ export const previewDocxPdf = {
 	previewDocxPdfCancel: "Cancel",
 	/** Toast after the PDF was downloaded, when some characters had no font to draw them (they show as boxes) */
 	previewDocxPdfMissingGlyphs: "Some characters could not be drawn in the PDF",
+	/** Toast after the PDF was downloaded, when content of the file that no page of it draws (shapes, equations, embedded objects without a picture of them, text in an unsupported code page) was left out */
+	previewDocxPdfContentLeftOut: "Some content could not be included in the PDF",
 	/** Toast after the PDF was downloaded, when pictures the PDF cannot carry (unreadable or unsupported images, placeholders) were left out */
 	previewDocxPdfSimplified: "Some pictures could not be included in the PDF",
 	/** Toast after the PDF was downloaded, when some text was drawn without its font's shaping (ligatures, joined or reordered letters) because the font asked for more work than allowed */

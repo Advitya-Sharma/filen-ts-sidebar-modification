@@ -2353,7 +2353,8 @@ function points(value: number): number {
 // that draws nothing counting as none unless it carries a shadow (which keeps neighbours apart), the same spacing at
 // the start and end, and no w:frame on the open box's bottom (style:join-border false).
 function joinable(a: ResolvedParagraphBorders | undefined, b: ResolvedParagraphBorders | undefined): boolean {
-	if (a?.bottom?.style === "none" && a.bottom.frame) return false
+	// style:join-border false on the upper paragraph, whatever its bottom line.
+	if (a?.bottom?.frame === true) return false
 	if (a === b) return true
 
 	const line = (border: ResolvedBorder | undefined): ResolvedBorder | undefined =>

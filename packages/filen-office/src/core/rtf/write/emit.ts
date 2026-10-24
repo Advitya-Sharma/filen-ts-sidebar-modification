@@ -23,6 +23,10 @@ export interface EmitContext {
 	author(name: string): number
 	// Writes the group of note `id` of the part `kind`.
 	note(kind: NoteKind, id: string, out: RtfOut): void
+	// Writes comment `id` where its reference is: \\atnid, \\atnauthor, \\chatn and its \\annotation group.
+	comment(id: string, out: RtfOut): void
+	// The bookmark text of comment `id`'s \\atrfstart and \\atrfend (its \\atnref).
+	commentTag(id: string): string
 	// The source group of the picture a w:drawing shows (refuses one the edit changed).
 	picture(document: XmlDocument, drawing: number): Uint8Array
 	// The external target of a hyperlink relationship of `document`'s part.
@@ -776,6 +780,9 @@ type Item =
 			readonly custom: boolean
 	  }
 	| { readonly kind: "noteMark"; readonly rPr: number; readonly revision: Revision | undefined }
+	| { readonly kind: "commentRange"; readonly start: boolean; readonly id: string }
+	| { readonly kind: "comment"; readonly rPr: number; readonly revision: Revision | undefined; readonly id: string }
+	| { readonly kind: "commentMark"; readonly rPr: number; readonly revision: Revision | undefined }
 	| { readonly kind: "picture"; readonly rPr: number; readonly revision: Revision | undefined; readonly bytes: Uint8Array }
 
 const TEXT = new Set(["t", "delText", "instrText", "delInstrText"])
@@ -863,6 +870,15 @@ class Content {
 					this.items.push({ kind: "bookmark", start: true, name })
 					break
 				}
+				case "commentRangeStart":
+				case "commentRangeEnd":
+					only(document, child, ["w:id"])
+					this.items.push({
+						kind: "commentRange",
+						start: local === "commentRangeStart",
+						id: document.attribute(child, "w:id") ?? ""
+					})
+					break
 				case "bookmarkEnd": {
 					const name = this.bookmarks.get(document.attribute(child, "w:id") ?? "")
 
@@ -960,6 +976,13 @@ class Content {
 				case "footnoteRef":
 				case "endnoteRef":
 					this.items.push({ kind: "noteMark", rPr, revision })
+					break
+				case "commentReference":
+					only(document, child, ["w:id"])
+					this.items.push({ kind: "comment", rPr, revision, id: document.attribute(child, "w:id") ?? "" })
+					break
+				case "annotationRef":
+					this.items.push({ kind: "commentMark", rPr, revision })
 					break
 				case "drawing":
 					this.items.push({ kind: "picture", rPr, revision, bytes: this.context.picture(document, child) })
@@ -1127,6 +1150,29 @@ function writeItems(document: XmlDocument, items: readonly Item[], context: Emit
 				runWords(document, item.rPr, item.revision, context, out)
 				out.word("chftn").rtf("}")
 				break
+			case "commentRange": {
+				// RTF 1.9.1, "Comments (Annotations)": the range a comment covers, by the text its \\atnref has.
+				if (state.length > 0) refuse("comment", "a comment's range in a field")
+
+				const encoded = encodeText(context.commentTag(item.id), context.codepage)
+
+				out.rtf("{\\*").word(item.start ? "atrfstart" : "atrfend")
+				if (encoded.unicode) out.word("uc", 1)
+				out.bytes(asText(encoded.rtf)).rtf("}")
+				break
+			}
+			case "comment":
+				if (state.length > 0) refuse("comment", "in a field")
+				out.rtf("{").word("plain")
+				runWords(document, item.rPr, item.revision, context, out)
+				context.comment(item.id, out)
+				out.rtf("}")
+				break
+			case "commentMark":
+				out.rtf("{").word("plain")
+				runWords(document, item.rPr, item.revision, context, out)
+				out.word("chatn").rtf("}")
+				break
 			case "picture":
 				out.rtf("{").word("plain")
 				runWords(document, item.rPr, item.revision, context, out)
@@ -1264,8 +1310,10 @@ export interface SourceTableWords {
 // A table's rows as RTF (\trowd, row and cell definitions, \cellxN, the cells' blocks, \row; at a nesting depth past 1
 // the cells end with \nestcell and the row's definitions go in {\*\nesttableprops ... \nestrow}: RTF 1.9.1, "Tables").
 // `base`: the left edge of the table's grid where the source has one (its rows' least \trleftN); else the table's
-// indent less its leading cell margin. Each cell's right edge comes from the grid (its w:gridSpan columns); a cell
-// spanning columns is written as \clmgf and one \clmrg cell per further column, so readers keep the grid.
+// indent less its leading cell margin. Each cell's right edge comes from the grid (its w:gridSpan columns). A cell
+// spanning columns is one cell whose \cellxN is the span's right edge, as Word and LibreOffice write it, where other
+// rows of the table have a cell edge at each column inside the span (a reader's grid is every row's edges); else it is
+// \clmgf and one \clmrg cell per further column, so readers keep the grid.
 export interface RowWriter {
 	// Writes a cell's blocks (its paragraphs, nested tables) at `depth`, the last paragraph ending the cell.
 	cell(tc: number, depth: number, out: RtfOut): void
@@ -1303,7 +1351,7 @@ export function writeRow(
 		grid: gridOf(document, tblPr)
 	}
 	const defs = new RtfOut()
-	const spans = rowDefinition(document, view, context, defs, base, source)
+	const spans = rowDefinition(document, view, context, defs, base, source, dividedEdges(document, row, view.grid.length))
 	const change = rowChange(document, view)
 
 	if (change !== undefined) {
@@ -1417,7 +1465,8 @@ function rowDefinition(
 	context: EmitContext,
 	out: RtfOut,
 	base: number | undefined,
-	source?: SourceTableWords
+	source?: SourceTableWords,
+	divided?: Uint32Array
 ): number[] {
 	out.word("trowd")
 
@@ -1692,7 +1741,12 @@ function rowDefinition(
 		const edges: number[] = []
 
 		if (columns.length === span && view.grid.length > 0) {
-			for (const columnWidth of columns) edges.push((edges.at(-1) ?? right) + columnWidth)
+			let inner = true
+
+			for (let edge = column + 1; edge < column + span && inner; edge++) inner = (divided?.[edge] ?? 0) > 0
+
+			if (span > 1 && inner) edges.push(columns.reduce((sum, columnWidth) => sum + columnWidth, right))
+			else for (const columnWidth of columns) edges.push((edges.at(-1) ?? right) + columnWidth)
 		} else {
 			edges.push(right + cellWidth)
 		}
@@ -1719,6 +1773,71 @@ function rowDefinition(
 	}
 
 	return spans
+}
+
+// Per grid edge (0 the table's left, k after its kth column), how many of the row's table's rows have a cell edge
+// there (a row's left, after w:gridBefore, and each cell's right). Counted once per table.
+const DIVIDED = new WeakMap<XmlDocument, Map<number, Uint32Array>>()
+
+function dividedEdges(document: XmlDocument, row: number, columns: number): Uint32Array | undefined {
+	let table = document.parent(row)
+
+	while (table >= 0 && document.localName(table) !== "tbl") table = document.parent(table)
+
+	if (table < 0 || columns === 0) return undefined
+
+	let tables = DIVIDED.get(document)
+
+	if (tables === undefined) {
+		tables = new Map()
+		DIVIDED.set(document, tables)
+	}
+
+	const cached = tables.get(table)
+
+	if (cached !== undefined) return cached
+
+	const counts = new Uint32Array(columns + 1)
+	const mark = (edge: number): void => {
+		if (edge <= columns) counts[edge] = (counts[edge] ?? 0) + 1
+	}
+	// The table's rows, also those inside w:sdt or w:customXml; not those of tables nested in its cells.
+	const stack = children(document, table)
+
+	while (stack.length > 0) {
+		const node = stack.pop() ?? -1
+		const local = document.localName(node)
+
+		if (local === "tr") {
+			let column = 0
+
+			for (const child of children(document, node)) {
+				const name = document.localName(child)
+
+				if (name === "trPr") {
+					const before = children(document, child).find(property => document.localName(property) === "gridBefore")
+
+					if (before !== undefined) column = int(document, before, "w:val") ?? 0
+					mark(column)
+				} else if (name === "tc") {
+					const tcPr = children(document, child).find(property => document.localName(property) === "tcPr")
+					const gridSpan =
+						tcPr === undefined
+							? undefined
+							: children(document, tcPr).find(property => document.localName(property) === "gridSpan")
+
+					column += gridSpan === undefined ? 1 : Math.max(1, int(document, gridSpan, "w:val") ?? 1)
+					mark(column)
+				}
+			}
+		} else if (local !== "tblPr" && local !== "tblGrid" && local !== "tc") {
+			for (let child = document.firstChildElement(node); child >= 0; child = document.nextSiblingElement(child)) stack.push(child)
+		}
+	}
+
+	tables.set(table, counts)
+
+	return counts
 }
 
 function gridOf(document: XmlDocument, tblPr: number): number[] {

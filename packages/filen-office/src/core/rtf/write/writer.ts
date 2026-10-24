@@ -12,6 +12,7 @@ import {
 	charWords,
 	paraWords,
 	sectionWords,
+	toDttm,
 	writeParagraph,
 	writeRow,
 	type EmitContext,
@@ -67,6 +68,7 @@ const BODY_PART = "word/document.xml"
 // How far past the bytes it changed a span is read before the whole file is.
 const SPAN_REACH = 4 * CHECKPOINT_SPACING
 const BOOKMARK = Array.from("<w:bookmark", character => character.charCodeAt(0))
+const COMMENT_MARK = Array.from("<w:comment", character => character.charCodeAt(0))
 const BOOKMARK_END = Array.from("<w:bookmarkEnd", character => character.charCodeAt(0))
 // The bookmarkEnd's "k", rarer in markup than its "<".
 const BOOKMARK_END_K = BOOKMARK_END.indexOf(0x6b)
@@ -75,6 +77,11 @@ const R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationship
 const STORY_PART = /^word\/(document|header\d+|footer\d+|footnotes|endnotes|comments)\.xml$/u
 const RELS_PART = /^word\/_rels\/(document|header\d+|footer\d+|footnotes|endnotes|comments)\.xml\.rels$/u
 // Parts an edit may change that the RTF does not hold (the translation's own metadata).
+const COMMENTS_PART = "word/comments.xml"
+// What the docx writer adds with a new comment: each comment's last paragraph, the one it replies to, whether it is
+// resolved (MS-DOCX 2.5.3.1). An RTF annotation (RTF 1.9.1, "Comments (Annotations)") holds none of it: a reply or a
+// resolved comment is refused (commentStates).
+const COMMENTS_EXTENDED_PART = "word/commentsExtended.xml"
 const IGNORED_PARTS = new Set(["[Content_Types].xml", "docProps/core.xml", "docProps/app.xml", "word/fontTable.xml"])
 const MAX_ROUNDS = 8
 // Blocks Gate 1 plans between looks at its slice clock.
@@ -346,6 +353,63 @@ function encodeAscii(text: string): Uint8Array {
 	for (let k = 0; k < text.length; k++) out[k] = text.charCodeAt(k)
 
 	return out
+}
+
+// {\\*\\name text}: a destination holding text (\\uc1 where the text needs \\uN).
+function destination(out: RtfOut, name: string, text: string, codepage: number): void {
+	const encoded = encodeText(text, codepage)
+
+	out.rtf("{\\*").word(name)
+	if (encoded.unicode) out.word("uc", 1)
+	out.bytes(encodeAscii(encoded.rtf)).rtf("}")
+}
+
+// commentsExtended as the edit wrote it: refused where an entry threads a reply or resolves its comment.
+function commentStates(document: XmlDocument): void {
+	const root = document.documentElement()
+
+	for (let entry = document.firstChildElement(root); entry >= 0; entry = document.nextSiblingElement(entry)) {
+		for (const { name, value } of document.attributes(entry)) {
+			const local = name.slice(name.indexOf(":") + 1)
+
+			if (local === "paraIdParent")
+				throw new RtfWriteRefusal("comment", "a reply to a comment (an RTF annotation has no thread to answer in)")
+			if (local === "done" && value !== "0" && value !== "false")
+				throw new RtfWriteRefusal("comment", "a resolved comment (an RTF annotation has no resolved state)")
+		}
+	}
+}
+
+// The text of the {\\*\\atnref ...} in a source annotation group: what its range's \\atrfstart and \\atrfend hold.
+function annotationTag(bytes: Uint8Array, group: SourceRange): string {
+	const word = encodeAscii("\\atnref")
+
+	for (let at = bytes.indexOf(0x5c, group.start); at >= 0 && at < group.end; at = bytes.indexOf(0x5c, at + 1)) {
+		let k = 0
+
+		while (k < word.length && bytes[at + k] === word[k]) k++
+
+		if (k < word.length) continue
+
+		let from = at + k
+		const next = bytes[from] ?? 0
+
+		if ((next | 0x20) >= 0x61 && (next | 0x20) <= 0x7a) continue
+		if (next === 0x20) from++
+
+		let text = ""
+
+		for (let end = from; end < group.end && bytes[end] !== 0x7d; end++) {
+			const byte = bytes[end] ?? 0
+
+			if (byte === 0x5c || byte === 0x7b) return ""
+			if (byte !== 0x0d && byte !== 0x0a) text += String.fromCharCode(byte)
+		}
+
+		return text.trim()
+	}
+
+	return ""
 }
 
 // Whether markup bytes hold a relationship attribute (r:id, r:embed...).
@@ -637,6 +701,21 @@ function commonPairs(n: number, m: number, same: (i: number, j: number) => boole
 	return pairs
 }
 
+// Writes comments where their references are (RtfWriter.commentReference).
+interface CommentWriter {
+	reference(id: string, plan: Plan, out: RtfOut): void
+	tag(id: string): string
+}
+
+const NO_COMMENTS: CommentWriter = {
+	reference: () => {
+		throw new RtfWriteRefusal("comment", "no comments")
+	},
+	tag: () => {
+		throw new RtfWriteRefusal("comment", "no comments")
+	}
+}
+
 // One run of the writer over the source: the splices of every changed block, and the table entries they add.
 class Plan implements EmitContext {
 	readonly codepage: number
@@ -663,6 +742,7 @@ class Plan implements EmitContext {
 	private readonly pictures: (document: XmlDocument, drawing: number) => Uint8Array
 	private readonly newLists: ReadonlyMap<number, (out: RtfOut, listId: number) => void>
 	private readonly listOverride: (out: RtfOut, listId: number, ls: number) => void
+	private readonly comments: CommentWriter
 
 	constructor(
 		source: RtfSource,
@@ -674,9 +754,11 @@ class Plan implements EmitContext {
 		listOverride: (out: RtfOut, listId: number, ls: number) => void,
 		links: (document: XmlDocument, id: string) => string = () => {
 			throw new RtfWriteRefusal("hyperlink", "no relationships")
-		}
+		},
+		comments: CommentWriter = NO_COMMENTS
 	) {
 		this.links = links
+		this.comments = comments
 		this.source = source
 		this.notes = notes
 		this.pictures = pictures
@@ -796,6 +878,14 @@ class Plan implements EmitContext {
 		if (container?.group === undefined) throw new RtfWriteRefusal("note", `a new ${kind}`)
 
 		this.copy(container.group.start, container.group.end, out)
+	}
+
+	comment(id: string, out: RtfOut): void {
+		this.comments.reference(id, this, out)
+	}
+
+	commentTag(id: string): string {
+		return this.comments.tag(id)
 	}
 
 	picture(document: XmlDocument, drawing: number): Uint8Array {
@@ -1043,6 +1133,11 @@ class RtfWriter {
 	private readonly failed = new Map<string, Map<number, string>>()
 	private readonly preserved: readonly RtfPreserved[]
 	private notes = new Map<string, RtfContainer>()
+	// The source's comments by key(part, id), the ids of those the edit added, and each comment's range text.
+	private readonly comments = new Map<string, RtfContainer>()
+	private readonly newComments = new Set<string>()
+	private readonly tags = new Map<string, string>()
+	private nextTag = -1
 	private numbering: XmlDocument | undefined
 	private originalNumbering: XmlDocument | undefined
 	// The style sheet as edited (the translation's when the edit left it) and the styles it added.
@@ -1094,6 +1189,7 @@ class RtfWriter {
 			if (job?.clock.due === true) await turn(job)
 
 			if (container.kind === "footnote" || container.kind === "endnote") this.notes.set(id, container)
+			else if (container.kind === "comment") this.comments.set(id, container)
 
 			const original = this.originals.get(container.part)
 			const edited = this.parts.get(container.part) ?? original
@@ -1140,18 +1236,24 @@ class RtfWriter {
 			})
 		}
 
-		// Containers the edit added (a new note, comment, header): the RTF has no place for them yet.
+		// Containers the edit added: a new comment is written where its reference is (commentReference); a new note or
+		// header has no place in the RTF yet.
 		for (const [part, document] of this.parts) {
 			const root = document.documentElement()
 
-			if (part === "word/footnotes.xml" || part === "word/endnotes.xml" || part === "word/comments.xml") {
+			if (part === COMMENTS_EXTENDED_PART) continue
+
+			if (part === "word/footnotes.xml" || part === "word/endnotes.xml" || part === COMMENTS_PART) {
 				for (let child = document.firstChildElement(root); child >= 0; child = document.nextSiblingElement(child)) {
 					const id = document.attribute(child, "w:id") ?? ""
 					const type = document.attribute(child, "w:type")
 
 					if (type === "separator" || type === "continuationSeparator" || type === "continuationNotice") continue
-					if (!this.states.has(key(part, id)) && !this.source.read.containers.some(c => key(c.part, c.id) === key(part, id)))
-						throw new RtfWriteRefusal("story", `a new ${document.localName(child)}`)
+					if (!this.states.has(key(part, id)) && !this.source.read.containers.some(c => key(c.part, c.id) === key(part, id))) {
+						if (part !== COMMENTS_PART) throw new RtfWriteRefusal("story", `a new ${document.localName(child)}`)
+
+						this.newComments.add(id)
+					}
 				}
 			} else if (!this.source.read.containers.some(container => container.part === part)) {
 				throw new RtfWriteRefusal("story", `a new part ${part}`)
@@ -1257,7 +1359,8 @@ class RtfWriter {
 			(out, listId, ls) => {
 				out.rtf("{").word("listoverride").word("listid", listId).word("listoverridecount", 0).word("ls", ls).rtf("}")
 			},
-			(document, id) => this.link(document, id)
+			(document, id) => this.link(document, id),
+			{ reference: (id, target, out) => this.commentReference(id, target, out), tag: id => this.commentTag(id) }
 		)
 
 		this.planForTables = plan
@@ -2098,6 +2201,86 @@ class RtfWriter {
 
 	// ---- pictures and lists
 
+	// Comment `id` where its reference is (RTF 1.9.1, "Comments (Annotations)"): its initials (\\atnid) and author
+	// (\\atnauthor), \\chatn, then the source's \\annotation group (its edits applied) or, for a comment the edit added,
+	// one written from its w:comment: \\atnref (the text its range has), \\atndate and its paragraphs.
+	private commentReference(id: string, plan: Plan, out: RtfOut): void {
+		const document = this.parts.get(COMMENTS_PART) ?? this.originals.get(COMMENTS_PART)
+		const element = document === undefined ? -1 : containerElement(document, { part: COMMENTS_PART, id })
+
+		if (document === undefined || element < 0) throw new RtfWriteRefusal("comment", `a reference to no comment (${id})`)
+
+		for (const { name } of document.attributes(element))
+			if (!name.startsWith("xmlns") && name !== "w:id" && name !== "w:author" && name !== "w:date" && name !== "w:initials")
+				throw new RtfWriteRefusal("comment", `w:comment/@${name}`)
+
+		const initials = document.attribute(element, "w:initials") ?? ""
+		const group = this.comments.get(key(COMMENTS_PART, id))?.group
+
+		if (initials !== "") destination(out, "atnid", initials, plan.codepage)
+		destination(out, "atnauthor", document.attribute(element, "w:author") ?? "", plan.codepage)
+		out.word("chatn")
+
+		if (group !== undefined) {
+			plan.copy(group.start, group.end, out)
+
+			return
+		}
+
+		if (!this.newComments.has(id)) throw new RtfWriteRefusal("comment", `comment ${id} has no annotation`)
+
+		out.rtf("{\\*").word("annotation")
+		destination(out, "atnref", this.commentTag(id), plan.codepage)
+
+		const date = toDttm(document.attribute(element, "w:date"))
+
+		if (date !== 0) destination(out, "atndate", String(date), plan.codepage)
+
+		for (let child = document.firstChildElement(element); child >= 0; child = document.nextSiblingElement(child)) {
+			const local = document.localName(child)
+
+			if (local === "p") writeParagraph(document, child, { depth: 0, term: "par" }, plan, out)
+			else throw new RtfWriteRefusal("comment", `a ${local} in a comment`)
+		}
+
+		out.rtf("}")
+	}
+
+	// The text of comment `id`'s \\atnref, which its \\atrfstart and \\atrfend hold: the source's; for a comment the edit
+	// added, a number past every source comment's.
+	private commentTag(id: string): string {
+		const known = this.tags.get(id)
+
+		if (known !== undefined) return known
+
+		const group = this.comments.get(key(COMMENTS_PART, id))?.group
+		let tag: string
+
+		if (group !== undefined) {
+			tag = annotationTag(this.source.bytes, group)
+
+			if (tag === "") throw new RtfWriteRefusal("comment", "a range for a comment with no \\atnref")
+		} else if (this.newComments.has(id)) {
+			if (this.nextTag < 0) {
+				this.nextTag = 1
+
+				for (const container of this.comments.values()) {
+					const number = container.group === undefined ? NaN : Number(annotationTag(this.source.bytes, container.group))
+
+					if (Number.isSafeInteger(number) && number >= this.nextTag) this.nextTag = number + 1
+				}
+			}
+
+			tag = String(this.nextTag++)
+		} else {
+			throw new RtfWriteRefusal("comment", `a range for no comment (${id})`)
+		}
+
+		this.tags.set(id, tag)
+
+		return tag
+	}
+
 	private picture(document: XmlDocument, drawing: number): Uint8Array {
 		const blip = findDescendant(document, drawing, "blip")
 		const rId = blip < 0 ? undefined : document.attribute(blip, "r:embed")
@@ -2270,6 +2453,15 @@ class RtfWriter {
 		out.rtf("{")
 		if (paragraph) out.word("s", number)
 		else out.rtf("\\*").word("cs", number).word("additive")
+
+		// RTF states a style whole (\\sbasedonN only names its base): what the chain gives it first, its own after.
+		for (const base of styleChain(styles, node).slice(0, -1)) {
+			const pPr = childNamed(styles, base, "pPr")
+			const rPr = childNamed(styles, base, "rPr")
+
+			if (paragraph && pPr >= 0) paraWords(styles, pPr, plan, out)
+			if (rPr >= 0) charWords(styles, rPr, plan, out)
+		}
 
 		for (let child = styles.firstChildElement(node); child >= 0; child = styles.nextSiblingElement(child)) {
 			const local = styles.localName(child)
@@ -2629,9 +2821,22 @@ class RtfWriter {
 		// styles alike and it names no relationship or bookmark end (whose names come from blocks before it).
 		const stylesAlike = this.prove && sameNames(this.styles, actualStyles)
 
-		// Notes are numbered by where their references are: matched in that order on both sides.
-		const expectedNotes = await this.noteOrder(name => Promise.resolve(this.parts.get(name) ?? this.originals.get(name)))
-		const actualNotes = await this.noteOrder(readPart)
+		// Notes and comments are numbered by where their references are: matched in that order on both sides, and each
+		// comment's range by the comment it names.
+		const expectedMarks: string[] = []
+		const actualMarks: string[] = []
+		const expectedNotes = await this.noteOrder(name => Promise.resolve(this.parts.get(name) ?? this.originals.get(name)), expectedMarks)
+		const actualNotes = await this.noteOrder(readPart, actualMarks)
+
+		if (expectedMarks.join() !== actualMarks.join()) {
+			if (!this.prove) throw new RtfWriteRefusal("proof", "comment ranges and references read back otherwise")
+
+			// Gate 1: every block with a comment's range or reference is kept as it is.
+			for (const [id, state] of this.states)
+				state.editedBlocks.forEach((block, k) => {
+					if (includes(state.edited.raw(block), COMMENT_MARK)) this.fail(id, k, "comment")
+				})
+		}
 
 		await turn(job)
 
@@ -2644,7 +2849,7 @@ class RtfWriter {
 			// Compared where a section names them (above).
 			if (container.kind === "header" || container.kind === "footer") continue
 
-			if (container.kind === "footnote" || container.kind === "endnote") {
+			if (container.kind === "footnote" || container.kind === "endnote" || container.kind === "comment") {
 				const order = expectedNotes.get(container.kind)?.indexOf(container.id) ?? -1
 
 				if (order < 0) continue
@@ -2736,6 +2941,42 @@ class RtfWriter {
 						`${id} block ${k} reads back differently: ${difference(actual[k] ?? "", expected[k] ?? "")}`
 					)
 				}
+			}
+		}
+
+		// Comments the edit added read back with what it gave them: author, initials, date and blocks.
+		if (this.newComments.size > 0) {
+			const edited = this.parts.get(COMMENTS_PART)
+			const actualDocument = await readPart(COMMENTS_PART)
+			const expectedOrder = expectedNotes.get("comment") ?? []
+			const actualOrder = actualNotes.get("comment") ?? []
+
+			for (const id of this.newComments) {
+				const order = expectedOrder.indexOf(id)
+
+				if (order < 0) throw new RtfWriteRefusal("comment", "a new comment without its reference")
+
+				const expectedElement = edited === undefined ? -1 : containerElement(edited, { part: COMMENTS_PART, id })
+				const actualElement =
+					actualDocument === undefined
+						? -1
+						: containerElement(actualDocument, { part: COMMENTS_PART, id: actualOrder[order] ?? "" })
+
+				if (edited === undefined || actualDocument === undefined || expectedElement < 0 || actualElement < 0)
+					throw new RtfWriteRefusal("proof", `comment ${id} is not read back`)
+
+				for (const name of ["w:author", "w:initials", "w:date"])
+					if ((edited.attribute(expectedElement, name) ?? "") !== (actualDocument.attribute(actualElement, name) ?? ""))
+						throw new RtfWriteRefusal("proof", `comment ${id} reads back with another ${name}`)
+
+				const expected = blockDigestsExcept(edited, expectedElement, expectedTargets(COMMENTS_PART), () => false)
+				const actual = blockDigestsExcept(actualDocument, actualElement, actualTargets(COMMENTS_PART), () => false)
+
+				if (expected.join("\u0002") !== actual.join("\u0002"))
+					throw new RtfWriteRefusal(
+						"proof",
+						`comment ${id} reads back differently: ${difference(actual.join("\n"), expected.join("\n"))}`
+					)
 			}
 		}
 
@@ -2874,11 +3115,19 @@ class RtfWriter {
 		return part => ({ target: id => cache.get(part)?.get(id) ?? `?${id}`, style: id => names.get(id) ?? `?${id}` })
 	}
 
-	private async noteOrder(part: (name: string) => Promise<XmlDocument | undefined>): Promise<Map<NoteKind, string[]>> {
-		const order = new Map<NoteKind, string[]>([
+	// Each note and comment id in the order of its reference; with comments, each range mark and reference as the
+	// comment it names (by that order).
+	private async noteOrder(
+		part: (name: string) => Promise<XmlDocument | undefined>,
+		marks?: string[]
+	): Promise<Map<NoteKind | "comment", string[]>> {
+		const order = new Map<NoteKind | "comment", string[]>([
 			["footnote", []],
-			["endnote", []]
+			["endnote", []],
+			["comment", []]
 		])
+		const comments = order.get("comment") ?? []
+		const raw: [string, string][] = []
 		const names = [
 			"word/document.xml",
 			...new Set(this.source.read.containers.filter(c => c.kind === "header" || c.kind === "footer").map(c => c.part))
@@ -2895,11 +3144,26 @@ class RtfWriter {
 
 					if (local === "footnoteReference" || local === "endnoteReference") {
 						order.get(local === "footnoteReference" ? "footnote" : "endnote")?.push(document.attribute(child, "w:id") ?? "")
+					} else if (local === "commentReference" || local === "commentRangeStart" || local === "commentRangeEnd") {
+						const id = document.attribute(child, "w:id") ?? ""
+
+						if (local === "commentReference") comments.push(id)
+						if (marks !== undefined) raw.push([local, id])
 					} else walk(child)
 				}
 			}
 
 			walk(document.documentElement())
+		}
+
+		if (marks !== undefined) {
+			const index = new Map<string, number>()
+
+			comments.forEach((id, k) => {
+				if (!index.has(id)) index.set(id, k)
+			})
+
+			for (const [local, id] of raw) marks.push(`${local}:${index.get(id) ?? -1}`)
 		}
 
 		return order
@@ -2993,7 +3257,69 @@ function idOfName(styles: XmlDocument, name: string): string | undefined {
 	return undefined
 }
 
-// What a style is: its type, what it is based on (by name), its paragraph and run properties.
+// A style's chain: the styles it is based on, the first of them first, then the style itself.
+function styleChain(styles: XmlDocument, node: number): number[] {
+	const chain = [node]
+
+	for (let at = node; ;) {
+		const basedOn = childNamed(styles, at, "basedOn")
+		const base = basedOn < 0 ? -1 : styleElement(styles, styles.attribute(basedOn, "w:val") ?? "")
+
+		if (base < 0 || chain.includes(base)) return chain.reverse()
+
+		chain.push(base)
+		at = base
+	}
+}
+
+// Properties the chain gives (`local`: pPr or rPr), canonical: a style's own property replaces its base's,
+// w:spacing and w:ind attribute by attribute (a first line and a hanging indent replace each other).
+function chainProperties(styles: XmlDocument, chain: readonly number[], local: string): string {
+	const elements = new Map<string, string>()
+	const merged = new Map<string, Map<string, string>>()
+
+	for (const node of chain) {
+		const container = childNamed(styles, node, local)
+
+		for (let child = container < 0 ? -1 : styles.firstChildElement(container); child >= 0; child = styles.nextSiblingElement(child)) {
+			const form = canonical(styles, child)
+			const name = styles.localName(child)
+
+			// Theme fonts alone say nothing (as canonical() leaves them out of a container).
+			if (form === "<rFonts>") continue
+
+			if (name !== "spacing" && name !== "ind") {
+				elements.set(name, form)
+				continue
+			}
+
+			const attributes = merged.get(name) ?? new Map<string, string>()
+			const head = /^<[^\s>]+([^>]*)>/u.exec(form)?.[1] ?? ""
+
+			for (const match of head.matchAll(/(\S+?)="([^"]*)"/gu)) {
+				const attribute = match[1] ?? ""
+
+				if (attribute === "w:firstLine") attributes.delete("w:hanging")
+				if (attribute === "w:hanging") attributes.delete("w:firstLine")
+
+				attributes.set(attribute, match[2] ?? "")
+			}
+
+			merged.set(name, attributes)
+		}
+	}
+
+	for (const [name, attributes] of merged) {
+		const list = [...attributes].map(([attribute, value]) => `${attribute}="${value}"`).sort()
+
+		elements.set(name, `<${name}${list.length === 0 ? "" : ` ${list.join(" ")}`}>`)
+	}
+
+	return [...elements.values()].sort().join("")
+}
+
+// What a style is: its type, what it is based on (by name), and the paragraph and run properties it gives with
+// its chain (RTF states a style whole, a docx style inherits from its w:basedOn: the two agree on these).
 function styleDefinition(styles: XmlDocument, id: string, names: XmlDocument): string | undefined {
 	const node = styleElement(styles, id)
 
@@ -3002,13 +3328,14 @@ function styleDefinition(styles: XmlDocument, id: string, names: XmlDocument): s
 	const byName = styleNames(names)
 	const basedOn = childNamed(styles, node, "basedOn")
 	const parent = basedOn < 0 ? null : (byName.get(styles.attribute(basedOn, "w:val") ?? "") ?? null)
+	const chain = styleChain(styles, node)
 
 	return JSON.stringify([
 		styles.attribute(node, "w:type"),
 		// Based on Normal (\\s0) or on nothing: the same in RTF, where the style sheet may not name \\s0.
 		parent === "normal" ? null : parent,
-		canonicalChild(styles, node, "pPr"),
-		canonicalChild(styles, node, "rPr")
+		chainProperties(styles, chain, "pPr"),
+		chainProperties(styles, chain, "rPr")
 	])
 }
 
@@ -3308,6 +3635,7 @@ async function partsOf(
 		if (name === BODY_PART && body !== undefined) parts.set(name, body.edited)
 		else if (STORY_PART.test(name)) parts.set(name, slicing === undefined ? parseXml(bytes) : await parseXmlSliced(bytes, slicing))
 		else if (name === SETTINGS_PART) tracking = await trackingChange(source, parseXml(bytes))
+		else if (name === COMMENTS_EXTENDED_PART) commentStates(parseXml(bytes))
 		else if (RELS_PART.test(name) || IGNORED_PARTS.has(name) || name === "word/numbering.xml" || name === "word/styles.xml")
 			parts.set(name, parseXml(bytes))
 		// A picture the edit added: written where its drawing is (newPicture).

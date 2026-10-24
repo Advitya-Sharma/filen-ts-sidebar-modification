@@ -1,5 +1,5 @@
 import type { Slicing } from "../../core/slicing"
-import { isRtf } from "../../core/rtf/reader"
+import { isRtf, type RtfPreservedKind, type RtfReadResult } from "../../core/rtf/reader"
 import { RtfWriteRefusal } from "../../core/rtf/write/out"
 import { RtfAborted, openRtfSource, proveRtf, writeRtf, type RtfTurns } from "../../core/rtf/write/writer"
 import { openOdtSource } from "../../core/odt/write/source"
@@ -8,11 +8,11 @@ import type { DocxEngineServices } from "./engine"
 import { inThreadDocxHost, macrotaskYield } from "./host"
 import { heldSource } from "./protection"
 import type { DocxOpenOptions } from "./protocol"
-import { DocxRtfRefusal, type DocxRtf, type DocxRtfEdits, type RtfLockedBlock } from "./rtf"
+import { DocxRtfRefusal, type DocxRtf, type DocxRtfEdits, type DocxRtfSaved, type RtfLockedBlock } from "./rtf"
 import { BytePieces, OpcPackage, bytesSource, memorySink, writeZip } from "../../core/opc/index"
 import { nativeDeflate } from "../../core/docx/write/zip"
 import { convertOdtEditToDocx, type TextConversion } from "../../core/convert/text/index"
-import { TextConversionError, type TextLossyKind } from "../../core/convert/text/report"
+import { TextConversionError } from "../../core/convert/text/report"
 import { odtTranslationToDocx, rtfLossy } from "../../core/convert/text/toDocx"
 import { answerOf } from "./convert"
 
@@ -32,7 +32,7 @@ interface SourceDocument {
 	readonly untranslated: number
 	prove(turns: RtfTurns): Promise<readonly RtfLockedBlock[]>
 	// The file as edited; `bytes` is the source itself for an untouched one.
-	write(edits: DocxRtfEdits, turns: RtfTurns): Promise<Uint8Array>
+	write(edits: DocxRtfEdits, turns: RtfTurns): Promise<DocxRtfSaved>
 	// The document as edited converted to .docx: its package with the edits, never through its own writer.
 	convertEdited?(edits: DocxRtfEdits, turns: RtfTurns): Promise<TextConversion>
 	readonly bytes: Uint8Array
@@ -55,9 +55,20 @@ async function editedPackage(docx: Uint8Array, edits: DocxRtfEdits): Promise<Uin
 	return sink.bytes()
 }
 
-// What a conversion reports an RTF file lost that no page of it shows: unknown destinations (the generator's name,
-// tables of settings), bytes past its end and groups it left open.
-const UNSHOWN: ReadonlySet<TextLossyKind> = new Set<TextLossyKind>(["rtfDestination", "rtfTrailing", "rtfUnclosedGroup"])
+// What an RTF file shows that its pages, as the package draws them, leave out: shapes and objects drawn nowhere
+// (RtfReadResult.undrawn), equations, drawing objects, pictures in formats no reader takes, groups nested too deep,
+// and text in code pages the platform cannot decode. Not counted: what the package draws another way (a shape's
+// picture, a text box's text as paragraphs, WordArt, an object's result, a form field's result), state words the
+// text is shown under, and what no page shows (unknown destinations, bytes past the end, groups left open).
+const UNDRAWN: ReadonlySet<RtfPreservedKind> = new Set<RtfPreservedKind>(["math", "drawingObject", "picture", "tooDeep"])
+
+function undrawn(read: RtfReadResult): number {
+	let count = read.undrawn + read.unsupportedCodepages.length + (read.truncatedBinary ? 1 : 0)
+
+	for (const preserved of read.preserved) if (UNDRAWN.has(preserved.kind)) count++
+
+	return count
+}
 
 async function openSource(format: DocxSourceFormat, bytes: Uint8Array, turns: RtfTurns): Promise<SourceDocument | undefined> {
 	if (format === "rtf") {
@@ -69,13 +80,13 @@ async function openSource(format: DocxSourceFormat, bytes: Uint8Array, turns: Rt
 			? undefined
 			: {
 					docx: source.read.docx,
-					untranslated: rtfLossy(source.read)
-						.report("rtf", "docx")
-						.features.reduce((sum, feature) => (UNSHOWN.has(feature.kind) ? sum : sum + feature.count), 0),
+					untranslated: undrawn(source.read),
 					bytes: source.bytes,
 					prove: async proofTurns => (await proveRtf(source, proofTurns)).locked.map(({ part, offset }) => ({ part, offset })),
-					write: async (edits, writeTurns) =>
-						(await writeRtf(source, { parts: new Map(edits.parts), removed: edits.removed }, { turns: writeTurns })).bytes,
+					write: async (edits, writeTurns) => ({
+						bytes: (await writeRtf(source, { parts: new Map(edits.parts), removed: edits.removed }, { turns: writeTurns }))
+							.bytes
+					}),
 					convertEdited: async (edits, convertTurns) => {
 						try {
 							const converted = await odtTranslationToDocx(await editedPackage(source.read.docx, edits), {
@@ -107,8 +118,14 @@ async function openSource(format: DocxSourceFormat, bytes: Uint8Array, turns: Rt
 		untranslated: 0,
 		bytes: source.bytes,
 		prove: async proofTurns => (await proveOdt(source, proofTurns)).locked,
-		write: async (edits, writeTurns) =>
-			(await writeOdt(source, { parts: new Map(edits.parts), removed: edits.removed }, { turns: writeTurns })).bytes,
+		write: async (edits, writeTurns) => {
+			const written = await writeOdt(source, { parts: new Map(edits.parts), removed: edits.removed }, { turns: writeTurns })
+
+			return {
+				bytes: written.bytes,
+				...(written.notices === undefined || written.notices.length === 0 ? {} : { notices: written.notices })
+			}
+		},
 		convertEdited: async (edits, convertTurns) => convertOdtEditToDocx(await editedPackage(source.docx, edits), { turns: convertTurns })
 	}
 }
@@ -117,7 +134,7 @@ export type DocxRtfOpened =
 	{ readonly ok: true; readonly size: number; readonly untranslated: number } | { readonly ok: false; readonly notRtf: boolean }
 
 export type DocxRtfWritten =
-	{ readonly ok: true; readonly bytes: Uint8Array } | { readonly ok: false; readonly reason: string; readonly message: string }
+	({ readonly ok: true } & DocxRtfSaved) | { readonly ok: false; readonly reason: string; readonly message: string }
 
 export interface DocxRtfServer {
 	open(id: number, bytes: Uint8Array, format?: DocxSourceFormat): Promise<DocxRtfOpened>
@@ -236,7 +253,7 @@ export function docxRtfServer(slicing?: Slicing): DocxRtfServer {
 					const written = await source.write(edits, document.turns)
 
 					// An untouched file is the source itself: a copy goes, the source stays.
-					return { ok: true, bytes: written === source.bytes ? written.slice() : written }
+					return { ...written, ok: true, bytes: written.bytes === source.bytes ? written.bytes.slice() : written.bytes }
 				} catch (error) {
 					if (error instanceof RtfWriteRefusal || error instanceof OdtWriteRefusal)
 						return { ok: false, reason: error.reason, message: error.message }
@@ -312,7 +329,7 @@ export function inThreadDocxRtf(services: (options: DocxOpenOptions) => DocxEngi
 
 						if (!written.ok) throw new DocxRtfRefusal(written.reason, written.message)
 
-						return written.bytes
+						return written
 					},
 					async convertEdited(edits, convertOptions = {}) {
 						if (convertOptions.signal?.aborted === true) return { kind: "aborted" }

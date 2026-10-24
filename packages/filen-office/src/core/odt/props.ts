@@ -433,18 +433,24 @@ function borderLine(value: string, lineWidths: string | undefined): BorderLine |
 	return { style: value_, size: Math.max(2, Math.min(96, eighths(total))), color: hex }
 }
 
-function borderXml(tag: string, line: BorderLine | undefined, space: number): string {
-	return line === undefined
-		? `<w:${tag} w:val="nil"/>`
-		: `<w:${tag} w:val="${line.style}" w:sz="${line.size}" w:space="${space}" w:color="${line.color}"/>`
+// w:space in points to the twip. ST_PointMeasure holds whole points (ECMA-376 Part 1 §17.18.68); the translation
+// keeps the fraction for this engine's layout, and a converted .docx rounds it.
+function space(points: number): number {
+	return Math.round(Math.max(0, points) * 20) / 20
 }
 
-// A border value as a WordprocessingML border, `padding` between it and what it surrounds (w:space holds whole
-// points, with no upper bound: ECMA-376 Part 1 §17.18.68).
+function borderXml(tag: string, line: BorderLine | undefined, padding: number, apart = false): string {
+	return line === undefined
+		? `<w:${tag} w:val="nil"/>`
+		: `<w:${tag} w:val="${line.style}" w:sz="${line.size}" w:space="${space(padding)}" w:color="${line.color}"${apart ? ' w:frame="1"' : ""}/>`
+}
+
+// A border value as a WordprocessingML border, `padding` between it and what it surrounds (no upper bound:
+// ECMA-376 Part 1 §17.18.68).
 export function border(tag: string, value: string | undefined, padding: string | undefined, lineWidths?: string): string {
 	if (value === undefined) return ""
 
-	return borderXml(tag, borderLine(value, lineWidths), Math.max(0, Math.round(parseLength(padding) ?? 0)))
+	return borderXml(tag, borderLine(value, lineWidths), parseLength(padding) ?? 0)
 }
 
 const SIDES = ["top", "left", "bottom", "right"] as const
@@ -455,21 +461,21 @@ type Side = (typeof SIDES)[number]
 // a line nor padding. LibreOffice puts the line and the padding between the margin and the text, a line or not
 // (measured); padding beside no line is a border that draws nothing ("none") with its spacing. The layout keeps such
 // borders, sets the text inside the borders and joins neighbours' borders as LibreOffice does when the translation
-// asks (ODF_PADDING). A "none" border also carries what keeps neighbours apart: a shadow (w:shadow) and, below,
-// style:join-border false (w:frame). w:space holds whole points.
+// asks (ODF_PADDING). The bottom border also carries what keeps neighbours apart, style:join-border false,
+// as w:frame, a line or not; a "none" border carries a shadow (w:shadow) too.
 function paragraphSide(side: Side, resolved: Attributes): string {
 	const padding = Math.max(0, parseLength(resolved.get(`fo:padding-${side}`)) ?? 0)
 	const value = resolved.get(`fo:border-${side}`)
 	const line = value === undefined ? undefined : borderLine(value, resolved.get(`style:border-line-width-${side}`))
+	const apart = side === "bottom" && resolved.get("style:join-border") === "false"
 
-	if (line !== undefined) return borderXml(side, line, Math.round(padding))
+	if (line !== undefined) return borderXml(side, line, padding, apart)
 
 	const shadow = (resolved.get("style:shadow") ?? "none") !== "none"
-	const apart = side === "bottom" && resolved.get("style:join-border") === "false"
 
 	if (padding <= 0 && !shadow && !apart) return value === undefined ? "" : borderXml(side, undefined, 0)
 
-	return `<w:${side} w:val="none" w:sz="0" w:space="${Math.round(padding)}"${shadow ? ' w:shadow="1"' : ""}${apart ? ' w:frame="1"' : ""}/>`
+	return `<w:${side} w:val="none" w:sz="0" w:space="${space(padding)}"${shadow ? ' w:shadow="1"' : ""}${apart ? ' w:frame="1"' : ""}/>`
 }
 
 export interface ParagraphOptions {

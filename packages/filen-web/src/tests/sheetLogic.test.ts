@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { parseNameBox } from "@/features/spreadsheet/lib/nameBox.logic"
-import { readOnlyNoteKey, refusalKey, viewOnlyKey } from "@/features/spreadsheet/lib/sheetMessages.logic"
+import { csvRefusalKey, readOnlyNoteKey, refusalKey, viewOnlyKey } from "@/features/spreadsheet/lib/sheetMessages.logic"
 import { SheetEventRelay } from "@/features/spreadsheet/lib/sheetEvents"
 import type { SheetEvent } from "@filen/office/core/sheet"
 import { preview } from "@/locales/en/preview"
@@ -27,12 +27,33 @@ describe("view-only and refusal messages", () => {
 	const base = { editable: true, readOnlyReason: undefined, unnamed: false, renamed: false, kind: "xlsx" } as const
 
 	it("names every view-only reason with a string the catalog has", () => {
-		for (const reason of ["legacyFormat", "lossy", "tooLarge", "unsafe", "signed", "readOnlyRecommended", "modifyPassword"] as const) {
+		for (const reason of [
+			"legacyFormat",
+			"lossy",
+			"tooLarge",
+			"unsafe",
+			"signed",
+			"readOnlyRecommended",
+			"modifyPassword",
+			"incomplete"
+		] as const) {
 			expect(preview).toHaveProperty(viewOnlyKey(reason, "xlsx"))
 		}
 
+		expect(viewOnlyKey("incomplete", "csv")).toBe("previewSheetReadOnlyIncomplete")
+
 		expect(viewOnlyKey("unsafe", "csv")).toBe("previewSpreadsheetReadOnlyUnsafe")
 		expect(viewOnlyKey("unsafe", "xlsx")).toBe("previewSpreadsheetReadOnlyLossy")
+	})
+
+	it("says why a CSV download was refused: too large, a text file read in part, or that it failed", () => {
+		expect(csvRefusalKey({ reason: "tooLarge", detail: "csv" })).toBe("previewSheetDownloadCsvTooLarge")
+		expect(csvRefusalKey({ reason: "tooLarge", detail: "incomplete" })).toBe("previewSheetReadOnlyIncomplete")
+		expect(csvRefusalKey({ reason: "unsupported", detail: "unreadable" })).toBe("previewSheetDownloadCsvFailed")
+
+		for (const key of ["previewSheetDownloadCsvTooLarge", "previewSheetReadOnlyIncomplete", "previewSheetDownloadCsvFailed"]) {
+			expect(preview).toHaveProperty(key)
+		}
 	})
 
 	it("puts the app's own reasons before the session's verdict, and says a legacy workbook whoever looks", () => {

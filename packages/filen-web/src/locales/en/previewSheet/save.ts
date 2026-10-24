@@ -5,6 +5,8 @@ export const previewSheetSave = {
 	previewSheetFileMenu: "File",
 	/** Toast — the sheet could not be turned into a CSV file */
 	previewSheetDownloadCsvFailed: "This sheet couldn't be downloaded as CSV.",
+	/** Toast — the sheet as a CSV file would be larger than the browser can download (its cells span too many rows and columns) */
+	previewSheetDownloadCsvTooLarge: "This sheet is too large to download as CSV.",
 	/** Spreadsheet viewer — file menu submenu of the formats the file can be downloaded as (a local download; the file in the drive is unchanged) */
 	previewSheetDownloadAs: "Download as",
 	/** File menu → Download as — item downloading the sheet on show (its print area, as it prints) as a PDF file */

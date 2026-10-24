@@ -218,7 +218,7 @@ export function sheetWorkerHost(worker: SheetWorkerLike): SheetHost {
 		}
 	}
 
-	const lockedFile = (s: number, open: Open, scheme: "standard" | "agile", spinCount: number): SheetLockedFile => ({
+	const lockedFile = (s: number, open: Open, scheme: SheetLockedFile["scheme"], spinCount: number): SheetLockedFile => ({
 		scheme,
 		spinCount,
 		unlock(password, options = {}) {

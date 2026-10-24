@@ -1,4 +1,4 @@
-import { detectDelimiter, detectsStably, parseCsv, writeCsv, type CsvLimits } from "./csvParse"
+import { detectDelimiter, detectsStably, parseCsvRecords, writeCsv, type CsvLimits } from "./csvParse"
 import {
 	decodeUtf16,
 	decodeUtf8Strict,
@@ -22,11 +22,13 @@ import { MAX_COLUMNS, type CellView } from "../model/model"
 // silently reformatted.
 // `writable` is false when the source bytes hold a byte windows-1252 leaves undefined, or when they read
 // as confidently non-Western text — both cases where editing would show confusing mojibake.
-// `detected`: the separator was detected (a CSV), so a save that would detect as another one quotes every field
-// holding a separator the detection weighs, and the file reopens as it was written.
+// `stable`: the separator was detected (a CSV) and the file detects as it whatever the locale prefers, so a save that
+// would detect as another one quotes every field holding a separator the detection weighs, and the file reopens as
+// it was written. A file whose separator was a tie the session's locale settled keeps its rows' bytes instead: quoted
+// for this reading, every row would write the misreading in for every reader.
 export interface CsvFormat {
 	delimiter: string
-	detected: boolean
+	stable: boolean
 	lineSeparator: "\r\n" | "\n" | "\r"
 	bom: boolean
 	trailingNewline: boolean
@@ -159,23 +161,35 @@ function detectLineSeparator(text: string): CsvFormat["lineSeparator"] {
 }
 
 // `listSeparator`: the session locale's, which wins a tie between separators. Past `limits` (or the grid's last
-// column) it throws, as soon as the parse reaches them.
+// column) it throws, as soon as the parse reaches them; `complete` is false when limits.keepFirstRows ended it.
 export function parseCsvFile(
 	bytes: Uint8Array,
 	tabSeparated: boolean,
 	options: { readonly listSeparator?: string; readonly limits?: CsvLimits } = {}
-): { rows: string[][]; format: CsvFormat } {
+): { rows: string[][]; complete: boolean; format: CsvFormat } {
 	const { text, bom, encoding, writable } = decodeCsv(bytes)
 	const delimiter = tabSeparated ? "\t" : text.length === 0 ? "," : detectDelimiter(text, options.listSeparator)
 	const lineSeparator = detectLineSeparator(text)
 	const limits = options.limits ?? {}
 	// Every value stays the text it was: a CSV's "007" or "1e5" is not a number until someone says so. Past the
 	// grid's last column, cells would take the keys of the next row's (cellKey).
-	const rows = parseCsv(text, delimiter, { ...limits, maxColumns: Math.min(limits.maxColumns ?? MAX_COLUMNS, MAX_COLUMNS) })
+	const { rows, complete } = parseCsvRecords(text, delimiter, {
+		...limits,
+		maxColumns: Math.min(limits.maxColumns ?? MAX_COLUMNS, MAX_COLUMNS)
+	})
 
 	return {
 		rows,
-		format: { delimiter, detected: !tabSeparated, lineSeparator, bom, trailingNewline: /[\r\n]$/.test(text), encoding, writable }
+		complete,
+		format: {
+			delimiter,
+			stable: !tabSeparated && detectsStably(text, delimiter),
+			lineSeparator,
+			bom,
+			trailingNewline: /[\r\n]$/.test(text),
+			encoding,
+			writable
+		}
 	}
 }
 
@@ -191,7 +205,7 @@ export function serializeCsv(rows: readonly (readonly string[])[], format: CsvFo
 	// as another separator, in some locale, also quotes every field holding one (writeCsv's stable).
 	let text = writeCsv(rows, format.delimiter, format.lineSeparator)
 
-	if (format.detected && !detectsStably(text, format.delimiter)) text = writeCsv(rows, format.delimiter, format.lineSeparator, true)
+	if (format.stable && !detectsStably(text, format.delimiter)) text = writeCsv(rows, format.delimiter, format.lineSeparator, true)
 
 	if (format.trailingNewline && rows.length > 0) {
 		text += format.lineSeparator

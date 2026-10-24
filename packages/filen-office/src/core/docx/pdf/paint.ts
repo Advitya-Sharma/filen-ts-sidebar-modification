@@ -121,10 +121,13 @@ interface SourceGroup {
 	readonly groups: Map<string, SourceGroup>
 	// A cell: its index in its row (-1: not a cell).
 	readonly cell: number
+	// A row: its table and index (-1: not a row).
+	readonly table: number
+	readonly row: number
 }
 
-function sourceGroup(cell: number): SourceGroup {
-	return { items: [], groups: new Map(), cell }
+function sourceGroup(cell: number, table = -1, row = -1): SourceGroup {
+	return { items: [], groups: new Map(), cell, table, row }
 }
 
 // A table row's content in the order of its cells (each cell's paragraphs together, in their own order), the
@@ -134,11 +137,11 @@ export function cellOrder(order: readonly number[], roleOf: (source: number) => 
 	if (!order.some(source => roleOf(source).cells.length > 0)) return order
 
 	const root = sourceGroup(-1)
-	const child = (parent: SourceGroup, key: string, cell: number): SourceGroup => {
+	const child = (parent: SourceGroup, key: string, cell: number, table = -1, row = -1): SourceGroup => {
 		let group = parent.groups.get(key)
 
 		if (group === undefined) {
-			group = sourceGroup(cell)
+			group = sourceGroup(cell, table, row)
 			parent.groups.set(key, group)
 			parent.items.push(group)
 		}
@@ -150,7 +153,7 @@ export function cellOrder(order: readonly number[], roleOf: (source: number) => 
 		let group = root
 
 		for (const cell of roleOf(source).cells) {
-			const row = child(group, `${String(cell.table)}:${String(cell.row)}`, -1)
+			const row = child(group, `${String(cell.table)}:${String(cell.row)}`, -1, cell.table, cell.row)
 
 			group = child(row, String(cell.cell), cell.cell)
 		}
@@ -160,11 +163,48 @@ export function cellOrder(order: readonly number[], roleOf: (source: number) => 
 
 	const out: number[] = []
 	const walk = (group: SourceGroup, isRow: boolean): void => {
-		const items = isRow ? [...group.items].sort((a, b) => cellOf(a) - cellOf(b)) : group.items
+		if (isRow) {
+			for (const item of [...group.items].sort((a, b) => cellOf(a) - cellOf(b))) {
+				if (typeof item === "number") out.push(item)
+				else walk(item, item.cell === -1)
+			}
 
-		for (const item of items) {
-			if (typeof item === "number") out.push(item)
-			else walk(item, item.cell === -1)
+			return
+		}
+
+		// A table's rows in row order where its first row comes: a merged cell's content is laid out with the last
+		// row of its merge, after rows below its own (every row tags its columns in order, ISO 14289-1 §7.5).
+		const rowsOf = new Map<number, SourceGroup[]>()
+
+		for (const item of group.items) {
+			if (typeof item === "number" || item.row < 0) continue
+
+			const rows = rowsOf.get(item.table)
+
+			if (rows === undefined) rowsOf.set(item.table, [item])
+			else rows.push(item)
+		}
+
+		for (const item of group.items) {
+			if (typeof item === "number") {
+				out.push(item)
+
+				continue
+			}
+
+			if (item.row < 0) {
+				walk(item, false)
+
+				continue
+			}
+
+			const rows = rowsOf.get(item.table)
+
+			if (rows === undefined) continue
+
+			rowsOf.delete(item.table)
+
+			for (const row of rows.sort((a, b) => a.row - b.row)) walk(row, true)
 		}
 	}
 

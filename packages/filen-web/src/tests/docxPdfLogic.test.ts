@@ -23,6 +23,20 @@ describe("Download as PDF", () => {
 		expect(pdfReportKey({ missing: [], refused: [["image", 1]] })).toBe("previewDocxPdfSimplified")
 	})
 
+	it("tells about content of the file its pages lack apart from pictures that could not be read", () => {
+		expect(pdfReportKey({ missing: [], refused: [["untranslated", 2]] })).toBe("previewDocxPdfContentLeftOut")
+		expect(
+			pdfReportKey({
+				missing: [],
+				refused: [
+					["image", 1],
+					["untranslated", 1]
+				]
+			})
+		).toBe("previewDocxPdfContentLeftOut")
+		expect(pdfReportKey({ missing: [], refused: [["untranslated", 0]] })).toBeNull()
+	})
+
 	it("tells about text drawn without its font's shaping", () => {
 		expect(pdfReportKey({ missing: [], refused: [["shaping", 1]] })).toBe("previewDocxPdfUnshaped")
 		expect(

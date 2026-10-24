@@ -78,8 +78,9 @@ function bracketEnd(text: string, start: number): number {
 	return -1
 }
 
+// A column name as the table has it: escapes undone, its spaces kept (they are part of the name).
 function unescaped(name: string): string {
-	return name.replace(/'(.)/g, "$1").trim()
+	return name.replace(/'(.)/g, "$1")
 }
 
 // The rows and columns a specifier names, null when it names what is not there.
@@ -106,9 +107,16 @@ function areaOf(table: SheetTable, specifier: string, row: number): SheetRange |
 			} else return null
 		}
 	} else if (inner.startsWith("@")) {
+		// [@Column] and [@[Column]]: this row's cell.
+		const rest = inner.slice(1).trim()
+
 		items.push("[#This Row]")
 
-		if (inner.length > 1) items.push(`[${inner.slice(1)}]`)
+		if (rest.startsWith("[")) {
+			if (bracketEnd(rest, 0) !== rest.length) return null
+
+			items.push(rest)
+		} else if (rest !== "") items.push(`[${rest}]`)
 	} else if (inner !== "") items.push(`[${inner}]`)
 
 	const first = table.ref.startRow

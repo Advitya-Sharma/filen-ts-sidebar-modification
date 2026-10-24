@@ -12,7 +12,7 @@ import { verifyOds } from "../verify"
 import { CellRefused } from "./cells"
 import { ContentRefused, ContentWriter } from "./content"
 import { StreamError } from "./stream"
-import { OdsStyleWriter, StyleRefused } from "./styles"
+import { OdsStyleWriter, StyleRefused, StyleUnplanned } from "./styles"
 import { ChartRefused, writeOdsCharts } from "../charts/write"
 import { currentSection, sectionText, sheetFeatures, type SheetFeatures } from "./features"
 import { ValidationRefused } from "./validations"
@@ -319,74 +319,85 @@ export async function saveOds(document: XlsxDocument, options: OdsSaveOptions = 
 			features.set(entry.id, await sheetFeatures(document.workbook, source, model, entry.name, own, taken, clock))
 		}
 
-		const styles = new OdsStyleWriter(source.styles, document.styles)
-		const unheld = source.unheld
-		const shifter = unheld.items.length === 0 ? null : shifterOf(document.workbook, source.tables)
-		const moving = shifter !== null && shifter.changed ? shifter : null
-		const writer = new ContentWriter({
-			shifter: moving,
-			source,
-			document,
-			styles,
-			shapes: charts.shapes,
-			features,
-			filters,
-			names,
-			clock,
-			nullDate: document.workbook.date1904 ? NULL_DATE_1904 : NULL_DATE_1899,
-			...(options.newTables !== undefined && { newTables: options.newTables })
-		})
-		const content = new ContentBytes(writer, source, clock)
-		const others: PartChange[] = [...charts.replace]
-		const settings = await settingsChange(document, source)
-		const added: PartChange[] = []
+		// The styles planned for the rows whose tags change; where that plan misses one, planned for every row that
+		// could name one.
+		for (const broad of [false, true]) {
+			try {
+				const styles = new OdsStyleWriter(source.styles, document.styles)
+				const unheld = source.unheld
+				const shifter = unheld.items.length === 0 ? null : shifterOf(document.workbook, source.tables)
+				const moving = shifter !== null && shifter.changed ? shifter : null
+				const writer = new ContentWriter({
+					shifter: moving,
+					source,
+					document,
+					styles,
+					shapes: charts.shapes,
+					features,
+					filters,
+					names,
+					clock,
+					broadStyles: broad,
+					nullDate: document.workbook.date1904 ? NULL_DATE_1904 : NULL_DATE_1899,
+					...(options.newTables !== undefined && { newTables: options.newTables })
+				})
+				const content = new ContentBytes(writer, source, clock)
+				const others: PartChange[] = [...charts.replace]
+				const settings = await settingsChange(document, source)
+				const added: PartChange[] = []
 
-		if (settings !== null) {
-			if (settings.fresh) {
-				const manifest = await withManifestEntry(source, SETTINGS, "text/xml")
+				if (settings !== null) {
+					if (settings.fresh) {
+						const manifest = await withManifestEntry(source, SETTINGS, "text/xml")
 
-				if (manifest === null) return { ok: false, reason: "unsupported", message: "The manifest cannot list settings.xml" }
+						if (manifest === null) return { ok: false, reason: "unsupported", message: "The manifest cannot list settings.xml" }
 
-				others.push(manifest)
-				added.push({ name: SETTINGS, bytes: settings.bytes })
-			} else {
-				others.push({ name: SETTINGS, bytes: settings.bytes })
+						others.push(manifest)
+						added.push({ name: SETTINGS, bytes: settings.bytes })
+					} else {
+						others.push({ name: SETTINGS, bytes: settings.bytes })
+					}
+				}
+
+				let bytes = await zip(source, [{ name: CONTENT, bytes: content }, ...others], clock, added)
+				const changed: string[] = [CONTENT, ...others.map(change => change.name)]
+
+				// Written as it was (every edit undone): the source's entry as stored.
+				if (!writer.changed && content.length === source.content.uncompressedSize) {
+					bytes = await zip(source, others, clock, added)
+					changed.splice(0, 1)
+				}
+
+				changed.push(...added.map(change => change.name))
+
+				if (options.signal?.aborted === true) return { ok: false, reason: "write", message: "The save was aborted" }
+
+				// Rows and styles changed alone: the rows written are read back; else, or where that cannot tell, all of it.
+				const span =
+					others.length === 0 &&
+					added.length === 0 &&
+					moving === null &&
+					spanGate(document, source, writer) &&
+					(await proveSpan(document, source, writer.tableWriters, bytes, options.inflate, clock))
+
+				if (!span || odsProof.whole) {
+					const proof = await verifyOds(document, bytesSource(bytes), options.inflate, clock)
+
+					if (!proof.ok)
+						return {
+							ok: false,
+							reason: "verify",
+							message: span ? `The span's proof accepted what the whole file's refuses: ${proof.message}` : proof.message
+						}
+				}
+
+				return { ok: true, bytes, changedParts: changed }
+			} catch (error) {
+				if (broad || !(error instanceof StyleUnplanned)) throw error
 			}
 		}
 
-		let bytes = await zip(source, [{ name: CONTENT, bytes: content }, ...others], clock, added)
-		const changed: string[] = [CONTENT, ...others.map(change => change.name)]
-
-		// Written as it was (every edit undone): the source's entry as stored.
-		if (!writer.changed && content.length === source.content.uncompressedSize) {
-			bytes = await zip(source, others, clock, added)
-			changed.splice(0, 1)
-		}
-
-		changed.push(...added.map(change => change.name))
-
-		if (options.signal?.aborted === true) return { ok: false, reason: "write", message: "The save was aborted" }
-
-		// Rows and styles changed alone: the rows written are read back; else, or where that cannot tell, all of it.
-		const span =
-			others.length === 0 &&
-			added.length === 0 &&
-			moving === null &&
-			spanGate(document, source, writer) &&
-			(await proveSpan(document, source, writer.tableWriters, bytes, options.inflate, clock))
-
-		if (!span || odsProof.whole) {
-			const proof = await verifyOds(document, bytesSource(bytes), options.inflate, clock)
-
-			if (!proof.ok)
-				return {
-					ok: false,
-					reason: "verify",
-					message: span ? `The span's proof accepted what the whole file's refuses: ${proof.message}` : proof.message
-				}
-		}
-
-		return { ok: true, bytes, changedParts: changed }
+		throw new StyleUnplanned("No style plan wrote the content")
 	} catch (error) {
 		return refusalOf(error)
 	}

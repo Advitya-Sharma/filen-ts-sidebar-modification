@@ -29,6 +29,8 @@ export function viewOnlyKey(reason: SheetViewOnlyReason, kind: SheetFileKind): P
 			return "previewSheetReadOnlyRecommended"
 		case "modifyPassword":
 			return "previewSheetReadOnlyModifyPassword"
+		case "incomplete":
+			return "previewSheetReadOnlyIncomplete"
 	}
 }
 
@@ -130,6 +132,13 @@ export function refusalKey(refusal: SheetRefusal, kind: SheetFileKind): PreviewK
 	}
 }
 
+// A refused Download as CSV's toast: too large to download, a text file read only in part, or that it failed.
+export function csvRefusalKey(refusal: SheetRefusal): PreviewKey {
+	if (refusal.reason !== "tooLarge") return "previewSheetDownloadCsvFailed"
+
+	return refusal.detail === "incomplete" ? "previewSheetReadOnlyIncomplete" : "previewSheetDownloadCsvTooLarge"
+}
+
 const VIEW_ONLY_REASONS: ReadonlySet<string> = new Set<SheetViewOnlyReason>([
 	"legacyFormat",
 	"lossy",
@@ -137,7 +146,8 @@ const VIEW_ONLY_REASONS: ReadonlySet<string> = new Set<SheetViewOnlyReason>([
 	"unsafe",
 	"signed",
 	"readOnlyRecommended",
-	"modifyPassword"
+	"modifyPassword",
+	"incomplete"
 ])
 
 function isViewOnlyReason(detail: string | undefined): detail is SheetViewOnlyReason {

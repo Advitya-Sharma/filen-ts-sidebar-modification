@@ -433,8 +433,9 @@ function paragraphRuns(runs: readonly XlsxRichRun[]): XlsxRichRun[] {
 	return out
 }
 
-// A cell's text (as the store holds it, with Excel's _xHHHH_ escapes) as XML 1.0 can hold it (§2.2): a carriage return
-// before a line feed is that line end, a character XML cannot hold is left out (`lost`).
+// A cell's text (as the store holds it, with Excel's _xHHHH_ escapes) as a paragraph can hold it: a character XML 1.0
+// cannot hold (§2.2) is left out, and so is a carriage return, which a paragraph's white space collapses (ODF 1.3
+// Part 3 §6.1.2; before a line feed the line still ends there). Either is reported (`lost`).
 function xmlText(stored: string, lost: { value: boolean }): string {
 	const text = decodeXstring(stored)
 	let first = -1
@@ -448,7 +449,6 @@ function xmlText(stored: string, lost: { value: boolean }): string {
 	for (let k = first; k < text.length; k++) {
 		const code = text.charCodeAt(k)
 
-		if (code === 0x0d && text.charCodeAt(k + 1) === 0x0a) continue
 		if (xmlCharacter(code)) kept += text[k] ?? ""
 		else lost.value = true
 	}
@@ -1507,7 +1507,7 @@ function calculation(workbook: XlsxWorkbook): string {
 	const calc = workbook.calc
 	const date = workbook.date1904 ? '<table:null-date table:date-value="1904-01-01"/>' : ""
 	const iteration = calc.iterate
-		? `<table:iteration table:status="enable"${attr("table:steps", String(calc.iterateCount))}${attr("table:minimum-difference", String(calc.iterateDelta))}/>`
+		? `<table:iteration table:status="enable"${attr("table:steps", String(calc.iterateCount))}${attr("table:maximum-difference", String(calc.iterateDelta))}/>`
 		: ""
 
 	return date === "" && iteration === "" ? "" : `<table:calculation-settings>${date}${iteration}</table:calculation-settings>`

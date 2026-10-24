@@ -121,6 +121,21 @@ afterEach(() => {
 })
 
 describe("writeDocx", () => {
+	it("hands on what the file's writer says it wrote otherwise than the edit has it", async () => {
+		const { session, host } = await openSession(BYTES)
+		const notices = [{ kind: "commentPoint", count: 2 }] as const
+		const save = host.save.bind(host)
+		const noting = {
+			...host,
+			save: async (sessions?: readonly DocxEditorSession[]) => ({ ...(await save(sessions)), notices })
+		} as DocxEditingHost
+
+		editParagraphs(session, [" more"])
+
+		expect((await writeDocx(noting)).notices).toEqual(notices)
+		expect((await writeDocx(host)).notices).toBeUndefined()
+	})
+
 	it("writes the refused blocks as last saved, and takes them back only once stored, as an undoable step", async () => {
 		const { session, host } = await openSession(BYTES)
 

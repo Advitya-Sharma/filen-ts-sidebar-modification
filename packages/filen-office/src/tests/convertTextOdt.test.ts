@@ -372,6 +372,65 @@ describe("convertText docx → odt: tracked changes, notes, protection and links
 		expect(unenforced.features).toEqual([])
 	})
 
+	it("writes the layout compatibility settings LibreOffice's Word import sets, so a reader fills in none of an old document's", async () => {
+		const MODE = '<w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/>'
+		const items = async (settings?: string): Promise<Map<string | undefined, string>> =>
+			new Map(
+				[
+					...(
+						(await converted(spec(p("Text"), settings === undefined ? {} : { settings }))).parts.get("settings.xml") ?? ""
+					).matchAll(/<config:config-item config:name="([^"]+)" config:type="([^"]+)">([^<]*)</gu)
+				].map(match => [match[1], `${match[2] ?? ""} ${match[3] ?? ""}`])
+			)
+		const word2013 = await items(`<w:compat>${MODE}</w:compat>`)
+
+		// A set missing these reads as a document from before them: no external leading, the former line spacing,
+		// printer metrics.
+		expect(word2013.get("AddExternalLeading")).toBe("boolean true")
+		expect(word2013.get("UseFormerLineSpacing")).toBe("boolean false")
+		expect(word2013.get("UseFormerObjectPositioning")).toBe("boolean false")
+		expect(word2013.get("UseFormerTextWrapping")).toBe("boolean false")
+		expect(word2013.get("AddParaTableSpacingAtStart")).toBe("boolean true")
+		expect(word2013.get("PrinterIndependentLayout")).toBe("string high-resolution")
+		expect(word2013.get("UseOldPrinterMetrics")).toBe("boolean false")
+		// Word's layout: tab stops from the margin, its table and wrapping rules.
+		expect(word2013.get("TabsRelativeToIndent")).toBe("boolean false")
+		expect(word2013.get("TableRowKeep")).toBe("boolean true")
+		expect(word2013.get("TabOverMargin")).toBe("boolean false")
+		expect(word2013.size).toBe(57)
+		// What is no layout: the printer, the session, protection unless set.
+		expect(word2013.has("PrinterName")).toBe(false)
+		expect(word2013.has("Rsid")).toBe(false)
+		expect(word2013.has("LoadReadonly")).toBe(false)
+
+		// Before Word 2013's layout (an earlier compatibility mode, or none), and each compatibility option LibreOffice
+		// keeps; an option set off is none.
+		const changed = (from: Map<string | undefined, string>): Record<string, string> =>
+			Object.fromEntries([...from].filter(([name, value]) => word2013.get(name) !== value))
+		const earlier = { AddFrameOffsets: "boolean true", MsWordCompMinLineHeightByFly: "boolean true", TabOverMargin: "boolean true" }
+
+		expect(changed(await items(""))).toEqual(earlier)
+		// Without a settings part LibreOffice keeps fixed paragraph spacing for HTML auto spacing too.
+		expect(changed(await items())).toEqual({ ...earlier, AddParaTableSpacing: "boolean true" })
+		expect(changed(await items(`<w:compat>${MODE.replace('"15"', '"14"')}</w:compat>`))).toEqual(earlier)
+		expect(
+			changed(
+				await items(
+					`<w:gutterAtTop/><w:compat><w:noLeading/><w:usePrinterMetrics/><w:doNotExpandShiftReturn/><w:doNotUseHTMLParagraphAutoSpacing/><w:spaceForUL/>${MODE}</w:compat>`
+				)
+			)
+		).toEqual({
+			AddExternalLeading: "boolean false",
+			PrinterIndependentLayout: "string disabled",
+			DoNotJustifyLinesWithManualBreak: "boolean true",
+			AddParaTableSpacing: "boolean true",
+			GutterAtTop: "boolean true"
+		})
+		expect(
+			changed(await items(`<w:compat><w:noLeading w:val="0"/><w:doNotExpandShiftReturn w:val="false"/>${MODE}</w:compat>`))
+		).toEqual({})
+	})
+
 	it("joins a Word 97–2003 document's protection report with what the OpenDocument text keeps", async () => {
 		const server = docxConvertServer({ pause: () => Promise.resolve(), sliceMs: 1_000_000, now: () => 0 })
 		const doc = async (setup: (dop: Uint8Array) => void): Promise<Uint8Array> => {
@@ -427,12 +486,21 @@ describe("convertText docx → odt: tracked changes, notes, protection and links
 			"#A#B",
 			"G:\\dir\\f.xls#R",
 			"mailto:",
-			"https://[::1]:80/x"
+			"https://[::1]:80/x",
+			"https://example.com/page.htm"
 		]
 		const { parts, features } = await converted(
-			spec(`<w:p>${targets.map((_, k) => link(`rIdT${String(k)}`, `t${String(k)}`)).join("")}</w:p>`, {
-				relationships: targets.map((target, k) => ({ id: `rIdT${String(k)}`, type: "hyperlink", target, external: true }))
-			})
+			spec(
+				`<w:p>${targets.map((_, k) => link(`rIdT${String(k)}`, `t${String(k)}`)).join("")}` +
+					// An external link that also names a place in its target, and a HYPERLINK field naming both.
+					'<w:hyperlink r:id="rIdT6" w:anchor="a b#1%"><w:r><w:t>t7</w:t></w:r></w:hyperlink>' +
+					'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> HYPERLINK "https://example.com/f.htm" \\l "p 2" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>t8</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>' +
+					// A field's quoted text holds a backslash or quotation mark escaped by a backslash; a fragment's escapes stay.
+					'<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> HYPERLINK "file:///C:\\\\d\\\\a\\&quot;b.xls" \\l "S!A1#%20" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>t9</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+				{
+					relationships: targets.map((target, k) => ({ id: `rIdT${String(k)}`, type: "hyperlink", target, external: true }))
+				}
+			)
 		)
 		const hrefs = [...(parts.get("content.xml") ?? "").matchAll(/<text:a [^>]*xlink:href="([^"]*)">(t\d)</gu)].map(match => [
 			match[2],
@@ -444,7 +512,11 @@ describe("convertText docx → odt: tracked changes, notes, protection and links
 			["t1", "http://example.com/a%20b/%C3%BC?q=%5B1%5D"],
 			["t2", "#A%23B"],
 			["t3", "file:///G:/dir/f.xls#R"],
-			["t5", "https://[::1]:80/x"]
+			["t5", "https://[::1]:80/x"],
+			["t6", "https://example.com/page.htm"],
+			["t7", "https://example.com/page.htm#a%20b%231%25"],
+			["t8", "https://example.com/f.htm#p%202"],
+			["t9", "file:///C:%5Cd%5Ca%22b.xls#S!A1%23%20"]
 		])
 		expect(parts.get("content.xml")).toMatch(/>t4</u)
 		expect(features).toEqual([{ kind: "linkTarget", count: 1 }])

@@ -29,8 +29,14 @@ export function saveAsXlsxBodyKey(kind: SheetFileKind): PreviewKey {
 // as it stands. An open entry is the caller's to commit first.
 export async function sheetXlsxCopy(handle: SheetHandle, kind: SheetFileKind, fileName: string): Promise<SheetXlsxCopy> {
 	if (isTextSheetKind(kind)) {
-		const { bytes } = await handle.session.query("saveAs.cells", {})
-		const converted = await textToXlsx(bytes, fileStem(fileName))
+		const cells = await handle.session.query("saveAs.cells", {})
+
+		// A file only partly read (more rows than a sheet holds) is refused: the copy would leave the rest out.
+		if (!cells.ok) {
+			return cells
+		}
+
+		const converted = await textToXlsx(cells.bytes, fileStem(fileName))
 
 		return converted.ok ? { ok: true, bytes: converted.bytes } : { ok: false, refusal: converted.refusal }
 	}

@@ -98,10 +98,22 @@ export class TextSheetDocument implements SheetSessionDocument {
 	private nextClip = 1
 	private closed = false
 
-	constructor(source: Uint8Array, rows: string[][], format: CsvFormat, kind: SheetFileKind, settings: SheetSessionSettings = {}) {
+	// false: the file holds more records than a sheet; only the first SHEET_MAX_ROWS were read, so nothing that would
+	// write the rest away (a save, a CSV, a copy in another format) is made.
+	readonly complete: boolean
+
+	constructor(
+		source: Uint8Array,
+		rows: string[][],
+		format: CsvFormat,
+		kind: SheetFileKind,
+		settings: SheetSessionSettings = {},
+		complete = true
+	) {
 		this.source = source
 		this.table = rows
 		this.format = format
+		this.complete = complete
 		this.kind = kind
 		this.settings = settings
 	}
@@ -254,6 +266,8 @@ export class TextSheetDocument implements SheetSessionDocument {
 
 	// A text file is never proven: it saves as its encoding allows.
 	initialWritability(): SheetWritability {
+		if (!this.complete) return { state: "viewOnly", reason: "incomplete" }
+
 		return this.format.writable ? { state: "writable" } : { state: "viewOnly", reason: "unsafe" }
 	}
 
@@ -273,6 +287,8 @@ export class TextSheetDocument implements SheetSessionDocument {
 		Exclude<SheetSaveResult, { ok: true }> | { readonly ok: true; readonly bytes: Uint8Array; readonly changedParts: readonly string[] }
 	> {
 		if (this.closed) return Promise.resolve({ ok: false, reason: "closed", message: "The session is closed" })
+		if (!this.complete)
+			return Promise.resolve({ ok: false, reason: "gate", message: "Only the first rows of this text file were read" })
 		if (!this.format.writable)
 			return Promise.resolve({ ok: false, reason: "gate", message: "This text file cannot be written back as it was" })
 		if (options.untouched === true) return Promise.resolve({ ok: true, bytes: this.source.slice(), changedParts: [] })
@@ -281,7 +297,9 @@ export class TextSheetDocument implements SheetSessionDocument {
 	}
 
 	// "CSV UTF-8": the cells comma-separated, with a BOM.
-	csv(): Uint8Array {
+	csv(): Uint8Array | SheetRefusal {
+		if (!this.complete) return { reason: "tooLarge", detail: "incomplete" }
+
 		const body = new TextEncoder().encode(writeCsv(this.rows, ",", "\r\n", true))
 		const bytes = new Uint8Array(body.length + 3)
 
@@ -731,17 +749,18 @@ export async function openTextSession(
 	let parsed: ReturnType<typeof parseCsvFile>
 
 	try {
-		// Refused as the parse passes a limit, before the rows of a hostile file fill memory.
+		// Refused as the parse passes a limit, before the rows of a hostile file fill memory; a file longer than a sheet
+		// opens with its first rows, view-only.
 		parsed = parseCsvFile(bytes, options.kind === "tsv" || options.kind === "tab", {
 			...(options.settings?.locale !== undefined && { listSeparator: options.settings.locale.argument }),
-			limits: { maxCells: MAX_TEXT_CELLS, maxRows: SHEET_MAX_ROWS }
+			limits: { maxCells: MAX_TEXT_CELLS, maxRows: SHEET_MAX_ROWS, keepFirstRows: true }
 		})
 	} catch (error) {
 		return { kind: "failed", reason: "tooLarge", message: error instanceof Error ? error.message : String(error) }
 	}
 
 	const styles = new RenderStyleTable()
-	const document = new TextSheetDocument(bytes, parsed.rows, parsed.format, options.kind, options.settings)
+	const document = new TextSheetDocument(bytes, parsed.rows, parsed.format, options.kind, options.settings, parsed.complete)
 	const session = new SheetSession(
 		document,
 		styles,

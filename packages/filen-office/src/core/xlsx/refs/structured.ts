@@ -67,14 +67,13 @@ function unescape(name: string): string {
 // none.
 export function specifierColumns(inner: string): string[] {
 	const columns: string[] = []
-	const item = (text: string): void => {
-		const name = text.trim()
-
+	// A bracketed name keeps its spaces (they are part of it); an unbracketed one's ends are the brackets' spacing.
+	const item = (name: string): void => {
 		if (name !== "" && !name.startsWith("#")) columns.push(unescape(name))
 	}
 
-	if (inner.startsWith("@")) {
-		const rest = inner.slice(1).trim()
+	if (inner.trimStart().startsWith("@")) {
+		const rest = inner.trimStart().slice(1).trim()
 
 		item(rest.startsWith("[") && rest.endsWith("]") ? rest.slice(1, -1) : rest)
 
@@ -82,7 +81,7 @@ export function specifierColumns(inner: string): string[] {
 	}
 
 	if (!inner.trimStart().startsWith("[")) {
-		item(inner)
+		item(inner.trim())
 
 		return columns
 	}

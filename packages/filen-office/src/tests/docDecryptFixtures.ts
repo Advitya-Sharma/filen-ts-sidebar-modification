@@ -58,14 +58,14 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 	return out
 }
 
-function rc4Keys(password: string): (block: number) => Uint8Array {
+export function rc4Keys(password: string): (block: number) => Uint8Array {
 	const h0 = hash("md5", utf16(password)).subarray(0, 5)
 	const h1 = hash("md5", ...Array.from({ length: 16 }, () => concat(h0, SALT))).subarray(0, 5)
 
 	return block => hash("md5", h1, u32(block))
 }
 
-function cryptoApiKeys(password: string, keySize: number): (block: number) => Uint8Array {
+export function cryptoApiKeys(password: string, keySize: number): (block: number) => Uint8Array {
 	const h0 = hash("sha1", SALT, utf16(password))
 	const bits = keySize === 0 ? 40 : keySize
 
@@ -131,8 +131,9 @@ function xorStream(input: Uint8Array, array: Uint8Array): Uint8Array {
 	})
 }
 
-// The EncryptionHeader written at the start of the Table stream, its verifier encrypted with block 0's key.
-function header(options: EncryptOptions): Uint8Array {
+// The EncryptionHeader (the Table stream's start, a FilePass record's after wEncryptionType), its verifier encrypted
+// with block 0's key.
+export function encryptionHeader(options: EncryptOptions): Uint8Array {
 	if (options.scheme === "rc4") {
 		const cipher = new Rc4(rc4Keys(options.password)(0))
 		const sealed = new Uint8Array(32)
@@ -144,7 +145,7 @@ function header(options: EncryptOptions): Uint8Array {
 
 	const keySize = options.keySize ?? 128
 	const csp = utf16(CSP)
-	const encryptionHeader = concat(u32(0x04), u32(0), u32(0x6801), u32(0x8004), u32(keySize), u32(1), u32(0), u32(0), csp)
+	const header = concat(u32(0x04), u32(0), u32(0x6801), u32(0x8004), u32(keySize), u32(1), u32(0), u32(0), csp)
 	const cipher = new Rc4(cryptoApiKeys(options.password, keySize)(0))
 	const verifier = new Uint8Array(16)
 	const verifierHash = new Uint8Array(20)
@@ -152,21 +153,11 @@ function header(options: EncryptOptions): Uint8Array {
 	cipher.apply(VERIFIER, verifier)
 	cipher.apply(hash("sha1", VERIFIER), verifierHash)
 
-	return concat(
-		Uint8Array.of(4, 0, 2, 0),
-		u32(0x04),
-		u32(encryptionHeader.length),
-		encryptionHeader,
-		u32(16),
-		SALT,
-		verifier,
-		u32(20),
-		verifierHash
-	)
+	return concat(Uint8Array.of(4, 0, 2, 0), u32(0x04), u32(header.length), header, u32(16), SALT, verifier, u32(20), verifierHash)
 }
 
 export function headerLength(options: EncryptOptions): number {
-	return options.scheme === "xor" ? 0 : header(options).length
+	return options.scheme === "xor" ? 0 : encryptionHeader(options).length
 }
 
 // Changes made to the encrypted WordDocument and Table streams before they are written (hostile-input tests).
@@ -174,7 +165,7 @@ export type Tamper = (word: Uint8Array, table: Uint8Array) => void
 
 // Builds `spec` (its Table stream starts with room for the EncryptionHeader) and encrypts it as `options` says.
 export async function encryptedDoc(spec: DocSpec, options: EncryptOptions, tamper?: Tamper): Promise<EncryptedFixture> {
-	const prefix = options.scheme === "xor" ? new Uint8Array(0) : header(options)
+	const prefix = options.scheme === "xor" ? new Uint8Array(0) : encryptionHeader(options)
 	const plainFile = await buildDoc({ ...spec, tablePrefix: new Uint8Array(prefix.length) })
 	const cfb = await CfbFile.open(bytesSource(plainFile))
 	const plain = new Map<string, Uint8Array>()

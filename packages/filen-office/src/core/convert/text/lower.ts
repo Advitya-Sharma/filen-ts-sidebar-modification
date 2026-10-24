@@ -1024,8 +1024,10 @@ export class Lowering {
 		const relationship = id === undefined ? undefined : this.links.relationship(id)
 		let target: string | undefined
 
-		if (relationship !== undefined && relationship.external) target = relationship.target
-		else if (anchor !== undefined) target = `#${anchor}`
+		// The anchor names a place in the target (ECMA-376 Part 1 §17.16.22): its fragment.
+		if (relationship !== undefined && relationship.external)
+			target = anchor === undefined ? relationship.target : `${relationship.target}#${fragment(anchor)}`
+		else if (anchor !== undefined) target = `#${fragment(anchor)}`
 
 		const linked = target === undefined || this.suppressed() ? undefined : this.linkId(target)
 
@@ -2120,16 +2122,36 @@ export function fieldCode(instruction: string): string {
 	return (instruction.trim().split(/\s+/u)[0] ?? "").toUpperCase()
 }
 
-// HYPERLINK's target: its URL, or "#" and its \l bookmark.
+// HYPERLINK's target: its URL, its \l bookmark as the fragment, or both. Quoted text holds a backslash or quotation
+// mark preceded by a backslash (ECMA-376 Part 1 §17.16.1).
 export function hyperlinkTarget(instruction: string): string | undefined {
-	const anchor = /\\l\s+"([^"]*)"|\\l\s+(\S+)/u.exec(instruction)
+	const anchor = /\\l\s+"((?:[^"\\]|\\.)*)"|\\l\s+(\S+)/u.exec(instruction)
+	const place = anchor === null ? undefined : `#${fragment(unescapeField(anchor[1]) ?? anchor[2] ?? "")}`
+	const url = /HYPERLINK\s+"((?:[^"\\]|\\.)*)"|HYPERLINK\s+(\S+)/iu.exec(instruction)
+	const found = unescapeField(url?.[1]) ?? url?.[2]
+	const target = found === undefined || found === "" || found.startsWith("\\") ? undefined : found
 
-	if (anchor !== null) return `#${anchor[1] ?? anchor[2] ?? ""}`
+	return target === undefined ? place : `${target}${place ?? ""}`
+}
 
-	const url = /HYPERLINK\s+"([^"]*)"|HYPERLINK\s+(\S+)/iu.exec(instruction)
-	const target = url?.[1] ?? url?.[2]
+function unescapeField(text: string | undefined): string | undefined {
+	return text?.replace(/\\([\\"])/gu, "$1")
+}
 
-	return target === undefined || target === "" || target.startsWith("\\") ? undefined : target
+// A bookmark or anchor name as a URI fragment (RFC 3986 §3.5): every character but pchar, "/" and "?" percent-encoded
+// as UTF-8, "#" among them, and "%" but where it begins an escape already (§2.4).
+function fragment(name: string): string {
+	let out = ""
+	let at = 0
+
+	for (const char of name) {
+		if (URI_CHARACTERS.includes(char) || (char === "%" && /^[0-9A-Fa-f]{2}$/u.test(name.slice(at + 1, at + 3)))) out += char
+		else for (const byte of UTF8.encode(char)) out += `%${byte.toString(16).toUpperCase().padStart(2, "0")}`
+
+		at += char.length
+	}
+
+	return out
 }
 
 // Characters a URI holds as they are (RFC 3986 §2.2, §2.3), but "#" (one only) and "%" (an escape only).

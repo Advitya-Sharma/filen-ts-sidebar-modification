@@ -911,13 +911,13 @@ describe("docx writer: structure and values", () => {
 		expect(xml.includes("\u0001")).toBe(false)
 	})
 
-	it("repairs half a surrogate pair left at the edge of a deletion and drops a link to nowhere", async () => {
+	it("keeps a surrogate pair whole against a deletion of half of it and drops a link to nowhere", async () => {
 		const document = await opened({ body: p("a\u{1F600}b"), ...PARTS })
 		const edit = session(document)
 
-		// Deletes the low half of the emoji only.
-		edit.dispatch(edit.state.tr.delete(3, 4))
-		expect(edit.state.doc.textContent).toBe("a\ufffdb")
+		// Deleting the low half of the emoji only is refused.
+		expect(edit.dispatch(edit.state.tr.delete(3, 4))).toBe(false)
+		expect(edit.state.doc.textContent).toBe("a\u{1F600}b")
 
 		const empty = docxSchema.marks.link.create({ target: "", anchor: null })
 

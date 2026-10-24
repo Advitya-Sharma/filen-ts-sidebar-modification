@@ -12,7 +12,7 @@ import {
 	type DocxEditingWriter,
 	type DocxSealer
 } from "@filen/office/dom/docx/editing"
-import { docxZipWorker } from "@filen/office/dom/docx/save"
+import { docxZipWorker, type DocxSaveNotice } from "@filen/office/dom/docx/save"
 import { plainText } from "@filen/office/react/docx/editor"
 import { DOCX_FONT_URLS } from "@/features/preview/lib/docxEngine"
 import DocxZipWorker from "@/features/preview/workers/docxZip.worker.ts?worker"
@@ -146,6 +146,8 @@ export interface DocxSaveSnapshot {
 	// `reverted`: how many the editor took back in commit() (0 until then; fewer when some were edited
 	// while the file was stored, which keep those edits, unsaved).
 	locked?: { count: number; text: string; reverted: number }
+	// What the file's own writer wrote otherwise than the edit has it, for the user to be told once it is stored.
+	notices?: readonly DocxSaveNotice[]
 }
 
 export interface WriteDocxOptions {
@@ -188,7 +190,8 @@ async function writeOnce(
 				}
 			})
 		},
-		elapsedMs: performance.now() - started
+		elapsedMs: performance.now() - started,
+		...(result.notices === undefined ? {} : { notices: result.notices })
 	}
 }
 

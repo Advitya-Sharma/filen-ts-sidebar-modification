@@ -365,7 +365,7 @@ describe("xlsx to ods", () => {
 		expect([level(0), level(1), level(2)]).toEqual([0, 1, 2])
 	})
 
-	it("leaves out characters XML cannot hold and reports them; a carriage return before a line feed is that line end", async () => {
+	it("leaves out characters XML cannot hold and carriage returns, and reports them; the line still ends at a carriage return before a line feed", async () => {
 		const source = buildWorkbook({
 			sheets: [
 				{ name: "S", body: '<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row></sheetData>' }
@@ -375,7 +375,7 @@ describe("xlsx to ods", () => {
 		const result = converted(await convertSheet(source, "xlsx", "ods"))
 
 		expect(shownRows(await readOds(result.bytes), 0)).toEqual([["a\nb", "cd"]])
-		expect(result.lossy).toEqual([{ kind: "other", count: 1, sheets: ["S"] }])
+		expect(result.lossy).toEqual([{ kind: "other", count: 2, sheets: ["S"] }])
 	})
 
 	it("writes a chart sheet as a sheet holding its chart, as a chart object reading the cells", async () => {

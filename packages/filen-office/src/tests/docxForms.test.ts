@@ -356,6 +356,89 @@ describe("content controls: commands", () => {
 })
 
 describe("content controls: placeholders", () => {
+	it("turns a placeholder into text once part of it is deleted (w:showingPlcHdr and its style go)", async () => {
+		const opened = await open({ body: inParagraph(TEXT_PLACEHOLDER()), ...STYLED })
+		const session = opened.session
+		const at = find(session, "Click or tap")
+
+		expect(session.dispatch(session.state.tr.delete(at, at + 6))).toBe(true)
+		expect(session.state.doc.textContent).toBe("Before or tap here to enter text. after")
+		expect(control((select(session, find(session, "or tap") + 1), session))).toMatchObject({ placeholder: false })
+		expect(session.state.doc.nodeAt(find(session, "or tap"))?.marks.some(mark => mark.type.name === "char_style")).toBe(false)
+
+		const xml = part(await save(opened), "word/document.xml")
+
+		expect(xml).not.toContain("showingPlcHdr")
+		expect(xml).not.toContain("PlaceholderText")
+		expect(xml).toContain("or tap here to enter text.")
+	})
+
+	it("turns a placeholder into text once part of it is deleted as a tracked change", async () => {
+		const opened = await open({ body: inParagraph(TEXT_PLACEHOLDER()), ...STYLED }, "Ada")
+		const session = opened.session
+
+		opened.context.review.tracking = true
+
+		const at = find(session, "Click or tap")
+
+		expect(session.dispatch(session.state.tr.delete(at + 1, at + 5))).toBe(true)
+		expect(control((select(session, find(session, "or tap") + 1), session))).toMatchObject({ placeholder: false })
+
+		const xml = part(await save(opened), "word/document.xml")
+
+		expect(xml).not.toContain("showingPlcHdr")
+		expect(xml).not.toContain("PlaceholderText")
+		expect(xml).toMatch(/<w:del [^>]*><w:r>(?:<w:rPr><\/w:rPr>)?<w:delText>lick<\/w:delText><\/w:r><\/w:del>/)
+	})
+
+	it("turns a placeholder into text once a comment is anchored in it", async () => {
+		const opened = await pagedEditor(buildDocx({ body: inParagraph(TEXT_PLACEHOLDER()), ...STYLED }))
+		const { editor } = opened
+
+		opened.context.identity.author = "Ada"
+		opened.context.identity.now = () => Date.UTC(2026, 9, 12)
+
+		const session = editor.session
+		const at = find(session, "Click or tap")
+
+		select(session, at + 1, at + 5)
+		expect(await editor.execute({ type: "comment.add", text: "Which?" })).toBe(true)
+		expect(session.state.doc.textContent).toContain("Click or tap here to enter text.")
+		expect(control((select(session, find(session, "or tap") + 1), session))).toMatchObject({ placeholder: false })
+
+		const xml = part(
+			(await saveDocx({ pkg: opened.pkg, context: opened.context, sessions: editor.sessions })).bytes as Uint8Array,
+			"word/document.xml"
+		)
+
+		expect(xml).not.toContain("showingPlcHdr")
+		expect(xml).not.toContain("PlaceholderText")
+		expect(xml).toContain("<w:commentReference")
+	})
+
+	it("turns a block control's placeholder into text once part of it is deleted, and shows it again once emptied", async () => {
+		const block =
+			'<w:sdt><w:sdtPr><w:id w:val="105"/><w:showingPlcHdr/></w:sdtPr><w:sdtContent><w:p><w:r><w:rPr><w:rStyle w:val="PlaceholderText"/></w:rPr>' +
+			"<w:t>Click or tap here to enter text.</w:t></w:r></w:p></w:sdtContent></w:sdt>"
+		const opened = await open({ body: block, ...STYLED })
+		const session = opened.session
+		const at = find(session, "Click or tap")
+
+		expect(session.dispatch(session.state.tr.delete(at, at + 6))).toBe(true)
+		expect(control((select(session, find(session, "or tap") + 1), session))).toMatchObject({ placeholder: false })
+
+		const xml = part(await save(opened), "word/document.xml")
+
+		expect(xml).not.toContain("showingPlcHdr")
+		expect(xml).not.toContain("PlaceholderText")
+
+		const rest = find(session, "or tap")
+
+		expect(session.dispatch(session.state.tr.delete(rest, rest + "or tap here to enter text.".length))).toBe(true)
+		expect(session.state.doc.textContent).toBe("Click or tap here to enter text.")
+		expect(control((select(session, find(session, "Click") + 1), session))).toMatchObject({ placeholder: true })
+	})
+
 	it("types over a placeholder (its text, style and flag go) and brings it back once emptied", async () => {
 		const opened = await open({ body: inParagraph(TEXT_PLACEHOLDER()), ...STYLED })
 		const session = opened.session

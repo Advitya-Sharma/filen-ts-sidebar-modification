@@ -184,6 +184,9 @@ export class DocumentParts implements StoryContext {
 	defaultTab = 720
 	evenAndOdd = false
 	mirrorMargins = false
+	// \\htmautsp: HTML paragraph auto spacing (RTF 1.9.1, "Document Formatting Properties"); off without it, which
+	// w:doNotUseHTMLParagraphAutoSpacing says.
+	htmlAutoSpacing = false
 	trackRevisions = false
 	// Footnote and endnote numbering (\\ftnnar, \\ftnstartN, \\ftnrstpg ... and their \\aftn twins).
 	readonly notePr = {
@@ -904,13 +907,16 @@ export class DocumentParts implements StoryContext {
 
 			if (style.type === "paragraph") {
 				// A paragraph is in a list only by its own \\lsN (spec, "Bullets and Numbering"): styles carry none.
-				const paraXml = style.para.xml(this, () => undefined)
+				const paraXml = this.completed(style).para.xml(this, () => undefined)
 
 				if (paraXml !== "") out += `<w:pPr>${paraXml}</w:pPr>`
 			}
 
 			// A style holds no highlight (the Open XML SDK refuses w:highlight in style run properties).
-			if (style.type !== "table") out += style.char.xml(this).replace(/<w:highlight [^>]*\/>/u, "")
+			if (style.type !== "table")
+				out += this.completed(style)
+					.char.xml(this)
+					.replace(/<w:highlight [^>]*\/>/u, "")
 
 			out += "</w:style>"
 		}
@@ -918,6 +924,60 @@ export class DocumentParts implements StoryContext {
 		if (!normal) out += '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>'
 
 		return `${out}</w:styles>`
+	}
+
+	// A style as RTF defines it, whole (a definition lists every property; \\sbasedonN only names the style it
+	// came from): what its base chain sets and it leaves at the RTF default is written as that default, as the
+	// docx style inherits from its w:basedOn otherwise (a footer based on a Normal with space after has none).
+	private completed(style: StyleDef): { para: ParaProps; char: CharProps } {
+		const byKey = this.styleByKey()
+		const chain: StyleDef[] = []
+		const seen = new Set<StyleDef>([style])
+
+		for (
+			let base = style.basedOn >= 0 && style.basedOn !== style.number ? byKey.get(`${style.type[0]}${style.basedOn}`) : undefined;
+			base !== undefined && !seen.has(base);
+		) {
+			chain.push(base)
+			seen.add(base)
+			base = base.basedOn >= 0 && base.basedOn !== base.number ? byKey.get(`${base.type[0]}${base.basedOn}`) : undefined
+		}
+
+		// A character style adds to the text's formatting (\\additive): only paragraph styles are whole.
+		if (chain.length === 0 || style.type !== "paragraph") return { para: style.para, char: style.char }
+
+		const para = style.para.clone()
+		const char = style.char.clone()
+		// The value the base chain gives a property (its nearest definition), when that is not RTF's default.
+		const fromBase = <T>(value: (base: StyleDef) => T, unset: T, fallback: T): boolean => {
+			for (const base of chain) {
+				const found = value(base)
+
+				if (found !== unset) return found !== fallback
+			}
+
+			return false
+		}
+
+		if (para.before === undefined && fromBase(base => base.para.before, undefined, 0)) para.before = 0
+		if (para.after === undefined && fromBase(base => base.para.after, undefined, 0)) para.after = 0
+		if (para.line === undefined && fromBase(base => base.para.line, undefined, 0)) para.line = 0
+		if (para.left === undefined && fromBase(base => base.para.left, undefined, 0)) para.left = 0
+		if (para.right === undefined && fromBase(base => base.para.right, undefined, 0)) para.right = 0
+		if (para.firstLine === undefined && fromBase(base => base.para.firstLine, undefined, 0)) para.firstLine = 0
+		if (para.jc === undefined && fromBase(base => base.para.jc, undefined, "left")) para.jc = "left"
+
+		for (const key of ["bold", "italic", "caps", "smallCaps", "strike", "dstrike", "hidden"] as const) {
+			if (char[key] === -1 && fromBase(base => base.char[key], -1, 0)) char[key] = 0
+		}
+
+		if (char.underline === undefined && fromBase(base => base.char.underline, undefined, "none")) char.underline = "none"
+		if (char.size === -1 && fromBase(base => base.char.size, -1, 24)) char.size = 24
+
+		para.cached = undefined
+		char.cached = undefined
+
+		return { para, char }
 	}
 
 	// Whether following \\sbasedonN from `style` returns to it; every chain is walked once.
@@ -964,7 +1024,7 @@ export class DocumentParts implements StoryContext {
 			if (inner !== "") notes += `<w:${kind}Pr>${inner}</w:${kind}Pr>`
 		}
 
-		return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings ${NAMESPACES}>${this.mirrorMargins ? "<w:mirrorMargins/>" : ""}${this.trackRevisions ? "<w:trackRevisions/>" : ""}<w:defaultTabStop w:val="${Math.max(1, this.defaultTab)}"/>${this.evenAndOdd ? "<w:evenAndOddHeaders/>" : ""}${notes}</w:settings>`
+		return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings ${NAMESPACES}>${this.mirrorMargins ? "<w:mirrorMargins/>" : ""}${this.trackRevisions ? "<w:trackRevisions/>" : ""}<w:defaultTabStop w:val="${Math.max(1, this.defaultTab)}"/>${this.evenAndOdd ? "<w:evenAndOddHeaders/>" : ""}${notes}${this.htmlAutoSpacing ? "" : "<w:compat><w:doNotUseHTMLParagraphAutoSpacing/></w:compat>"}</w:settings>`
 	}
 
 	private numberingXml(): string {

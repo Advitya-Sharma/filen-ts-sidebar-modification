@@ -176,8 +176,11 @@ describe("a text file saved as .xlsx", () => {
 
 		expect(edit.ok).toBe(true)
 
-		const { bytes } = await session.query("saveAs.cells", {})
-		const moved = await opened(workbookHost, bytes, "tsv")
+		const handed = await session.query("saveAs.cells", {})
+
+		if (!handed.ok) throw new Error(handed.refusal.reason)
+
+		const moved = await opened(workbookHost, handed.bytes, "tsv")
 		const xlsx = await moved.session.query("saveAs.xlsx", { name: "moved" })
 
 		if (!xlsx.ok) throw new Error(xlsx.refusal.reason)

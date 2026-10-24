@@ -12,13 +12,14 @@ import type {
 	SheetSessionOptions
 } from "../../core/sheet/protocol"
 import type { SheetFeature } from "../../core/sheet/registry"
-import type { XlsxDocument } from "../../core/xlsx/edit/document"
+import { isLegacyKind, type XlsxDocument } from "../../core/xlsx/edit/document"
 import { isTextKind, type TextSheetDocument } from "../../core/sheet/text"
 import { saveAsXlsxFeature } from "../../core/sheet/save/xlsx"
 import { textOpener, trackedSessions } from "./text"
 import type { SheetOpener } from "./worker"
 import { openProtectedWorkbook, sheetEncryption } from "./protection"
-import type { DecryptedPackage, LockedPackage } from "../encryption/sealedPackage"
+import { encryptedPackageVerdict, type DecryptedPackage, type LockedPackage } from "../encryption/sealedPackage"
+import { openLegacyWorkbook, type LegacyWorkbookConverter } from "./legacy"
 
 // The in-thread host: sessions run on the calling thread (mobile under Hermes, a WebView, tests), sliced so long
 // work yields. No Worker, MessageChannel or OffscreenCanvas is needed. The worker server (worker.ts) opens files
@@ -31,6 +32,9 @@ export interface SheetHostOptions {
 	// The raw-deflate decompressor an OpenDocument spreadsheet's content streams through (a native
 	// DecompressionStream in a browser); fflate's without one.
 	readonly inflate?: InflateHook
+	// What an Excel 97–2003 workbook (.xls, .xlt) is converted to an .xlsx with (legacy.ts), decrypted first when it has
+	// a password to open. One that is really an encrypted OOXML package opens as that.
+	readonly legacy?: LegacyWorkbookConverter
 }
 
 const COALESCE = 256 * 1024
@@ -233,7 +237,8 @@ function lockedFile(
 }
 
 // Opens a workbook on the thread that holds it: an encrypted package is unlocked (Excel's default password first);
-// a text file opens as text (text.ts), and here, beside the workbook writer, also converts to .xlsx (saveAs.xlsx).
+// an Excel 97–2003 workbook opens through `legacy` (legacy.ts); a text file opens as text (text.ts), and here, beside
+// the workbook writer, also converts to .xlsx (saveAs.xlsx).
 export async function openWorkbook(
 	source: ByteSource,
 	options: SheetOpenOptions,
@@ -252,6 +257,16 @@ export async function openWorkbook(
 
 		return result.kind === "refused" ? result : opened(result, track)
 	}
+	const legacy = features.legacy
+
+	if (legacy !== undefined && isLegacyKind(options.kind)) {
+		if ((await encryptedPackageVerdict(source)) === undefined) {
+			return openLegacyWorkbook(source, { options, onEvent, features: workbook, track, convert: legacy })
+		}
+
+		return openWorkbook(source, { ...options, kind: "xlsx" }, onEvent, features, track)
+	}
+
 	const protectedOpen = await openProtectedWorkbook(source, options.signal, options.slicing)
 
 	switch (protectedOpen.kind) {

@@ -95,6 +95,9 @@ export interface RtfReadResult {
 	readonly paragraphs: readonly RtfSourceParagraph[]
 	// \binN data reaching past the end of the input.
 	readonly truncatedBinary: boolean
+	// Content the translation draws nowhere among what `preserved` keeps (a shape is drawn by its picture, its text
+	// box's paragraphs or its WordArt; an object by its \result): shapes and objects that leave nothing on a page.
+	readonly undrawn: number
 	// Where each story's blocks came from, in the order the translation writes them, and the facts the writer
 	// needs: what makes a lossless writer possible.
 	readonly containers: readonly RtfContainer[]
@@ -677,6 +680,9 @@ class Reader {
 	private readonly stack: Frame[] = []
 	private frame: Frame
 	private readonly preserved: RtfPreserved[] = []
+	private undrawn = 0
+	// Per open \object group, whether its \result has been read.
+	private readonly objectResults: boolean[] = []
 	// Where the last table group or kept source range ends (see touchGroups).
 	private groupFloor = -1
 	private readonly unsupported = new Set<number>()
@@ -1287,6 +1293,7 @@ class Reader {
 			unsupportedCodepages: [...this.unsupported].sort((a, b) => a - b),
 			paragraphs: this.doc.sourceParagraphs(),
 			truncatedBinary: this.truncatedBinary,
+			undrawn: this.undrawn,
 			containers: this.doc.containers,
 			facts: {
 				codepage: this.documentCodepage,
@@ -2110,6 +2117,7 @@ class Reader {
 
 				if (host === undefined) {
 					this.skipGroup(name, name === "shpgrp" ? "shapeGroup" : "shape")
+					this.undrawn++
 					return true
 				}
 
@@ -2144,6 +2152,8 @@ class Reader {
 					// A group's shapes are in its source range.
 					if (parent === undefined)
 						this.preserve(shape.group ? "shapeGroup" : shape.textbox ? "textbox" : "shape", shape.name, start, end)
+					// A group's shapes are counted one by one.
+					if (!shape.group && shape.picture === undefined && !shape.textbox && shape.wordArt === "") this.undrawn++
 					if (shape.picture !== undefined) this.anchoredPicture(shape)
 					if (shape.wordArt !== "" && !shape.textbox) this.wordArt(shape)
 				}
@@ -2160,6 +2170,7 @@ class Reader {
 			case "shptxt":
 				if (frame.dest.kind !== "shape") {
 					this.skipGroup(name, "textbox")
+					this.undrawn++
 					return true
 				}
 
@@ -2234,8 +2245,13 @@ class Reader {
 				return true
 			}
 			case "object":
+				this.objectResults.push(false)
+				frame.onEnd = () => {
+					if (this.objectResults.pop() === false) this.undrawn++
+				}
 				return true
 			case "result":
+				if (this.objectResults.length > 0) this.objectResults[this.objectResults.length - 1] = true
 				return true
 			case "field":
 				return this.field(story)
@@ -3159,6 +3175,9 @@ class Reader {
 				return true
 			case "margmirror":
 				this.doc.mirrorMargins = true
+				return true
+			case "htmautsp":
+				this.doc.htmlAutoSpacing = true
 				return true
 			case "crauth":
 			case "prauth":
@@ -4090,12 +4109,12 @@ class Reader {
 					return true
 				}
 
-				const headers = this.doc.sectionHeaders(false)
-				const footers = this.doc.sectionHeaders(true)
+				// Inside a header, footer or note no section starts: the body's keeps its properties. Its headers and
+				// footers are no section properties: a \\sectd within a section (Word writes one after a field, the
+				// section's words again after it) keeps them; \\sect ends them with the section (endSection).
+				const dest = this.frame.dest
 
-				this.section = this.sectionDefaults.clone()
-				headers.clear()
-				footers.clear()
+				if (dest.kind === "story" && dest.story === this.doc.body) this.section = this.sectionDefaults.clone()
 				return true
 			}
 			case "pgwsxn":

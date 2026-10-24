@@ -19,7 +19,7 @@ import { commitForExport, liveConversion } from "@/features/spreadsheet/save/she
 const CELLS = new TextEncoder().encode("a\tb\n")
 const XLSX = new TextEncoder().encode("xlsx")
 
-function handle(answer: unknown = { bytes: CELLS }, encrypted?: string) {
+function handle(answer: unknown = { ok: true, bytes: CELLS }, encrypted?: string) {
 	const query = vi.fn((..._args: unknown[]) => Promise.resolve(answer))
 
 	return { query, handle: { info: { encrypted }, session: { query } } as unknown as SheetHandle }
@@ -67,6 +67,18 @@ describe("liveConversion", () => {
 		expect(mocks.openSheet.mock.calls[0]?.[1]).toMatchObject({ kind: "xlsx" })
 		expect(workbook.query).toHaveBeenCalledWith("saveAs.format", { format: "ods", language: "de-DE" }, { signal })
 		expect(workbook.close).toHaveBeenCalledOnce()
+	})
+
+	it("refuses a text file read only in part, making no workbook of its first rows", async () => {
+		const { handle: text } = handle({ ok: false, refusal: { reason: "tooLarge", detail: "incomplete" } })
+		const live = liveConversion(text, "csv", "data.csv", () => Promise.resolve(true))
+
+		expect(await live?.("ods", new AbortController().signal)).toEqual({
+			ok: false,
+			reason: "tooLarge",
+			message: "The cells could not all be read"
+		})
+		expect(mocks.textToXlsx).not.toHaveBeenCalled()
 	})
 
 	it("converts a workbook in its own session, the open entry committed first", async () => {

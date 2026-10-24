@@ -558,6 +558,88 @@ function canCopyUnit(w: StoryWriting, unit: Unit, forced: boolean, owned: number
 	return unitTokens(unit) === sourceTokens(w, run)
 }
 
+const rebuilt = (unit: Unit | undefined): boolean => unit !== undefined && !unit.atom && !unit.copy
+
+// The proofing marks of a paragraph left out of its writing (indices into `list`). A start and its end
+// (ECMA-376 §17.13.8) go together: a region whose own text was rebuilt goes whole, one whose text was written as
+// it was stays (the file reads back as the editor holds it). A half whose partner is in another paragraph stays,
+// so the pair stays balanced whatever becomes of that paragraph; a mark of no known type stays only between
+// content written as it was. Gate 1 keeps them all (it proves the run rebuilding, and with them most paragraphs
+// come out as their very bytes). A mark alone under a link goes (a hyperlink holding only w:proofErr reads back
+// as an empty hyperlink), and its partner with it.
+function droppedProofErrors(
+	w: StoryWriting,
+	list: readonly Unit[],
+	forced: boolean,
+	dropped: (unit: Unit) => boolean,
+	holdsContent: (link: Mark, at: number) => boolean
+): Set<number> {
+	const out = new Set<number>()
+	const open = new Map<string, number[]>()
+	const reader = w.part.reader
+	const alone = (index: number): boolean => {
+		const unit = list[index] as Unit
+
+		return unit.wrappers.some(mark => mark.type === marks.link && !holdsContent(mark, index))
+	}
+	const nextTo = (index: number): boolean => rebuilt(list[index - 1]) || rebuilt(list[index + 1])
+
+	list.forEach((unit, index) => {
+		const node = unit.nodes[0]
+
+		if (node === undefined || node.type !== nodes.proof_err || dropped(unit)) return
+
+		const xmlNode = node.attrs["node"] as number
+		const type = xmlNode >= 0 ? reader.attr(xmlNode, Ns.W, "type") : undefined
+		const kind = type === undefined ? undefined : /^(spell|gram)(Start|End)$/.exec(type)
+
+		if (kind === undefined || kind === null) {
+			if (alone(index) || (!forced && nextTo(index))) out.add(index)
+
+			return
+		}
+
+		const key = kind[1] as string
+		let starts = open.get(key)
+
+		if (starts === undefined) {
+			starts = []
+			open.set(key, starts)
+		}
+
+		if (kind[2] === "Start") {
+			starts.push(index)
+
+			return
+		}
+
+		const start = starts.pop()
+
+		if (start === undefined) {
+			if (alone(index)) out.add(index)
+
+			return
+		}
+
+		let drop = alone(start) || alone(index)
+
+		for (let inner = start + 1; !drop && !forced && inner < index; inner++) {
+			const between = list[inner] as Unit
+
+			drop = between.nodes.length > 0 && !dropped(between) && rebuilt(between)
+		}
+
+		if (drop) {
+			out.add(start)
+			out.add(index)
+		}
+	})
+
+	for (const starts of open.values()) for (const start of starts) if (alone(start)) out.add(start)
+
+	return out
+}
+
 function writeInline(w: StoryWriting, out: Out, paragraph: Node, owned: number): void {
 	const forced = paragraph === w.force
 	const list = units(paragraph)
@@ -596,27 +678,12 @@ function writeInline(w: StoryWriting, out: Out, paragraph: Node, owned: number):
 		return false
 	}
 
+	const proofDropped = droppedProofErrors(w, list, forced, dropped, holdsContent)
+
 	list.forEach((unit, index) => {
 		const node = unit.nodes[0]
 
-		if (node === undefined || dropped(unit)) return
-
-		if (node.type === nodes.proof_err && unit.wrappers.some(mark => mark.type === marks.link && !holdsContent(mark, index))) return
-
-		// Bookkeeping marks stay only between content written as it was.
-		if (node.type === nodes.proof_err) {
-			const previous = list[index - 1]
-			const next = list[index + 1]
-
-			// Gate 1 keeps them: it proves the run rebuilding, and with them most paragraphs come out as
-			// their very bytes.
-			if (
-				!forced &&
-				((previous !== undefined && !previous.atom && !previous.copy) || (next !== undefined && !next.atom && !next.copy))
-			) {
-				return
-			}
-		}
+		if (node === undefined || dropped(unit) || proofDropped.has(index)) return
 
 		transition(w, out, stack, unit.wrappers, owned)
 

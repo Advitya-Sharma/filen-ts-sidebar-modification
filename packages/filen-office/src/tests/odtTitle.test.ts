@@ -39,4 +39,12 @@ describe("an OpenDocument text's title", () => {
 			expect(partText(translation, "_rels/.rels")).not.toContain("core-properties")
 		}
 	})
+
+	it("is none, and the document still opens, when the title holds an invalid character reference", async () => {
+		const extra = [meta("a&#x1;b")]
+		const translation = await translated({ body: "<text:p>Hi</text:p>", extra })
+
+		expect(translation.parts.has("docProps/core.xml")).toBe(false)
+		expect((await openOdtAsDocx(bytesSource(odtBytes({ body: "<text:p>Hi</text:p>", extra })))).ok).toBe(true)
+	})
 })

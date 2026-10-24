@@ -28,6 +28,7 @@ import { joinChunks } from "../../rtf/write/out"
 import type { RtfLockedBlock } from "../../rtf/write/proof"
 import {
 	Namespaces,
+	NodeKind,
 	assertWellFormed,
 	assertWellFormedSliced,
 	decodeUtf8,
@@ -84,6 +85,70 @@ export interface OdtWritten {
 	readonly rounds: number
 	// Which proof proved it: the changed blocks' alone (span.ts), or the whole file's.
 	readonly proof?: "span" | "whole"
+	// What the save wrote otherwise than the edit has it, for the user to be told.
+	readonly notices?: readonly OdtWriteNotice[]
+}
+
+// commentPoint: comments over a range kept at the start of their text, an ODF 1.0 or 1.1 annotation marking a point
+// (office:annotation-end is new in ODF 1.2).
+export interface OdtWriteNotice {
+	readonly kind: "commentPoint"
+	readonly count: number
+}
+
+const COMMENT_STORIES = /^word\/(?:document|header\d+|footer\d+|footnotes|endnotes)\.xml$/u
+
+// The edit with each new or changed comment's range collapsed to its start (its end and reference moved there), for a
+// document whose annotations mark points; how many it collapsed.
+function pointComments(translation: OdtTranslation, edits: OdtEdits): { edits: OdtEdits; count: number } {
+	const edited = edits.parts.get("word/comments.xml")
+
+	if (edited === undefined) return { edits, count: 0 }
+
+	const comments = (bytes: Uint8Array | undefined): Map<string, string> =>
+		new Map(
+			bytes === undefined
+				? []
+				: [...decodeUtf8(bytes).matchAll(/<w:comment\b[^>]*?\sw:id="([^"]*)"(?:[^>]*?\/>|[\s\S]*?<\/w:comment>)/gu)].map(
+						match => [match[1] ?? "", match[0]] as const
+					)
+		)
+	const before = comments(translation.parts.get("word/comments.xml") as Uint8Array | undefined)
+	const changed = [...comments(edited)].filter(([id, markup]) => before.get(id) !== markup).map(([id]) => id)
+
+	if (changed.length === 0) return { edits, count: 0 }
+
+	const parts = new Map(edits.parts)
+	let count = 0
+
+	for (const [name, bytes] of edits.parts) {
+		if (!COMMENT_STORIES.test(name)) continue
+
+		let text = decodeUtf8(bytes)
+		const was = text
+
+		for (const id of changed) {
+			const start = `<w:commentRangeStart w:id="${id}"/>`
+			const end = `<w:commentRangeEnd w:id="${id}"/>`
+			const at = text.indexOf(start)
+
+			if (at < 0 || !text.includes(end) || text.startsWith(end, at + start.length)) continue
+
+			const reference = new RegExp(`<w:r>(?:<w:rPr>(?:(?!</w:rPr>)[\\s\\S])*</w:rPr>)?<w:commentReference w:id="${id}"/></w:r>`, "u")
+			const run = reference.exec(text)?.[0] ?? ""
+
+			text = text.replace(end, "")
+
+			if (run !== "") text = text.replace(run, "")
+
+			text = text.replace(start, `${start}${end}${run}`)
+			count++
+		}
+
+		if (text !== was) parts.set(name, encodeUtf8(text))
+	}
+
+	return { edits: { ...edits, parts }, count }
 }
 
 export interface OdtProofResult {
@@ -138,6 +203,10 @@ const REWRITABLE = new Set([
 	"text:reference-mark-start",
 	"text:reference-mark-end",
 	"office:annotation-end",
+	// Inside a paragraph, around a change this paragraph alone holds (OdtPlan.changeOpaque).
+	"text:change",
+	"text:change-start",
+	"text:change-end",
 	"table:table",
 	"table:table-column",
 	"table:table-columns",
@@ -193,8 +262,12 @@ const ATTRIBUTES: Readonly<Record<string, ReadonlySet<string> | undefined>> = {
 	"text:list": new Set(["text:style-name", "text:continue-numbering", "text:continue-list", "xml:id"]),
 	"text:list-item": new Set(["text:start-value", "xml:id"]),
 	"text:list-header": new Set(["xml:id"]),
-	"office:annotation-end": new Set(["office:name"])
+	"office:annotation-end": new Set(["office:name"]),
+	"text:change": new Set(["text:change-id"]),
+	"text:change-start": new Set(["text:change-id"]),
+	"text:change-end": new Set(["text:change-id"])
 }
+const CHANGE_MARKS: ReadonlySet<string> = new Set(["text:change", "text:change-start", "text:change-end"])
 
 interface Replacement {
 	readonly start: number
@@ -502,6 +575,55 @@ interface UnitTree {
 	readonly structural: boolean
 }
 
+// A tracked change's record in the source (OdtPlan.changeRecords).
+interface ChangeRecord {
+	readonly kind: "insertion" | "deletion" | "other"
+	readonly simple: boolean
+	// The text:changed-region's span in content.xml.
+	readonly start: number
+	readonly end: number
+}
+
+// office:text's text:tracked-changes in content.xml: its start tag's span, prefix and other attributes, and where
+// its end tag starts (-1: it is empty-element); or, with none, where one goes (after office:text's forms, Part 3
+// §3.4).
+interface TrackedChanges {
+	readonly container: { tagStart: number; tagEnd: number; prefix: string; attributes: string; close: number } | undefined
+	readonly insertAt: number
+}
+
+function trackedChangesOf(plan: OdtPlan): TrackedChanges {
+	const bytes = plan.contentBytes
+	const start = plan.textStart()
+	const text = decodeUtf8(bytes.subarray(start, Math.min(bytes.length, start + 4 * 1024 * 1024)))
+	const offset = (characters: number): number => start + encodeUtf8(text.slice(0, characters)).length
+	const container =
+		/^\s*(?:<([A-Za-z0-9_.-]+:)?forms\b[^>]*?(?:\/>|>[\s\S]*?<\/\1?forms>)\s*)?(<([A-Za-z0-9_.-]+:)?tracked-changes\b([^>]*?)(\/?)>)/u.exec(
+			text
+		)
+
+	if (container === null) {
+		const forms = /^\s*<([A-Za-z0-9_.-]+:)?forms\b[^>]*?(?:\/>|>[\s\S]*?<\/\1?forms>)/u.exec(text)
+
+		return { container: undefined, insertAt: forms === null ? start : offset(forms[0].length) }
+	}
+
+	const prefix = container[3] ?? ""
+	const tagStart = offset(container.index + container[0].length - (container[2] ?? "").length)
+	const tagEnd = offset(container.index + container[0].length)
+	let close = -1
+
+	if (container[5] !== "/") {
+		const at = text.indexOf(`</${prefix}tracked-changes>`, container.index)
+
+		if (at < 0) throw new OdtWriteRefusal("package", "content.xml's tracked changes have no end")
+
+		close = offset(at)
+	}
+
+	return { container: { tagStart, tagEnd, prefix, attributes: container[4] ?? "", close }, insertAt: tagStart }
+}
+
 interface Unit {
 	readonly origin: OdtOrigin
 	readonly index: number
@@ -800,7 +922,8 @@ class OdtPlan {
 
 			return undefined
 		}
-		const scan = (at: number, skip: ReadonlySet<number>): string | undefined => {
+		// `inParagraph`: `at` is a paragraph or inside one (change marks between blocks stay as they are).
+		const scan = (at: number, skip: ReadonlySet<number>, inParagraph: boolean): string | undefined => {
 			for (let child = document.firstChildElement(at); child >= 0; child = document.nextSiblingElement(child)) {
 				if (skip.has(child)) continue
 
@@ -808,8 +931,13 @@ class OdtPlan {
 
 				if (name.startsWith("draw:") || name.startsWith("dr3d:") || ATOMS.has(name)) continue
 				if (!REWRITABLE.has(name) && name !== "text:section") return name
+				if (CHANGE_MARKS.has(name) && !inParagraph) return name
 
-				const found = attributesOpaque(child, name) ?? scan(child, skip)
+				const paragraph = name === "text:p" || name === "text:h"
+				const found =
+					attributesOpaque(child, name) ??
+					(paragraph ? this.changeOpaque(document, namespaces, child) : undefined) ??
+					scan(child, skip, inParagraph || paragraph)
 
 				if (found !== undefined) return found
 			}
@@ -821,11 +949,18 @@ class OdtPlan {
 		if (node >= 0) {
 			flow(node)
 			// Each block's own, and what the structure around them holds.
-			blockOpaque = emitters.map(
-				emitter => attributesOpaque(emitter, elementName(document, namespaces, emitter)) ?? scan(emitter, NO_NODES)
-			)
-			opaque = scan(document.documentElement(), new Set(emitters)) ?? blockOpaque.find(reason => reason !== undefined)
-			structuralOpaque = scan(document.documentElement(), new Set(emitters))
+			blockOpaque = emitters.map(emitter => {
+				const name = elementName(document, namespaces, emitter)
+				const paragraph = name === "text:p" || name === "text:h"
+
+				return (
+					attributesOpaque(emitter, name) ??
+					(paragraph ? this.changeOpaque(document, namespaces, emitter) : undefined) ??
+					scan(emitter, NO_NODES, paragraph)
+				)
+			})
+			structuralOpaque = scan(document.documentElement(), new Set(emitters), false)
+			opaque = structuralOpaque ?? blockOpaque.find(reason => reason !== undefined)
 		}
 
 		unit.tree = {
@@ -871,6 +1006,216 @@ class OdtPlan {
 		}
 
 		return undefined
+	}
+
+	// Why a paragraph's change marks (Part 3 §5.5.7-§5.5.9) may not be rewritten; undefined when they may. A rewrite
+	// writes the paragraph's tracked changes as new changes and leaves out the records of those it replaced
+	// (OdtWrite.recordChanges): each change the paragraph marks must be one it alone marks (an insertion's start and
+	// end, a deletion's one mark), whose record says nothing the translation does not read (OdtPlan.changeRecords).
+	changeOpaque(document: XmlDocument, namespaces: Namespaces, paragraph: number): string | undefined {
+		const seen = new Map<string, string[]>()
+		// Insertions open where the walk is, and those holding something (an empty one would be left out unseen).
+		const open = new Set<string>()
+		const filled = new Set<string>()
+		const fill = (): void => {
+			for (const id of open) filled.add(id)
+		}
+		const walk = (node: number): void => {
+			for (let child = document.firstChild(node); child >= 0; child = document.nextSibling(child)) {
+				const kind = document.kind(child)
+
+				if (kind === NodeKind.Text || kind === NodeKind.CData) {
+					if (document.text(child) !== "") fill()
+
+					continue
+				}
+
+				if (kind !== NodeKind.Element) continue
+
+				const name = elementName(document, namespaces, child)
+
+				if (name.startsWith("draw:") || name.startsWith("dr3d:") || ATOMS.has(name)) {
+					fill()
+
+					continue
+				}
+
+				if (CHANGE_MARKS.has(name)) {
+					const id = attributeOf(document, namespaces, child, "text:change-id") ?? ""
+					const marks = seen.get(id)
+
+					if (marks === undefined) seen.set(id, [name])
+					else marks.push(name)
+
+					if (name === "text:change-start") open.add(id)
+					else if (name === "text:change-end") open.delete(id)
+				} else {
+					if (name === "text:s" || name === "text:tab" || name === "text:line-break") fill()
+
+					walk(child)
+				}
+			}
+		}
+
+		walk(paragraph)
+
+		if (seen.size === 0) return undefined
+
+		const records = this.changeRecords()
+
+		for (const [id, marks] of seen) {
+			const record = records.get(id)
+			const shape = marks.join(" ")
+			const fits =
+				record?.simple === true &&
+				(record.kind === "insertion" ? shape === "text:change-start text:change-end" && filled.has(id) : shape === "text:change") &&
+				this.changeMarks().get(id)?.length === marks.length
+
+			if (!fits) return marks[0]
+		}
+
+		return undefined
+	}
+
+	private records: Map<string, ChangeRecord> | undefined
+
+	// The source's tracked-change records by id (text:changed-region in text:tracked-changes, Part 3 §5.5.2), each
+	// with its span in content.xml. Simple: one insertion or deletion whose change info is an author and a date and,
+	// for a deletion, one paragraph with content holding no change marks (all a rewrite records anew).
+	changeRecords(): Map<string, ChangeRecord> {
+		if (this.records !== undefined) return this.records
+
+		const records = new Map<string, ChangeRecord>()
+		// The body's text:tracked-changes is a unit of its own, holding no blocks.
+		const unit = this.units.find(
+			item => item.origin.count === 0 && /^<([A-Za-z0-9_.-]+:)?tracked-changes[\s>]/u.test(this.headOf(item))
+		)
+
+		this.records = records
+
+		if (unit === undefined) return records
+
+		const { start: tagStart, end } = unit.origin
+		const open = encodeUtf8(this.rootOpen)
+		const closing = encodeUtf8(this.rootClose)
+		const bytes = new Uint8Array(open.length + end - tagStart + closing.length)
+
+		bytes.set(open)
+		bytes.set(this.contentBytes.subarray(tagStart, end), open.length)
+		bytes.set(closing, open.length + end - tagStart)
+
+		const document = parseXml(bytes)
+		const namespaces = new Namespaces(document)
+		const container = document.firstChildElement(document.documentElement())
+		const shift = tagStart - open.length
+		const named = (node: number): string => elementName(document, namespaces, node)
+
+		for (let region = document.firstChildElement(container); region >= 0; region = document.nextSiblingElement(region)) {
+			if (named(region) !== "text:changed-region") continue
+
+			const id = attributeOf(document, namespaces, region, "text:id") ?? attributeOf(document, namespaces, region, "xml:id")
+
+			if (id === undefined) continue
+
+			const changes: number[] = []
+
+			for (let child = document.firstChildElement(region); child >= 0; child = document.nextSiblingElement(child)) changes.push(child)
+
+			const change = changes.length === 1 ? (changes[0] ?? -1) : -1
+			const kind =
+				change < 0
+					? "other"
+					: named(change) === "text:insertion"
+						? "insertion"
+						: named(change) === "text:deletion"
+							? "deletion"
+							: "other"
+			let simple =
+				kind !== "other" &&
+				document.attributes(region).every(attribute => {
+					const name = canonicalAttribute(namespaces, region, attribute.name)
+
+					return attribute.name.startsWith("xmlns") || name === "text:id" || name === "xml:id"
+				})
+			let info = 0
+			let paragraphs = 0
+
+			for (
+				let child = change < 0 ? -1 : document.firstChildElement(change);
+				simple && child >= 0;
+				child = document.nextSiblingElement(child)
+			) {
+				const name = named(child)
+
+				if (name === "office:change-info") {
+					info++
+
+					const parts: string[] = []
+
+					for (let item = document.firstChildElement(child); item >= 0; item = document.nextSiblingElement(item))
+						parts.push(named(item))
+
+					simple = parts.every((part, k) => (part === "dc:creator" || part === "dc:date") && parts.indexOf(part) === k)
+				} else if ((name === "text:p" || name === "text:h") && kind === "deletion") {
+					paragraphs++
+
+					const raw = decodeUtf8(document.raw(child))
+
+					// Text to record: a deletion of nothing the translation reads would be left out unseen.
+					simple =
+						(document.textContent(child).trim() !== "" || /:(?:s|tab|line-break)[\s/>]/u.test(raw)) &&
+						!/change-id\s*=/u.test(raw)
+				} else simple = false
+			}
+
+			records.set(id, {
+				kind,
+				simple: simple && info === 1 && paragraphs === (kind === "deletion" ? 1 : 0),
+				start: document.start(region) + shift,
+				end: document.end(region) + shift
+			})
+		}
+
+		return records
+	}
+
+	// The start of a unit's markup (enough for its element's name).
+	private headOf(unit: Unit): string {
+		const bytes = this.contentBytes
+		let at = unit.origin.start
+
+		while (at < unit.origin.end && (bytes[at] === 0x20 || bytes[at] === 0x09 || bytes[at] === 0x0a || bytes[at] === 0x0d)) at++
+
+		return decodeUtf8(bytes.subarray(at, Math.min(unit.origin.end, at + 128)))
+	}
+
+	private marks: Map<string, number[]> | undefined
+
+	// Where office:text's change marks are (their start tags' offsets in content.xml), by the change they mark.
+	changeMarks(): Map<string, number[]> {
+		if (this.marks !== undefined) return this.marks
+
+		const marks = new Map<string, number[]>()
+		const bytes = this.contentBytes
+		const needle = encodeUtf8('change-id="')
+
+		this.marks = marks
+
+		for (let at = indexOf(bytes, needle, this.prologueEnd); at >= 0; at = indexOf(bytes, needle, at + needle.length)) {
+			const tag = bytes.lastIndexOf(0x3c, at)
+			const head = decodeUtf8(bytes.subarray(tag + 1, at))
+
+			if (!/^([A-Za-z0-9_.-]+:)?change(?:-start|-end)?\s(?:[^>]*\s)?(?:[A-Za-z0-9_.-]+:)?$/u.test(head)) continue
+
+			const valueEnd = bytes.indexOf(0x22, at + needle.length)
+			const id = decodeUtf8(bytes.subarray(at + needle.length, valueEnd < 0 ? at + needle.length : valueEnd))
+			const list = marks.get(id)
+
+			if (list === undefined) marks.set(id, [tag])
+			else list.push(tag)
+		}
+
+		return marks
 	}
 
 	// Where an insertion into an empty body goes: the start of office:text's content.
@@ -1388,6 +1733,7 @@ class OdtWrite {
 			originStyle: rsid => this.originStyle(rsid),
 			tracksOrigin: style => this.untranslated(style, "content"),
 			continuesLists: odfVersion(plan.rootOpen) >= 1.2,
+			version: odfVersion(plan.rootOpen),
 			precedingList: (document, paragraph) => (document === doc.eBody ? this.precedingList(paragraph) : undefined),
 			masterOf: (_document, paragraph) => doc.masters.get(paragraph),
 			picture: (document, drawing) => this.picture(document, drawing, doc.eRels, this.content),
@@ -2953,25 +3299,17 @@ class OdtWrite {
 	// (after its forms, Part 3 §3.4 office:text), its track-changes switch set as the edit's.
 	private recordChanges(): void {
 		const tracking = this.doc.tracking
+		const dropped = this.replacedChanges()
 
-		if (this.changes.length === 0 && tracking === undefined) return
+		if (this.changes.length === 0 && tracking === undefined && dropped.length === 0) return
 
-		const bytes = this.plan.contentBytes
-		const text = decodeUtf8(bytes.subarray(this.plan.textStart(), Math.min(bytes.length, this.plan.textStart() + 4 * 1024 * 1024)))
-		const offset = (characters: number): number => this.plan.textStart() + encodeUtf8(text.slice(0, characters)).length
-		const container =
-			/^\s*(?:<([A-Za-z0-9_.-]+:)?forms\b[^>]*?(?:\/>|>[\s\S]*?<\/\1?forms>)\s*)?(<([A-Za-z0-9_.-]+:)?tracked-changes\b([^>]*?)(\/?)>)/u.exec(
-				text
-			)
+		const located = trackedChangesOf(this.plan)
 		const switchOf = tracking === undefined ? "" : ` text:track-changes="${tracking ? "true" : "false"}"`
 
-		if (container === null) {
-			const forms = /^\s*<([A-Za-z0-9_.-]+:)?forms\b[^>]*?(?:\/>|>[\s\S]*?<\/\1?forms>)/u.exec(text)
-			const at = forms === null ? this.plan.textStart() : offset(forms[0].length)
-
+		if (located.container === undefined) {
 			this.content.replacements.push({
-				start: at,
-				end: at,
+				start: located.insertAt,
+				end: located.insertAt,
 				text: `<text:tracked-changes${this.content.declarations}${switchOf}>${this.changes.join("")}</text:tracked-changes>`,
 				segment: -1
 			})
@@ -2979,12 +3317,10 @@ class OdtWrite {
 			return
 		}
 
-		const tagStart = offset(container.index + container[0].length - (container[2] ?? "").length)
-		const tagEnd = offset(container.index + container[0].length)
-		const prefix = container[3] ?? ""
-		const attributes = (container[4] ?? "").replace(/\s[A-Za-z0-9_.-]*:?track-changes="[^"]*"/u, "")
+		const { tagStart, tagEnd, prefix, close } = located.container
+		const attributes = located.container.attributes.replace(/\s[A-Za-z0-9_.-]*:?track-changes="[^"]*"/u, "")
 
-		if (container[5] === "/") {
+		if (close < 0) {
 			this.content.replacements.push({
 				start: tagStart,
 				end: tagEnd,
@@ -2995,10 +3331,6 @@ class OdtWrite {
 			return
 		}
 
-		const close = text.indexOf(`</${prefix}tracked-changes>`, container.index)
-
-		if (close < 0) throw new OdtWriteRefusal("package", "content.xml's tracked changes have no end")
-
 		if (tracking !== undefined)
 			this.content.replacements.push({
 				start: tagStart,
@@ -3006,8 +3338,62 @@ class OdtWrite {
 				text: `<${prefix}tracked-changes${attributes}${switchOf}>`,
 				segment: -1
 			})
-		if (this.changes.length > 0)
-			this.content.replacements.push({ start: offset(close), end: offset(close), text: this.changes.join(""), segment: -1 })
+
+		for (const record of dropped) this.content.replacements.push({ start: record.start, end: record.end, text: "", segment: -1 })
+
+		if (this.changes.length > 0) this.content.replacements.push({ start: close, end: close, text: this.changes.join(""), segment: -1 })
+	}
+
+	// Whether the write leaves out records of source changes (see replacedChanges).
+	private droppedChanges = false
+
+	// The records of the source's changes no written mark names any more: a rewrite wrote their paragraphs' changes
+	// anew (or the edit removed them). A change some mark still names keeps its record.
+	private replacedChanges(): ChangeRecord[] {
+		if (this.plan.changeRecords().size === 0) return []
+
+		const marks = this.plan.changeMarks()
+
+		if (marks.size === 0) return []
+
+		const replaced = this.content.replacements
+			.filter(replacement => replacement.end > replacement.start)
+			.sort((a, b) => a.start - b.start)
+		const inside = (at: number): boolean => {
+			let low = 0
+			let high = replaced.length - 1
+
+			while (low <= high) {
+				const middle = (low + high) >> 1
+				const item = replaced[middle]
+
+				if (item === undefined) break
+				if (at < item.start) high = middle - 1
+				else if (at >= item.end) low = middle + 1
+				else return true
+			}
+
+			return false
+		}
+		const named = new Set<string>()
+
+		for (const replacement of this.content.replacements)
+			for (const match of replacement.text.matchAll(/change-id="([^"]*)"/gu)) named.add(match[1] ?? "")
+
+		const records = this.plan.changeRecords()
+		const out: ChangeRecord[] = []
+
+		for (const [id, at] of marks) {
+			if (named.has(id) || at.some(offset => !inside(offset))) continue
+
+			const record = records.get(id)
+
+			if (record !== undefined) out.push(record)
+		}
+
+		this.droppedChanges = out.length > 0
+
+		return out
 	}
 
 	// Pictures the written file adds (entry name -> bytes), and the edit's picture parts they hold.
@@ -3637,7 +4023,13 @@ class OdtWrite {
 
 		if (this.mode.prove || this.mode.forced.size > 0 || !result.contentChanged || !(result.content instanceof BytePieces))
 			return undefined
-		if (result.styles !== undefined || result.pictures.size > 0 || this.changes.length > 0 || doc.tracking !== undefined)
+		if (
+			result.styles !== undefined ||
+			result.pictures.size > 0 ||
+			this.changes.length > 0 ||
+			this.droppedChanges ||
+			doc.tracking !== undefined
+		)
 			return undefined
 		if (doc.masters.size > 0 || doc.forced.size > 0 || this.newLists.size > 0 || this.newMasters.length > 0) return undefined
 		if (this.newStylesMarkup.length > 0 || this.newCommonStyles.size > 0 || (plan.edits.removed?.length ?? 0) > 0) return undefined
@@ -6886,7 +7278,11 @@ async function write(
 	if (edits.parts.size === 0 && (edits.removed?.length ?? 0) === 0) return { bytes: source.bytes, written: 0, rounds: 0 }
 
 	const job = jobOf(options.turns)
-	const plan = await OdtPlan.create(source, edits, job)
+	let plan = await OdtPlan.create(source, edits, job)
+	const pointed = odfVersion(plan.rootOpen) < 1.2 ? pointComments(source.translation, edits) : undefined
+	const notices: OdtWriteNotice[] = pointed !== undefined && pointed.count > 0 ? [{ kind: "commentPoint", count: pointed.count }] : []
+
+	if (pointed !== undefined && pointed.count > 0) plan = await OdtPlan.create(source, pointed.edits, job)
 
 	await plan.preload(job)
 	await turn(job)
@@ -6923,7 +7319,7 @@ async function write(
 			// Nothing to write: the edit reads as the source does (its parts the translation's, byte for byte).
 			const unchanged = await verify(expected, result, source.bytes, source.archive, job)
 
-			if (unchanged.again.size === 0 && unchanged.wrong.size === 0) return { bytes: source.bytes, written: 0, rounds: round }
+			if (unchanged.again.size === 0 && unchanged.wrong.size === 0) return { bytes: source.bytes, written: 0, rounds: round, notices }
 			if (unchanged.wrong.size > 0) throw new OdtWriteRefusal("proof", unchanged.message ?? "the edit does not read back")
 
 			for (const unit of unchanged.again) forced.add(unit)
@@ -6941,12 +7337,12 @@ async function write(
 			content instanceof BytePieces &&
 			(await proveSpans(span, expected, content, packaged, source.archive, manifest, job))
 		)
-			return { bytes: packaged, written: result.written, rounds: round, proof: "span" }
+			return { bytes: packaged, written: result.written, rounds: round, proof: "span", notices }
 
 		const checked = await verify(expected, result, packaged, source.archive, job)
 
 		if (checked.wrong.size > 0) throw new OdtWriteRefusal("proof", checked.message ?? "the written file reads differently")
-		if (checked.again.size === 0) return { bytes: packaged, written: result.written, rounds: round, proof: "whole" }
+		if (checked.again.size === 0) return { bytes: packaged, written: result.written, rounds: round, proof: "whole", notices }
 
 		for (const unit of checked.again) forced.add(unit)
 	}

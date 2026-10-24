@@ -6,7 +6,7 @@ import { defineSheetFeature, type SheetReadyResult } from "../core/sheet/registr
 import type { XlsxDocument } from "../core/xlsx/edit/document"
 import { annotationStore } from "../core/xlsx/comments/store"
 import type { SheetSession } from "../core/sheet/session"
-import { IMMEDIATE, buildFixture, tileEntry } from "./sheetSessionFixtures"
+import { IMMEDIATE, buildFixture, openFixture, tileEntry } from "./sheetSessionFixtures"
 import { NOTES } from "./sheetNotesFixtures"
 
 // What a feature reads beside a sheet (SheetFeature.ready) never holds up the first tile: it lands later and patches
@@ -124,6 +124,30 @@ describe("feature loads beside a sheet", () => {
 
 		expect(document.isReady(second)).toBe(false)
 		expect([...(store.commentsOf(second)?.notes.values() ?? [])].map(note => note.text)).toEqual(["Ann:\nfirst note", "Ann:\nsecond"])
+		session.close()
+	})
+
+	it("marks the notes of a sheet holding no values in view mode, before any intent to edit", async () => {
+		const [first, ...rest] = NOTES.sheets
+
+		if (first === undefined) throw new Error("no sheet")
+
+		const { session, info, events } = await openFixture({
+			...NOTES,
+			sheets: [{ ...first, body: '<sheetData/><legacyDrawing r:id="rId2"/>' }, ...rest]
+		})
+
+		await session.tiles(info.activeSheet, Uint32Array.of(0, 0))
+		await settle()
+
+		const patch = events
+			.flatMap(event => (event.type === "change" ? event.change.patches : []))
+			.findLast(candidate => candidate.tileRow === 0 && candidate.tileCol === 0)
+
+		if (patch === undefined) throw new Error("no patch")
+
+		expect((tileEntry(patch, 1, 1)?.flags ?? 0) & CellFlag.NOTE).toBe(CellFlag.NOTE)
+		expect((tileEntry(patch, 4, 3)?.flags ?? 0) & CellFlag.NOTE).toBe(CellFlag.NOTE)
 		session.close()
 	})
 })

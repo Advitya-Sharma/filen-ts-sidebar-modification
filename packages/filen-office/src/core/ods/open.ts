@@ -232,6 +232,7 @@ async function open(source: ByteSource, options: OdsOpenOptions): Promise<OdsOpe
 				truncated: read.some(issue => issue.kind === "repeat" && issue.sheet === table.name && TRUNCATING.has(issue.detail ?? "")),
 				rows: table.built.rowCount,
 				columns: table.built.columnCount,
+				rowProps: table.built.rowProps,
 				validationNames: built.validationNames[index] ?? new Map()
 			}
 		}),

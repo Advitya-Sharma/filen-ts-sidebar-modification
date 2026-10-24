@@ -223,6 +223,29 @@ describe("RTF reader", () => {
 		expect(texts(files["word/header1.xml"] ?? "")).toBe("Running head")
 	})
 
+	it("keeps a section's headers past a \\sectd within it, and its page setup past one inside its footer, as Word writes after a field", async () => {
+		const files = await parts(
+			"{\\rtf1\\paperw11906\\paperh16838\\sectd\\pgwsxn12240\\pghsxn15840{\\headerr \\pard Running head\\par}" +
+				"{\\footerl \\pard {\\field{\\*\\fldinst PAGE}{\\fldrslt }}\\sectd \\ltrsect\\linex0 \\par}{\\footerr \\pard Foot\\par}" +
+				"\\pard one {\\field{\\*\\fldinst PAGE}{\\fldrslt 1}}\\sectd \\linex0\\pgwsxn12240\\pghsxn15840 two\\par}"
+		)
+		const section = /<w:sectPr>.*<\/w:sectPr>/su.exec(files["word/document.xml"] ?? "")?.[0] ?? ""
+
+		expect(section).toContain('<w:headerReference w:type="default"')
+		expect(section).toContain('<w:footerReference w:type="default"')
+		expect(section).toContain('<w:footerReference w:type="even"')
+		expect(section).toContain('<w:pgSz w:w="12240" w:h="15840"/>')
+		expect(texts(files["word/header1.xml"] ?? "")).toBe("Running head")
+	})
+
+	it("turns HTML paragraph auto spacing off unless the document turns it on (\\htmautsp)", async () => {
+		const off = (await parts("{\\rtf1\\pard one\\par}"))["word/settings.xml"] ?? ""
+		const on = (await parts("{\\rtf1\\htmautsp\\pard one\\par}"))["word/settings.xml"] ?? ""
+
+		expect(off).toContain("<w:compat><w:doNotUseHTMLParagraphAutoSpacing/></w:compat></w:settings>")
+		expect(on).not.toContain("doNotUseHTMLParagraphAutoSpacing")
+	})
+
 	it("numbers only paragraphs that name a list, showing \\listtext where none applies", async () => {
 		const files = await parts(
 			"{\\rtf1{\\*\\listtable{\\list\\listtemplateid1{\\listlevel\\levelnfc4\\levelstartat1{\\leveltext\\'02\\'00);}{\\levelnumbers\\'01;}\\fi-360\\li720}\\listid7}}" +

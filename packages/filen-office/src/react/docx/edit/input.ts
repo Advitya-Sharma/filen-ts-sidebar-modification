@@ -1,7 +1,9 @@
-import { Mark, type MarkType } from "prosemirror-model"
+import { Mark, type MarkType, type Node } from "prosemirror-model"
 import { TextSelection, type EditorState, type Transaction } from "prosemirror-state"
 import type { EditorView } from "prosemirror-view"
 import { FORMATTING_MARKS, docxSchema } from "../../../core/docx/edit/index"
+import { joinBackward, joinForward } from "../../../core/docx/paged/index"
+import { insidePair } from "../../../core/docx/edit/invariants/codePoints"
 
 // Edits over a selection, and word and line deletions, made as transactions on the document. Left to the
 // browser, they change the view's DOM across run spans and ProseMirror reads the result back: it rebuilds the
@@ -78,9 +80,11 @@ export function composedFormatting(state: EditorState, from: number, text: strin
 	return state.tr.replaceWith(from, to, docxSchema.text(text, marks))
 }
 
-// The document range of a beforeinput's first target range, or undefined when it has none, is collapsed or lies
-// outside the view (positions in the view are the document's).
-function targetRange(view: EditorView, event: InputEvent, size: number): { readonly from: number; readonly to: number } | undefined {
+// The document range of a beforeinput's first target range, widened to whole characters (an end inside a
+// surrogate pair takes the pair), or undefined when it has none, is collapsed or lies outside the view (positions
+// in the view are the document's).
+function targetRange(view: EditorView, event: InputEvent, doc: Node): { readonly from: number; readonly to: number } | undefined {
+	const size = doc.content.size
 	const ranges = typeof event.getTargetRanges === "function" ? event.getTargetRanges() : []
 	const range = ranges[0]
 
@@ -89,10 +93,14 @@ function targetRange(view: EditorView, event: InputEvent, size: number): { reado
 	try {
 		const a = view.posAtDOM(range.startContainer, range.startOffset, -1)
 		const b = view.posAtDOM(range.endContainer, range.endOffset, 1)
-		const from = Math.min(a, b)
-		const to = Math.max(a, b)
+		let from = Math.min(a, b)
+		let to = Math.max(a, b)
 
-		return from >= 0 && to <= size && from < to ? { from, to } : undefined
+		if (!(from >= 0 && to <= size && from < to)) return undefined
+		if (insidePair(doc, from)) from--
+		if (insidePair(doc, to)) to++
+
+		return { from, to }
 	} catch {
 		return undefined
 	}
@@ -117,7 +125,7 @@ export function inputTransaction(view: EditorView, state: EditorState, event: In
 		if (text === "") return undefined
 
 		// A replacement (autocorrect, a suggestion) names its range; typing replaces the selection.
-		const range = type === "insertReplacementText" || !selected ? targetRange(view, event, state.doc.content.size) : undefined
+		const range = type === "insertReplacementText" || !selected ? targetRange(view, event, state.doc) : undefined
 
 		if (range !== undefined) return state.tr.insertText(text, range.from, range.to).scrollIntoView()
 
@@ -129,7 +137,33 @@ export function inputTransaction(view: EditorView, state: EditorState, event: In
 	if (!WORD_AND_LINE_DELETES.has(type)) return undefined
 	if (selected) return state.tr.deleteSelection().scrollIntoView()
 
-	const range = targetRange(view, event, state.doc.content.size)
+	const range = targetRange(view, event, state.doc)
 
-	return range === undefined ? undefined : state.tr.delete(range.from, range.to).scrollIntoView()
+	return range === undefined ? undefined : withinParagraph(state, type, range)
+}
+
+// A word or line deletion of [from, to] kept in the caret's paragraph, as Word and the platforms delete: a range
+// a browser computed past the paragraph's edge (Chromium's Ctrl+K on macOS runs on into the next paragraph) stops
+// there. At the edge it deletes towards, the paragraphs join, as Backspace and Delete join them (nothing where
+// they do not join: the browser's deletion would cut across the structure).
+function withinParagraph(state: EditorState, type: string, range: { readonly from: number; readonly to: number }): Transaction {
+	const $caret = state.selection.$from
+
+	if (!$caret.parent.isTextblock) return state.tr.delete(range.from, range.to).scrollIntoView()
+
+	const start = $caret.start()
+	const end = $caret.end()
+	const forward = type.endsWith("Forward")
+	const backward = type.endsWith("Backward")
+
+	if ((forward && $caret.pos === end) || (backward && $caret.pos === start)) {
+		const joined = forward ? joinForward(state) : joinBackward(state)
+
+		return joined === null || joined === false ? state.tr : joined
+	}
+
+	const from = Math.max(range.from, start)
+	const to = Math.min(range.to, end)
+
+	return from < to ? state.tr.delete(from, to).scrollIntoView() : state.tr
 }

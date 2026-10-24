@@ -28,7 +28,7 @@ import type { DocxOpenOptions } from "./protocol"
 import { isSealedOfficeFile } from "../../core/encryption/index"
 import { PackageSealError, packageSealer, type PackageSealer, type PackageSealFailure } from "../encryption/seal"
 import { importOfficeKey, type AbortSignalLike, type OfficeKeyTransfer } from "../encryption/webCrypto"
-import { DocxClosedError, inThreadDocxZipper, type DocxZipper, type DocxZipperFactory } from "./save"
+import { DocxClosedError, inThreadDocxZipper, type DocxSaveNotice, type DocxZipper, type DocxZipperFactory } from "./save"
 
 // A password-protected document's saves: sealed with the key the document's holder handed over
 // (DocxUnlockedDocument.take), on this thread, in the editor's own chain (a viewer never loads seal code).
@@ -155,6 +155,8 @@ export interface DocxWritten {
 	readonly changedParts: readonly string[]
 	// sealMs: sealing and its check, for an encrypted document.
 	readonly timings: DocxSaveTimings & { readonly sealMs?: number }
+	// What the save wrote otherwise than the edit has it (DocxZipped.notices), for the user to be told.
+	readonly notices?: readonly DocxSaveNotice[]
 }
 
 export interface DocxEditingOptions {
@@ -497,7 +499,8 @@ export function inThreadEditingHost(
 				zipMs: zipped.zipMs,
 				verifyZipMs: zipped.verifyZipMs,
 				...(sealer === undefined ? {} : { sealMs })
-			}
+			},
+			...(zipped.notices === undefined || zipped.notices.length === 0 ? {} : { notices: zipped.notices })
 		}
 	}
 

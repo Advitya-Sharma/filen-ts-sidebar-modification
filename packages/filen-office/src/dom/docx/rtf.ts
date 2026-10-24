@@ -3,6 +3,7 @@ import type { RtfLockedBlock } from "../../core/rtf/write/proof"
 import type { DocxHost } from "./host"
 import type { DocxAbortSignal } from "./protection"
 import type { DocxConversion } from "./convert"
+import type { DocxSaveNotice } from "./save"
 
 export { rtfBlockProof } from "../../core/rtf/write/proof"
 
@@ -25,6 +26,12 @@ export class DocxRtfRefusal extends Error {
 	}
 }
 
+// A written file, and what its writer wrote otherwise than the edit has it (an ODF 1.1 file's comments as points).
+export interface DocxRtfSaved {
+	readonly bytes: Uint8Array
+	readonly notices?: readonly DocxSaveNotice[]
+}
+
 export interface DocxRtfEdits {
 	// Parts the docx writer wrote (replaced and added), by name.
 	readonly parts: readonly (readonly [string, Uint8Array])[]
@@ -35,15 +42,15 @@ export interface DocxRtfDocument {
 	// The viewer's source: { host, bytes }. The host opens the package where it is held; `bytes` gives its size only.
 	readonly host: DocxHost
 	readonly bytes: ByteSource
-	// What the file shows that the package leaves out (an RTF's equations, shapes, form fields...), counted: a PDF of
-	// the package reports it (DocxPdfExportOptions.untranslated).
+	// What the file shows that the package's pages leave out (an RTF's equations, shapes drawn by no picture or text,
+	// objects without their result...), counted: a PDF of the package reports it (DocxPdfExportOptions.untranslated).
 	readonly untranslated: number
 	// A copy of the package, for the editor.
 	take(): Promise<Uint8Array>
 	// Gate 1 (once, when the document is to be edited): the top-level blocks the RTF writer cannot write.
 	prove(): Promise<readonly RtfLockedBlock[]>
 	// The RTF of the document as edited; rejects with a DocxRtfRefusal for an edit it cannot write.
-	write(edits: DocxRtfEdits): Promise<Uint8Array>
+	write(edits: DocxRtfEdits): Promise<DocxRtfSaved>
 	// The document as edited converted to .docx where it is held (its package with the docx writer's parts, never
 	// through its own writer, so an edit that writer refuses still converts). The signal ends the job.
 	convertEdited(edits: DocxRtfEdits, options?: { readonly signal?: DocxAbortSignal }): Promise<DocxConversion>

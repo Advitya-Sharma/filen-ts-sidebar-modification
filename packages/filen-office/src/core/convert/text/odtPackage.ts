@@ -10,7 +10,10 @@ import type { LossyCounts } from "./report"
 //   w:compatSetting's w:name is an enumeration (§17.15.3.4) without it; documents with anchored drawings report it;
 // - so are its object-line-height setting (lines of only as-char objects as tall as they are), which documents with
 //   inline drawings report, and its paragraph-padding setting (borders inside the indents and joined, padding beside
-//   no line as a border that draws nothing), which documents with start or end borders or such padding report;
+//   no line as a border that draws nothing), which documents with start or end borders or such padding report, and
+//   with a line kept apart from the next paragraph's (w:frame, style:join-border false: Word and LibreOffice join
+//   paragraphs whose borders agree, and w:frame is Word's frame effect on a line);
+// - border spacing in whole points (the translation keeps padding to the twip; ST_PointMeasure holds whole points);
 // - property children in schema order (CT_RPr, CT_PPr, CT_ParaRPr: Part 4 wml.xsd);
 // - font family lists (ODF svg:font-family) as their first family: ST_String of w:rFonts is at most 31 characters;
 // - revision ids unique (one id per annotation; the translator gives one change region's id to each of its
@@ -30,6 +33,7 @@ const PROPERTY_PARTS = new Set(["word/styles.xml", "word/numbering.xml"])
 const SETTINGS = "word/settings.xml"
 const DOCUMENT_RELS = "word/_rels/document.xml.rels"
 const REVISIONS = new Set(["ins", "del", "moveFrom", "moveTo"])
+const BORDER_SIDES = new Set(["top", "left", "bottom", "right", "start", "end", "between", "bar"])
 const COMMENT_MARKS = new Set(["commentRangeStart", "commentRangeEnd", "commentReference"])
 const FONT_ATTRIBUTES = ["w:ascii", "w:hAnsi", "w:eastAsia", "w:cs"]
 const MAX_FONT = 31
@@ -63,15 +67,21 @@ interface PackageState {
 	readonly bookmarks: Bookmarks
 	fieldsAsText: number
 	commentMarksMoved: number
+	// Paragraph border lines whose w:frame (style:join-border false) was left out.
+	apartLines: number
 	// Comments (by id) whose reference the comments part held.
 	readonly referenced: Set<string>
 }
 
-function attributesMarkup(document: XmlDocument, node: number, changes: ReadonlyMap<string, string>): string {
+// `changes` maps an attribute to its new value, or to undefined to leave it out.
+function attributesMarkup(document: XmlDocument, node: number, changes: ReadonlyMap<string, string | undefined>): string {
 	let out = `<${document.name(node)}`
 
-	for (const attribute of document.attributes(node))
-		out += ` ${attribute.name}="${escapeAttribute(changes.get(attribute.name) ?? attribute.value)}"`
+	for (const attribute of document.attributes(node)) {
+		const value = changes.has(attribute.name) ? changes.get(attribute.name) : attribute.value
+
+		if (value !== undefined) out += ` ${attribute.name}="${escapeAttribute(value)}"`
+	}
 
 	return document.isSelfClosing(node) ? `${out}/>` : `${out}>`
 }
@@ -105,7 +115,7 @@ function rewrite(walk: Walk, node: number): string | undefined {
 	const { document, state } = walk
 	const local = document.localName(node)
 	const prefix = document.prefix(node)
-	const changes = new Map<string, string>()
+	const changes = new Map<string, string | undefined>()
 
 	for (const attribute of document.attributes(node)) {
 		if (attribute.name.startsWith("r:")) walk.named.add(attribute.value)
@@ -113,6 +123,26 @@ function rewrite(walk: Walk, node: number): string | undefined {
 
 	if (prefix === "w") {
 		if (REVISIONS.has(local) && document.attribute(node, "w:id") !== undefined) changes.set("w:id", String(state.nextRevision++))
+
+		if (BORDER_SIDES.has(local)) {
+			const space = document.attribute(node, "w:space")
+
+			if (space !== undefined && /^\d+\.\d+$/u.test(space)) changes.set("w:space", String(Math.round(Number(space))))
+
+			const line = document.attribute(node, "w:val")
+			const parent = document.parent(node)
+
+			if (
+				document.attribute(node, "w:frame") === "1" &&
+				line !== "none" &&
+				line !== "nil" &&
+				parent >= 0 &&
+				document.localName(parent) === "pBdr"
+			) {
+				changes.set("w:frame", undefined)
+				state.apartLines++
+			}
+		}
 
 		if (local === "rFonts") {
 			for (const name of FONT_ATTRIBUTES) {
@@ -446,6 +476,7 @@ export function standaloneParts(parts: Map<string, Uint8Array>, lossy: LossyCoun
 		bookmarks: bookmarkNames(documents.values()),
 		fieldsAsText: 0,
 		commentMarksMoved: 0,
+		apartLines: 0,
 		referenced: new Set()
 	}
 	const named = new Map<string, Set<string>>()
@@ -521,7 +552,10 @@ export function standaloneParts(parts: Map<string, Uint8Array>, lossy: LossyCoun
 		if (PADDING.test(text)) {
 			text = text.replace(PADDING, "")
 
-			if ([...parts].some(([name, bytes]) => (STORY.test(name) || name === "word/styles.xml") && padded(bytes)))
+			if (
+				state.apartLines > 0 ||
+				[...parts].some(([name, bytes]) => (STORY.test(name) || name === "word/styles.xml") && padded(bytes))
+			)
 				lossy.add("paragraphPadding")
 		}
 

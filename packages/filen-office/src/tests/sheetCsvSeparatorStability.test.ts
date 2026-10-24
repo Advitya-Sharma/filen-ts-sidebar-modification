@@ -13,6 +13,7 @@ import { cells, firstTile, savedBytes, tileTexts } from "./sheetSessionFixtures"
 // as Excel takes it.
 
 const GERMAN: SheetLocale = { decimal: ",", group: ".", argument: ";", dateOrder: "dmy" }
+const ENGLISH: SheetLocale = { decimal: ".", group: ",", argument: ",", dateOrder: "mdy" }
 const encoder = new TextEncoder()
 
 async function open(bytes: Uint8Array, settings?: SheetSessionSettings) {
@@ -65,6 +66,17 @@ describe("CSV separator stability", () => {
 
 		expect(shown.get("0,0")).toBe("1,5")
 		expect(shown.get("2,1")).toBe("6,5")
+	})
+
+	it("keeps the untouched rows' bytes of a file whose separator was a tie the locale settled", async () => {
+		const source = "1,5;2,5\r\n3,25;4,75\r\n5,5;6,5\r\n"
+		const session = await open(encoder.encode(source), { locale: ENGLISH })
+
+		expect((await session.command({ type: "cells.set", sheet: 0, cells: cells([[0, 0, "9"]]) })).ok).toBe(true)
+
+		const saved = new TextDecoder().decode(await savedBytes(session))
+
+		expect(saved).toBe("9,5;2,5\r\n3,25;4,75\r\n5,5;6,5\r\n")
 	})
 
 	it("keeps a clear majority over the locale's list separator", () => {

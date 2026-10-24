@@ -5,7 +5,7 @@ import { exportDocxPdf } from "../dom/docx/pdf"
 import { reportOf } from "../dom/docx/pdfClient"
 import { workerHarness } from "./docxEncryptedFixtures"
 import { pdfAssets } from "./docxPdfFixtures"
-import { latin1 } from "./rtfWriteFixtures"
+import { PNG, latin1 } from "./rtfWriteFixtures"
 
 // What an RTF file shows that the package it reads as leaves out (an equation, a shape, a form field...) reaches the
 // PDF's report as the conversions' reports have it, so the export says it was simplified; what no page shows (an
@@ -65,7 +65,49 @@ async function exported(rtf: Uint8Array): Promise<ReturnType<typeof reportOf>> {
 	}
 }
 
+// The count the PDF warns with: what its pages lack.
+async function untranslated(body: string): Promise<number> {
+	const harness = workerHarness()
+
+	try {
+		const opened = await harness.pool.rtf.open(latin1(`${HEADER}${body}}`))
+
+		if (opened.kind !== "opened") throw new Error(opened.kind)
+
+		opened.document.release()
+
+		return opened.document.untranslated
+	} finally {
+		harness.dispose()
+	}
+}
+
+const HEX = [...PNG].map(byte => byte.toString(16).padStart(2, "0")).join("")
+const SHAPE = (properties: string, text = ""): string =>
+	`\\pard\\plain {\\shp{\\*\\shpinst\\shpleft0\\shptop0\\shpright1440\\shpbottom1440${properties}${text}}}Text\\par`
+
 describe("the PDF of an RTF file", () => {
+	it("counts only content its pages lack: never a shape drawn by its picture, text or WordArt, a field's result or a state word", async () => {
+		const picture = SHAPE(`{\\sp{\\sn shapeType}{\\sv 75}}{\\sp{\\sn pib}{\\sv {\\pict\\pngblip\\picw2\\pich2 ${HEX}}}}`)
+		const textBox = SHAPE("{\\sp{\\sn shapeType}{\\sv 202}}", "{\\shptxt \\pard\\plain Boxed\\par}")
+		const wordArt = SHAPE("{\\sp{\\sn shapeType}{\\sv 136}}{\\sp{\\sn gtextUNICODE}{\\sv Art}}")
+		const formField =
+			"\\pard {\\field{\\*\\fldinst { FORMTEXT }{{\\*\\formfield{\\fftype0{\\*\\ffname Title}}}}}{\\fldrslt {Shown}}}\\par"
+		const object =
+			"\\pard {\\object\\objemb{\\*\\objclass Paint}{\\*\\objdata 0102}{\\result {\\pict\\pngblip\\picw2\\pich2 " + HEX + "}}}\\par"
+
+		expect(await untranslated(picture + textBox + wordArt + formField + object + "\\pard\\plain\\lisb120 Indented\\par")).toBe(0)
+		// A rectangle (drawn by no picture, text or WordArt) and an object without its result are lacking.
+		expect(await untranslated(SHAPE("{\\sp{\\sn shapeType}{\\sv 1}}"))).toBe(1)
+		expect(await untranslated("\\pard {\\object\\objemb{\\*\\objclass Paint}{\\*\\objdata 0102}}\\par")).toBe(1)
+		expect(
+			await untranslated(
+				"\\pard {\\shpgrp{\\*\\shpinst{\\shp{\\*\\shpinst{\\sp{\\sn shapeType}{\\sv 20}}}}" +
+					"{\\shp{\\*\\shpinst{\\sp{\\sn shapeType}{\\sv 202}}{\\shptxt Inside\\par}}}}}\\par"
+			)
+		).toBe(1)
+	})
+
 	it("reports an equation its package leaves out as content left out of the PDF", async () => {
 		expect((await exported(MATH)).refused).toEqual([["untranslated", 1]])
 	})

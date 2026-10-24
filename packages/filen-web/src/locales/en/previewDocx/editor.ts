@@ -101,6 +101,15 @@ export const previewDocxEditor = {
 	/** Docx editor — toast when saving refuses because the written file did not pass the check; the edits stay open and unsaved, with an action copying the document's text */
 	previewDocxSaveRefused:
 		"The document couldn't be saved without risking damage to it. It stays open with your changes, unsaved; copy its text to keep them.",
+	/** Docx editor — toast when saving an RTF file refuses because it holds a reply to a comment or a resolved comment, which RTF comments cannot have; the edits stay open and unsaved */
+	previewDocxSaveRefusedRtfComments:
+		"RTF files can't keep replies to comments or resolved comments. Delete the replies and reopen the comments to save, or use Download as to keep them in a Word document.",
+	/** Docx editor — toast once an OpenDocument save is stored: the file's older format version (ODF 1.0/1.1) can't mark which text a comment covers, so the comment was saved at the start of that text, for one */
+	previewDocxSaveCommentPoint_one:
+		"This document's older OpenDocument version can't mark which text a comment covers, so {{count}} comment was saved at the start of its text.",
+	/** Docx editor — as previewDocxSaveCommentPoint_one, for several */
+	previewDocxSaveCommentPoint_other:
+		"This document's older OpenDocument version can't mark which text a comment covers, so {{count}} comments were saved at the start of their text.",
 	/** Docx editor — action on the save-refused toast: copies the document's text as edited */
 	previewDocxSaveRefusedCopy: "Copy text",
 	/** Docx editor — toast once a save is stored: edited parts the save check refused were saved as they were last saved, and went back to that in the editor (undo brings the edits back), for one */

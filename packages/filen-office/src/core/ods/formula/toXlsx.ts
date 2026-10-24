@@ -598,6 +598,13 @@ function signGuarded(call: SignedCall, source: string, end: number, out: readonl
 // A cell range address of table:cell-range-address or table:target-range-address (§19.595, no brackets): one or
 // more ranges separated by spaces, as Excel references (`absolute`: every part $-anchored as the source wrote it).
 export function rangeAddress(address: string): Translated {
+	const translated = rangeAddresses(address)
+
+	return "refused" in translated ? translated : { text: translated.parts.join(",") }
+}
+
+// The same, each range on its own (a sheet name may hold the "," that joins them).
+export function rangeAddresses(address: string): { readonly parts: readonly string[] } | { readonly refused: string } {
 	const parts: string[] = []
 	let quoted = false
 	let start = 0
@@ -623,7 +630,22 @@ export function rangeAddress(address: string): Translated {
 		out.push(translated.text)
 	}
 
-	return { text: out.join(",") }
+	return { parts: out }
+}
+
+// A reference's cells without its sheet ("'a, b'!$A$1:$B$2" as "$A$1:$B$2"): past the last "!" outside quotes.
+export function withoutSheet(reference: string): string {
+	let quoted = false
+	let bang = -1
+
+	for (let k = 0; k < reference.length; k++) {
+		const c = reference[k]
+
+		if (c === "'") quoted = !quoted
+		else if (c === "!" && !quoted) bang = k
+	}
+
+	return reference.slice(bang + 1)
 }
 
 // Whether a translated formula calls a volatile function the engine calculates (INDIRECT, OFFSET, NOW, TODAY, RAND...):

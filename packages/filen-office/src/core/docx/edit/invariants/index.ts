@@ -1,4 +1,5 @@
 import { Plugin, PluginKey, type EditorState, type Transaction } from "prosemirror-state"
+import { codePointPlugin } from "./codePoints"
 import { docxInvariants, isInternal, type InvariantOptions } from "./core"
 import { FIELDS_STAGE } from "./fields"
 import { FORMS_STAGE } from "./forms"
@@ -40,10 +41,11 @@ export const INVARIANT_STAGES: readonly InvariantStage[] = [TRACKING_STAGE, FORM
 	(stage): stage is InvariantStage => stage !== null
 )
 
-// The plugins of an editing session: the core first, a plugin per feature stage after it.
+// The plugins of an editing session: the core first, then whole code points, a plugin per feature stage after it.
 export function docxInvariantPlugins(options: InvariantOptions = {}): Plugin[] {
 	return [
 		docxInvariants(options),
+		codePointPlugin(),
 		...INVARIANT_STAGES.map(
 			stage =>
 				new Plugin({

@@ -247,6 +247,11 @@ function messageOf(error: unknown): string {
 // The rows a preview reads (one tile row), and the most of the part it inflates to find them.
 const PREVIEW_ROWS = TILE_ROWS
 const PREVIEW_MAX_BYTES = 4 * 1024 * 1024
+// The largest CSV a sheet exports. The page holds the bytes and then the Blob it downloads as, two copies, so this
+// keeps the peak near 1 GiB, the bound the reader puts on a whole package's inflated parts (zip limits) doubled. A few
+// cells far apart (A1, XFD1, A1048576) would make a file of commas many GB long.
+export const MAX_CSV_BYTES = 512 * 1024 * 1024
+const CSV_TOO_LARGE: SheetRefusal = { reason: "tooLarge", detail: "csv" }
 const PREVIEW_READ = 32 * 1024
 
 export interface SheetPreview {
@@ -2879,11 +2884,11 @@ export class XlsxDocument {
 		}
 	}
 
-	// The sheet as Excel's "CSV UTF-8": its data area, from A1 to the last row and column holding a value or a
+	// The sheet as Excel's "CSV UTF-8" (at most MAX_CSV_BYTES): its data area, from A1 to the last row and column holding a value or a
 	// formula, every row that wide, as LibreOffice's CSV export writes it, with a BOM. A cell holding only a format is
 	// no data. Written row by row into one array of the output's exact size: memory is the output and the data cells,
 	// never a row × column grid nor an array per field. A field holding a separator the next open weighs is quoted (writeCsv's stable).
-	csv(sheet: SheetId): Uint8Array | null {
+	csv(sheet: SheetId): Uint8Array | SheetRefusal | null {
 		const model = this.model(sheet)
 
 		if (model === null) return null
@@ -2923,16 +2928,23 @@ export class XlsxDocument {
 					cols.push(col)
 					fields.push(field)
 					size += utf8Length(field)
+
+					if (size > MAX_CSV_BYTES) return CSV_TOO_LARGE
 				}
 			}
 		}
+
+		// The size is exact before anything is allocated: past the cap, refused.
+		const total = 3 + (lastRow + 1) * (lastCol + 2) + size
+
+		if (total > MAX_CSV_BYTES) return CSV_TOO_LARGE
 
 		const order = Array.from(fields, (_, index) => index)
 
 		if (!sorted) order.sort((a, z) => (rows[a] ?? 0) - (rows[z] ?? 0) || (cols[a] ?? 0) - (cols[z] ?? 0))
 
 		// Each row ends with a line end, the last too: lastCol commas and CRLF a row, and the fields.
-		const bytes = new Uint8Array(3 + (lastRow + 1) * (lastCol + 2) + size)
+		const bytes = new Uint8Array(total)
 		const encoder = new TextEncoder()
 		let at = 3
 		let next = 0

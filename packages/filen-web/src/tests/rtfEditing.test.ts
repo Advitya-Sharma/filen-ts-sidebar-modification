@@ -5,9 +5,9 @@ import { buildDocxModel, openDocxPackage } from "@filen/office/core/docx"
 import { DocxEditorSession, openDocxEditContext } from "@filen/office/core/docx/edit"
 import { DocxSaveError } from "@filen/office/core/docx/write"
 import { readRtf } from "@filen/office/core/rtf"
-import type { RtfLockedBlock } from "@filen/office/dom/docx/rtf"
+import { DocxRtfRefusal, type RtfLockedBlock } from "@filen/office/dom/docx/rtf"
 import { inThreadDocxRtf } from "@filen/office/dom/docx/rtfWorker"
-import { rtfEditingBackend } from "@/features/preview/lib/rtfEditing"
+import { FormatSaveError, rtfEditingBackend } from "@/features/preview/lib/rtfEditing"
 
 // An RTF document saved through the docx editor's save path: Gate 1 from both writers, the docx writer's parts
 // written back as RTF (prepare writes, the zipper hands out), refusals as the docx writer's own.
@@ -109,6 +109,47 @@ describe("RTF editing backend", () => {
 		expect(refusal).toBeInstanceOf(DocxSaveError)
 		expect((refusal as DocxSaveError).reason).toBe("write")
 		expect((refusal as DocxSaveError).message).toMatch(/^RTF: .*RTF 1\.9\.1/u)
+	})
+
+	it("hands on what the file's writer says it wrote otherwise than the edit has it", async () => {
+		const { session, document, context } = await editing(RTF)
+		const notices = [{ kind: "commentPoint", count: 1 }] as const
+		const noting = {
+			...document,
+			write: async (edits: Parameters<typeof document.write>[0]) => ({ ...(await document.write(edits)), notices })
+		}
+		const backend = rtfEditingBackend(noting, Promise.resolve([]))
+		const pkg = await openDocxPackage(bytesSource(await document.take()))
+
+		if (!pkg.ok) throw new Error(pkg.reason)
+
+		session.dispatch(session.state.tr.insertText("Edited ", 1))
+
+		const prepared = await backend.writer.prepare({ pkg: pkg.package, context, sessions: [session] }, {})
+		const zipped = await backend.writer.zipper?.(pkg.package.opc).zip(prepared)
+
+		expect(zipped?.notices).toEqual(notices)
+	})
+
+	it("refuses a reply or a resolved comment, which RTF cannot keep, with its own message", async () => {
+		const { session, document, context } = await editing(RTF)
+		const refusing = { ...document, write: () => Promise.reject(new DocxRtfRefusal("comment", "a resolved comment")) }
+		const backend = rtfEditingBackend(refusing, Promise.resolve([]))
+		const pkg = await openDocxPackage(bytesSource(await document.take()))
+
+		if (!pkg.ok) throw new Error(pkg.reason)
+
+		session.dispatch(session.state.tr.insertText("Edited ", 1))
+
+		const refusal = await backend.writer.prepare({ pkg: pkg.package, context, sessions: [session] }, {}).then(
+			() => undefined,
+			(error: unknown) => error
+		)
+
+		expect(refusal).toBeInstanceOf(FormatSaveError)
+		expect(refusal).toBeInstanceOf(DocxSaveError)
+		expect((refusal as FormatSaveError).messageKey).toBe("previewDocxSaveRefusedRtfComments")
+		expect((refusal as FormatSaveError).message).toBe("RTF: a resolved comment")
 	})
 
 	it("checks the docx writer's Gate 1 at once and the RTF writer's once its locks arrive", async () => {

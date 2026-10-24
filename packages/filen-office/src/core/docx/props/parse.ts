@@ -124,7 +124,9 @@ export function parseBorder(r: PropsReader, node: number): BorderProps {
 	const out: Mutable<BorderProps> = { style: r.string(node, "val") ?? "none" }
 	const color = parseColorOf(r, node)
 	const size = r.measure(node, "sz", EIGHTHS)
-	const space = r.measure(node, "space", 1)
+	// A fraction is kept: an ODT translation carries its padding to the twip (whole points are all ST_PointMeasure holds).
+	const fraction = r.number(node, "space")
+	const space = fraction !== undefined && !Number.isInteger(fraction) ? fraction : r.measure(node, "space", 1)
 	const shadow = r.optionalOnOff(node, "shadow")
 	const frame = r.optionalOnOff(node, "frame")
 

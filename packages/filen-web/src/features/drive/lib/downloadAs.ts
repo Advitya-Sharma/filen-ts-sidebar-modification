@@ -2,7 +2,7 @@ import { toast } from "sonner"
 import { driveItemName, isAbortError } from "@filen/shared"
 import { isCompoundFile } from "@filen/office/core/cfb"
 import { bytesSource } from "@filen/office/core/opc"
-import type { SheetFileKind, SheetOpened } from "@filen/office/core/sheet"
+import type { SheetFileKind, SheetLockedFile, SheetOpened } from "@filen/office/core/sheet"
 import type { DocxConvertedDocument, DocxEncryptionRefusal, DocxLegacyRefusal, DocxUnlockedDocument } from "@filen/office/dom/docx"
 import type { DocxPdfProgress } from "@filen/office/dom/docx/pdfClient"
 import { recordContentVerdict } from "@/features/drive/lib/contentVerdicts"
@@ -815,7 +815,8 @@ async function protectedDocx(bytes: Uint8Array, name: string, run: Run, encrypti
 
 // A spreadsheet converted in the workbook worker on a session of its own, closed once done: a workbook (Excel,
 // OpenDocument, Excel 97–2003) by its session's conversion, a text file's cells made a workbook first (as Save as
-// .xlsx makes it), then converted. A password-protected file is refused: its copy could not keep the protection.
+// .xlsx makes it), then converted. A password-protected file is refused (its copy could not keep the protection), but
+// to .xlsx from an .xls (protectedXlsx).
 async function convertSpreadsheet(
 	item: DriveItem,
 	bytes: Uint8Array,
@@ -840,6 +841,11 @@ async function convertSpreadsheet(
 			return cells.exported
 		}
 
+		// A file with more rows than a sheet holds is read only in part: its copy would leave the rest out.
+		if (!cells.value.ok) {
+			return sheetConverted({ ok: false, reason: cells.value.refusal.reason, message: "The cells could not all be read" }, target)
+		}
+
 		const xlsx = await abortable(textToXlsx(cells.value.bytes, fileStem(name)), run.signal)
 
 		if (!xlsx.ok) {
@@ -860,7 +866,7 @@ async function convertSpreadsheet(
 		run,
 		// An .ods takes the user's language as its default, as a new one does.
 		session => session.query("saveAs.format", { format: target, language: browserLanguage() }, { signal: run.signal }),
-		keep ? () => convertedFile(bytes, target, []) : undefined
+		keep ? locked => protectedXlsx(locked, bytes, name, run) : undefined
 	)
 
 	if (converted.kind !== "done") {
@@ -889,6 +895,76 @@ function sheetConverted(answer: LiveAnswer, target: "xlsx" | "ods"): Exported {
 	}
 }
 
+// A password-protected .xls as an .xlsx protected with the same password. One that is really an encrypted workbook
+// package already is one: it goes as it is. An Excel 97–2003 workbook asks its password; its session's Save as .xlsx
+// seals the copy under it (the workbook worker keeps no password).
+async function protectedXlsx(locked: SheetLockedFile, bytes: Uint8Array, name: string, run: Run): Promise<Exported> {
+	if (locked.scheme === "standard" || locked.scheme === "agile") {
+		locked.dispose()
+
+		return convertedFile(bytes, "xlsx", [])
+	}
+
+	const prompted = await promptFor<SheetOpened, DocxEncryptionRefusal>(
+		name,
+		run,
+		async (password, signal) => {
+			const answer = await locked.unlock(password, { signal }).catch(() => null)
+
+			if (answer === null) {
+				return { kind: "aborted" }
+			}
+
+			if (answer.ok) {
+				return { kind: "opened", value: answer }
+			}
+
+			return answer.reason === "wrongPassword" || answer.reason === "aborted"
+				? { kind: answer.reason === "wrongPassword" ? "wrong" : "aborted" }
+				: { kind: "refused", refusal: answer.reason }
+		},
+		workbook => {
+			workbook.session.close()
+		},
+		() => {
+			locked.dispose()
+		},
+		{ purpose: "copy" }
+	)
+
+	switch (prompted.kind) {
+		case "accepted":
+			break
+		case "refused":
+			return prompted.refusal === "password"
+				? convertFailed("driveDownloadAsConvertFailed")
+				: failed(docxRefusalKey(prompted.refusal))
+		case "skipped":
+			return prompted
+	}
+
+	const { session } = prompted.value
+
+	try {
+		const saved = await session.save({ signal: run.signal })
+
+		if (run.signal.aborted) {
+			throw new Aborted()
+		}
+
+		if (!saved.ok) {
+			log.error("drive", "download as protected workbook save failed", saved.reason, saved.message)
+
+			return convertFailed("driveDownloadAsConvertFailed")
+		}
+
+		// Its values alone, as every copy of an Excel 97–2003 workbook (saveAs.format's report).
+		return convertedFile(saved.bytes, "xlsx", [{ kind: "valuesOnly", count: 1 }])
+	} finally {
+		session.close()
+	}
+}
+
 type InSession<T> = { readonly kind: "done"; readonly value: T } | { readonly kind: "ended"; readonly exported: Exported }
 
 // `task` on the file opened in its sheet worker (bytes transferred), the session closed after. A protected file is
@@ -898,8 +974,9 @@ async function withSession<T>(
 	kind: SheetFileKind,
 	run: Run,
 	task: (session: SheetOpened["session"]) => Promise<T>,
-	// What a password-protected file gives instead (else it is refused: an OpenDocument copy could not be protected).
-	onLocked?: () => Exported
+	// What a password-protected file gives instead, given what holds it (else it is refused: an OpenDocument copy could
+	// not be protected).
+	onLocked?: (locked: SheetLockedFile) => Promise<Exported>
 ): Promise<InSession<T>> {
 	const opened = await openSheet(bytes, { kind, signal: run.signal }, () => undefined)
 
@@ -911,9 +988,13 @@ async function withSession<T>(
 		case "refused":
 			return { kind: "ended", exported: failed(docxRefusalKey(opened.reason)) }
 		case "needsPassword":
+			if (onLocked !== undefined) {
+				return { kind: "ended", exported: await onLocked(opened.locked) }
+			}
+
 			opened.locked.dispose()
 
-			return { kind: "ended", exported: onLocked?.() ?? convertFailed("driveDownloadAsConvertProtected") }
+			return { kind: "ended", exported: convertFailed("driveDownloadAsConvertProtected") }
 		case "opened":
 			break
 	}

@@ -1,5 +1,5 @@
 import type { Node } from "prosemirror-model"
-import { decodeUtf8 } from "../../xml/index"
+import { NodeKind, decodeUtf8 } from "../../xml/index"
 import { NO_SOURCE, docxSchema, endsWithTable } from "../edit/schema"
 import {
 	cellOverrides,
@@ -426,6 +426,43 @@ function copiedProperties(w: StoryWriting, data: ElementData | undefined): Map<s
 	return data === undefined ? new Map() : dataChildren(w.part, w.names.w, data)
 }
 
+// CT_OnOff children of w:trPr and w:tcPr. The Open XML SDK takes only "on"/"off" for most of them (Office's
+// ST_OnOffOnly), while Word writes neither (ECMA-376 Part 1 §22.9.2.7, MS-OI29500 2.1.1744): what every reader
+// takes is a bare element for on, and no element for off (each is off by default).
+const SWITCHES: ReadonlySet<string> = new Set(["cantSplit", "tblHeader", "hidden", "noWrap", "tcFitText", "hideMark"])
+const OFF: ReadonlySet<string> = new Set(["0", "false", "off"])
+
+// What a row or cell made from a source one changes in the source's property element (`container`) to write
+// only what its schema allows (`order`): WordprocessingML children it does not have go, and a switch with a
+// value becomes a bare element (on) or goes (off). The source keeps its bytes.
+function schemaFixes(w: StoryWriting, container: number, order: readonly string[], changes: Map<string, string>): void {
+	if (container < 0) return
+
+	const part = w.part
+	const document = part.document
+	const reader = part.reader
+
+	for (let child = document.firstChild(container); child >= 0; child = document.nextSibling(child)) {
+		if (document.kinds[child] !== NodeKind.Element || reader.group(child) !== Ns.W) continue
+
+		const local = document.localName(child)
+
+		if (changes.has(local)) continue
+
+		if (!order.includes(local)) {
+			changes.set(local, "")
+
+			continue
+		}
+
+		if (!SWITCHES.has(local)) continue
+
+		const value = reader.attr(child, Ns.W, "val")
+
+		if (value !== undefined) changes.set(local, OFF.has(value) ? "" : w.names.empty(local))
+	}
+}
+
 // Children a copy leaves out, unless a change sets them.
 function strip(changes: Map<string, string>, locals: readonly string[]): void {
 	for (const local of locals) if (!changes.has(local)) changes.set(local, "")
@@ -825,6 +862,8 @@ function* writeRow(w: StoryWriting, out: Out, node: Node, grid: readonly number[
 		)
 	}
 
+	if (!owned && model !== NO_SOURCE) schemaFixes(w, trPr, ROW_PROPERTIES, changes)
+
 	const exceptions = resolvedChanges(w, tblPrEx, "tblPrExChange", "tblPrEx", resolution, [])
 	const spans = reshapedSpans(w, node, grid)
 	const cell = (child: Node, cellOut: Out): Generator<void, void> => writeCell(w, cellOut, child, spans?.get(child)?.shift())
@@ -1050,6 +1089,8 @@ function* writeCellContent(w: StoryWriting, out: Out, node: Node, spanned: numbe
 			changeElement(w, "tcPrChange", change, previousElement(w, tcPr, "tcPr", previous, TRACKED_CELL, CELL_PROPERTIES))
 		)
 	}
+
+	if (!owned && model !== NO_SOURCE) schemaFixes(w, tcPr, CELL_PROPERTIES, changes)
 
 	const content = (region?: { readonly from: number; readonly to: number }): Generator<void, boolean> =>
 		w.writeChildren(

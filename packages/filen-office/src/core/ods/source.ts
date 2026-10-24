@@ -17,6 +17,65 @@ import type { OdsSettings } from "./settings"
 import type { OdsCellStyles } from "./styles/cell"
 import type { OdsChartSource } from "./charts/read"
 
+// What a source row element gives its rows, as the writer reads it from the tag again.
+export interface OdsSourceRowProps {
+	// The style's height in points, NaN for none.
+	readonly heightPt: number
+	readonly custom: boolean
+	readonly pageBreak: boolean
+	readonly hidden: boolean
+	readonly outline: number
+	readonly defaultCellStyle: string | undefined
+}
+
+// The source rows' properties as runs of alike rows: what lets a save tell, before it writes, which rows keep their
+// tag and so which row styles it needs.
+export class OdsSourceRows {
+	private readonly firsts: number[] = []
+	private readonly props: OdsSourceRowProps[] = []
+	private readonly interned = new Map<string, OdsSourceRowProps>()
+
+	add(first: number, props: OdsSourceRowProps): void {
+		const key = `${String(props.heightPt)}|${String(props.custom)}|${String(props.pageBreak)}|${String(props.hidden)}|${String(props.outline)}|${props.defaultCellStyle === undefined ? "" : `=${props.defaultCellStyle}`}`
+		let shared = this.interned.get(key)
+
+		if (shared === undefined) {
+			shared = props
+			this.interned.set(key, props)
+		}
+
+		if (this.props[this.props.length - 1] === shared) return
+
+		this.firsts.push(first)
+		this.props.push(shared)
+	}
+
+	// The properties of source row `row` (undefined before the first element).
+	at(row: number): OdsSourceRowProps | undefined {
+		return this.props[this.after(row) - 1]
+	}
+
+	// How many rows from `row` on have its properties.
+	runFrom(row: number): number {
+		return (this.firsts[this.after(row)] ?? Number.MAX_SAFE_INTEGER) - row
+	}
+
+	// The index of the first run starting after `row`.
+	private after(row: number): number {
+		let low = 0
+		let high = this.firsts.length
+
+		while (low < high) {
+			const mid = (low + high) >> 1
+
+			if ((this.firsts[mid] ?? 0) <= row) low = mid + 1
+			else high = mid
+		}
+
+		return low
+	}
+}
+
 // What a save needs of the package an OpenDocument workbook was read from, kept beside the model: the archive to
 // copy from and stream content.xml out of again, the styles the cells' formats came from, and each table as the
 // reader built it, so the writer tells what an edit changed.
@@ -43,6 +102,7 @@ export interface OdsTableSource {
 	// The rows its row elements give and the columns its column elements declare.
 	readonly rows: number
 	readonly columns: number
+	readonly rowProps: OdsSourceRows
 	// Its validations' rules (dataValidation without sqref) to the table:content-validation names they came from.
 	readonly validationNames: ReadonlyMap<string, string>
 }

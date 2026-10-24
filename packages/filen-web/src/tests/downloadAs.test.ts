@@ -1028,7 +1028,7 @@ describe("Download as ▸ another editable format", () => {
 	})
 
 	it("downloads an .xls that is really a password-protected workbook package as its .xlsx, still protected", async () => {
-		const locked = { unlock: vi.fn(), dispose: vi.fn() }
+		const locked = { scheme: "agile", spinCount: 100_000, unlock: vi.fn(), dispose: vi.fn() }
 
 		mocks.joinPreviewBytes.mockResolvedValue(COMPOUND.slice())
 		mocks.openSheet.mockResolvedValue({ kind: "needsPassword", locked })
@@ -1038,6 +1038,48 @@ describe("Download as ▸ another editable format", () => {
 		expect(locked.unlock).not.toHaveBeenCalled()
 		expect((await downloaded())[0]).toBe("book.xlsx")
 		expect(new Uint8Array(await (mocks.downloadBlob.mock.calls[0]?.[1] ?? new Blob()).arrayBuffer())).toEqual(COMPOUND)
+	})
+
+	it("a password-protected Excel 97–2003 workbook asks its password; its .xlsx is its sealed Save as .xlsx", async () => {
+		const opened = { save: vi.fn(() => Promise.resolve({ ok: true, bytes: new TextEncoder().encode("sealed xlsx") })), close: vi.fn() }
+		const locked = {
+			scheme: "rc4",
+			spinCount: 0,
+			unlock: vi.fn((password: string) =>
+				Promise.resolve(password === "right" ? { ok: true, session: opened, info: {} } : { ok: false, reason: "wrongPassword" })
+			),
+			dispose: vi.fn()
+		}
+
+		mocks.joinPreviewBytes.mockResolvedValue(COMPOUND.slice())
+		mocks.openSheet.mockResolvedValue({ kind: "needsPassword", locked })
+
+		const done = startDownloadAs([file("book.xls")], "xlsx", CONTEXT)
+
+		await until(() => currentPasswordAsk() !== null)
+		expect(currentPasswordAsk()?.purpose).toBe("copy")
+		expect(await currentPasswordAsk()?.verify("wrong", new AbortController().signal)).toBe("wrong")
+		expect(await currentPasswordAsk()?.verify("right", new AbortController().signal)).toBe("accepted")
+		await done
+
+		expect(opened.save).toHaveBeenCalledOnce()
+		expect(opened.close).toHaveBeenCalledOnce()
+		expect(locked.dispose).not.toHaveBeenCalled()
+		expect((await downloaded())[0]).toBe("book.xlsx")
+		expect(await (mocks.downloadBlob.mock.calls[0]?.[1] ?? new Blob()).text()).toBe("sealed xlsx")
+	})
+
+	it("refuses a password-protected Excel 97–2003 workbook to .ods without asking its password", async () => {
+		const locked = { scheme: "rc4", spinCount: 0, unlock: vi.fn(), dispose: vi.fn() }
+
+		mocks.joinPreviewBytes.mockResolvedValue(COMPOUND.slice())
+		mocks.openSheet.mockResolvedValue({ kind: "needsPassword", locked })
+		await startDownloadAs([file("book.xls")], "ods", CONTEXT)
+
+		expect(locked.dispose).toHaveBeenCalledOnce()
+		expect(locked.unlock).not.toHaveBeenCalled()
+		expect(currentPasswordAsk()).toBeNull()
+		expect(mocks.downloadBlob).not.toHaveBeenCalled()
 	})
 
 	it("refuses a password-protected workbook without asking its password", async () => {
@@ -1053,7 +1095,7 @@ describe("Download as ▸ another editable format", () => {
 	})
 
 	it("makes a text file's cells a workbook first, then converts that", async () => {
-		const text = workbook({ bytes: new TextEncoder().encode("cells") })
+		const text = workbook({ ok: true, bytes: new TextEncoder().encode("cells") })
 		const made = workbook({ ok: true, bytes: new TextEncoder().encode("ods"), lossy: [] })
 
 		mocks.openSheet.mockResolvedValueOnce({ kind: "opened", session: text, info: {} })
@@ -1072,6 +1114,18 @@ describe("Download as ▸ another editable format", () => {
 		expect(text.close).toHaveBeenCalledOnce()
 		expect(made.close).toHaveBeenCalledOnce()
 		expect((await downloaded())[0]).toBe("data.ods")
+	})
+
+	it("refuses a text file with more rows than a sheet holds: its copy would leave the rest out", async () => {
+		const text = workbook({ ok: false, refusal: { reason: "tooLarge", detail: "incomplete" } })
+
+		mocks.openSheet.mockResolvedValueOnce({ kind: "opened", session: text, info: {} })
+		await startDownloadAs([file("data.csv")], "xlsx", CONTEXT)
+
+		expect(mocks.textToXlsx).not.toHaveBeenCalled()
+		expect(mocks.downloadBlob).not.toHaveBeenCalled()
+		expect(text.close).toHaveBeenCalledOnce()
+		expect(mocks.toast.error).toHaveBeenCalledWith("This file is too large to convert in the browser", { description: "data.csv" })
 	})
 
 	it("converts an editor's open workbook from its session, reading nothing", async () => {

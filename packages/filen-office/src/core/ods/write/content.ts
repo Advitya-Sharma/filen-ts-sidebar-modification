@@ -68,6 +68,14 @@ const COLUMN_NAMES: ReadonlySet<number> = new Set([
 	N["table:table-column-group"],
 	N["table:table-header-columns"]
 ])
+// office:spreadsheet's children after its tables.
+const AFTER_TABLES: ReadonlySet<number> = new Set([
+	N["table:named-expressions"],
+	N["table:database-ranges"],
+	N["table:data-pilot-tables"],
+	N["table:consolidation"],
+	N["table:dde-links"]
+])
 const ROW_WRAPPERS: ReadonlySet<number> = new Set([N["table:table-rows"], N["table:table-row-group"], N["table:table-header-rows"]])
 
 // Prefixes the writer's own markup uses, with the namespaces they must name.
@@ -106,6 +114,9 @@ export interface ContentPlan {
 	readonly shifter?: Shifter | null
 	// What new tables hold beyond the model, by sheet.
 	readonly newTables?: ReadonlyMap<number, NewTable>
+	// The styles planned for every row that could name one, not only those whose tag changes: the plan when the exact
+	// one missed a style (StyleUnplanned).
+	readonly broadStyles?: boolean
 }
 
 // The declarations the root lacks for the prefixes the writer uses; a prefix bound to another namespace refuses.
@@ -365,11 +376,34 @@ export class ContentWriter implements StreamHandler {
 
 			if (plainFresh) styles.row(view.height({ heightPt: Number.NaN, flags: 0 }), false, false)
 
+			const writer = new TableWriter(this.context, entry, model, view, source)
+
+			writer.features = this.plan.features?.get(entry.id) ?? NO_FEATURES
+
+			if (source === null) writer.fresh = added ?? NO_NEW_TABLE
+
+			// Rows past the source's (a merge, a note or a link reaching there): written whole, a row without
+			// properties at the sheet's default height.
+			if (!plainFresh && writer.lastModelRow() >= sourceRows)
+				styles.row(view.height({ heightPt: Number.NaN, flags: 0 }), false, false)
+
+			// The source's rows are planned exactly, from their tags; fresh ones, or every row when planning broadly,
+			// with all a row could name.
+			const broad = this.plan.broadStyles === true
+
+			if (!broad) yield* writer.sourceRowStyles((heightPt, custom, pageBreak) => styles.row(heightPt, custom, pageBreak))
+
 			for (const row of rows) {
 				const props = view.rowProps(row)
+				const rowXf = broad ? null : writer.plannedRowXf(row)
 
-				styles.row(view.height(props), (props.flags & RowFlag.CUSTOM_HEIGHT) !== 0, false)
-				styles.row(view.height(props), (props.flags & RowFlag.CUSTOM_HEIGHT) !== 0, true)
+				if (rowXf === null) {
+					const custom = (props.flags & RowFlag.CUSTOM_HEIGHT) !== 0
+
+					// A fresh row starts a page only in a new table, at one of its breaks.
+					if (broad || added?.rowBreaks?.has(row) !== true) styles.row(view.height(props), custom, false)
+					if (broad || added?.rowBreaks?.has(row) === true) styles.row(view.height(props), custom, true)
+				}
 
 				const rowStyle = view.rowStyle(row)
 
@@ -378,15 +412,13 @@ export class ContentWriter implements StreamHandler {
 				for (const col of view.cellCols(row)) {
 					const cell = view.cell(row, col)
 
-					styles.cell(cell.xf)
+					if (rowXf === null || writer.namesStyle(cell.xf, col, rowXf)) styles.cell(cell.xf)
 
 					for (const run of cell.runs ?? []) if (run.font !== null) styles.text(run.font)
 				}
 
 				yield
 			}
-
-			const writer = new TableWriter(this.context, entry, model, view, source)
 
 			if (writer.columnsChanged) {
 				for (const range of model.cols) {
@@ -565,6 +597,21 @@ export class ContentWriter implements StreamHandler {
 			tab,
 			source === null ? this.plan.newTables?.get(entry.id)?.masterPage : undefined
 		)
+	}
+
+	// New validations without the source's element: one of their own, before the tables (§9.4.1).
+	private ownValidations(): void {
+		if (this.validations === "") return
+
+		this.ownStructure(`<table:content-validations>${this.validations}</table:content-validations>`)
+		this.validations = ""
+	}
+
+	// The automatic styles added, as they go out: none may be added after.
+	private automaticMarkup(): string {
+		this.plan.styles.seal()
+
+		return this.plan.styles.markup()
 	}
 
 	// --- Output ---
@@ -810,7 +857,23 @@ export class ContentWriter implements StreamHandler {
 			this.automaticSeen = true
 			this.flush(start)
 
-			if (this.plan.styles.written > 0) this.own(`<office:automatic-styles>${this.plan.styles.markup()}</office:automatic-styles>`)
+			const automatic = this.automaticMarkup()
+
+			if (automatic !== "") this.own(`<office:automatic-styles>${automatic}</office:automatic-styles>`)
+		}
+
+		// A spreadsheet of no table: the new ones (their validations before them) go before the first element that
+		// follows the tables (ODF 1.3 Part 3 §9.1.1).
+		if (
+			this.plan.source.tables.length === 0 &&
+			!this.tablesDone &&
+			this.parent() === N["office:spreadsheet"] &&
+			AFTER_TABLES.has(name)
+		) {
+			this.flush(start)
+			this.tablesDone = true
+			this.ownValidations()
+			this.drainSlots(true)
 		}
 
 		const table = this.table
@@ -822,12 +885,8 @@ export class ContentWriter implements StreamHandler {
 		}
 
 		if (name === N["table:table"] && this.parent() === N["office:spreadsheet"]) {
-			// New validations without the source's element: one of their own, before the tables (§9.4.1).
-			if (this.validations !== "") {
-				this.flush(start)
-				this.ownStructure(`<table:content-validations>${this.validations}</table:content-validations>`)
-				this.validations = ""
-			}
+			this.flush(start)
+			this.ownValidations()
 
 			this.openTable(start, end, empty, depth)
 
@@ -974,11 +1033,11 @@ export class ContentWriter implements StreamHandler {
 			if (start === this.emptyStart) {
 				// <office:automatic-styles/>: written open, with the styles.
 				this.flush(start)
-				this.own(`<office:automatic-styles>${this.plan.styles.markup()}</office:automatic-styles>`)
+				this.own(`<office:automatic-styles>${this.automaticMarkup()}</office:automatic-styles>`)
 				this.copyFrom = end
 			} else {
 				this.flush(start)
-				this.own(this.plan.styles.markup())
+				this.own(this.automaticMarkup())
 			}
 
 			return
@@ -1001,6 +1060,7 @@ export class ContentWriter implements StreamHandler {
 
 			if (!this.tablesDone) {
 				this.tablesDone = true
+				this.ownValidations()
 				this.drainSlots(true)
 			}
 

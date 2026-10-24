@@ -84,8 +84,8 @@ export type OdtToDocxLossyKind =
 	// mark's font): the translation's object-line-height compatibility setting, which w:compatSetting cannot hold.
 	| "objectLineHeight"
 	// Paragraph borders and padding as LibreOffice lays them out (the translation's paragraph-padding setting): a start
-	// or end border inside the indents (Word draws it outside them), padding beside no line (Word leaves it out) and
-	// neighbours' borders joined.
+	// or end border inside the indents (Word draws it outside them), padding beside no line (Word leaves it out),
+	// neighbours' borders joined, and a bordered paragraph kept apart from the next by style:join-border false.
 	| "paragraphPadding"
 
 export type TextLossyKind = OdtLossyReason | DocNotConvertedKind | RtfLossyKind | OdtToDocxLossyKind | DocxToOdtLossyKind

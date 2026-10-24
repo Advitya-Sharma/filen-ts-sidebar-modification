@@ -6,6 +6,7 @@ import { WORD_KANA, WORD_LETTER, WORD_NUMBER, wordSegments } from "../../text/in
 import type { DocxEditContext, NewStoryKind } from "../edit/context"
 import { builtInStyleId } from "../edit/formats"
 import { markInternal } from "../edit/invariants/index"
+import { commentedPlaceholders } from "../edit/invariants/forms"
 import { readOnlyReasons } from "../edit/readOnly"
 import { NO_SOURCE, WRAPPER_MARKS, docxSchema, markerKey, type MarkerAttrs, type MarkerKind, type MarkerList } from "../edit/schema"
 import type { DocxEditorSession } from "../edit/session"
@@ -790,6 +791,7 @@ export class DocxComments {
 
 		tr.insert(range.to, [markerNode("commentRangeEnd", id, wrappersAt(doc, range.to)), reference])
 		tr.insert(range.from, markerNode("commentRangeStart", id, wrappersAt(doc, range.from)))
+		commentedPlaceholders(tr, session)
 
 		return session.dispatch(markInternal(tr))
 	}

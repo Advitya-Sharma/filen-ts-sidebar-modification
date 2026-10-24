@@ -45,7 +45,7 @@ import type { SheetHandle } from "@/features/spreadsheet/hooks/useSheetSession"
 import { isTextSheetKind } from "@/features/spreadsheet/lib/sheetHosts"
 import { isLegacySheetKind } from "@/features/spreadsheet/lib/sheetKind"
 import { saveAsXlsxBodyKey } from "@/features/spreadsheet/save/sheetSaveAs"
-import { readOnlyNoteKey, refusalKey } from "@/features/spreadsheet/lib/sheetMessages.logic"
+import { csvRefusalKey, readOnlyNoteKey, refusalKey } from "@/features/spreadsheet/lib/sheetMessages.logic"
 import { SheetToolbar } from "@/features/spreadsheet/toolbar/sheetToolbar"
 import { borderShortcut, setFormatCellsOpen } from "@/features/spreadsheet/toolbar/formatCellsState"
 import { downloadSheetCsv } from "@/features/spreadsheet/save/sheetCsv"
@@ -289,7 +289,7 @@ export function SheetBody({
 						.then(
 							result => {
 								if (result !== null && !result.ok) {
-									toast.error(t("previewSheetDownloadCsvFailed"))
+									toast.error(t(csvRefusalKey(result.refusal)))
 								}
 							},
 							() => {

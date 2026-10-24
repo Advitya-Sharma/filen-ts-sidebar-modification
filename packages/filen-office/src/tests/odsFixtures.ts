@@ -87,6 +87,9 @@ export function odsDocument(result: Extract<OdsOpenResult, { ok: true }>): XlsxD
 // Each sheet's cells as the CSV shows them (as shown), trailing empty fields and rows dropped.
 export function shownRows(document: XlsxDocument, sheet: number): string[][] {
 	const csv = document.csv(sheet)
+
+	if (csv !== null && !(csv instanceof Uint8Array)) throw new Error(`csv refused: ${csv.reason}`)
+
 	const rows = csv === null ? [] : parseCsv(new TextDecoder().decode(csv))
 
 	for (const row of rows) while (row.length > 0 && row[row.length - 1] === "") row.pop()
