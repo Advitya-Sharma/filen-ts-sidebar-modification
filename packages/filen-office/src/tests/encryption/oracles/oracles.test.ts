@@ -74,12 +74,13 @@ const poi = detectPoi()
 const lo = libreOffice()
 const anyOracle = msoffcrypto !== undefined || poi !== undefined || lo !== undefined
 
+// A skipped describe still runs its body to collect the tests, so nothing here may assume `sealed` is set.
 describe.skipIf(sealed === undefined || !anyOracle)("encryption oracles", () => {
-	const outputs = (sealed as SealedTarget).outputs
-	const agile = (sealed as SealedTarget).agile
+	const entries = sealed?.outputs.entries ?? []
+	const agile = sealed?.agile ?? new Set<string>()
 
 	it.skipIf(msoffcrypto === undefined)("msoffcrypto-tool decrypts every sealed file", () => {
-		for (const entry of outputs.entries) {
+		for (const entry of entries) {
 			const result = runMsoffcrypto(msoffcrypto as string, entry)
 
 			expect(result.error, `${entry.name}: ${result.error}`).toBeUndefined()
@@ -89,7 +90,7 @@ describe.skipIf(sealed === undefined || !anyOracle)("encryption oracles", () => 
 	})
 
 	it.skipIf(poi === undefined)("Apache POI decrypts and verifies the HMAC of every sealed file", () => {
-		for (const entry of outputs.entries) {
+		for (const entry of entries) {
 			const result = runPoi(poi!, entry)
 
 			expect(result.error, `${entry.name}: ${result.error}`).toBeUndefined()
@@ -100,9 +101,9 @@ describe.skipIf(sealed === undefined || !anyOracle)("encryption oracles", () => 
 	})
 
 	it.skipIf(lo === undefined)("LibreOffice opens every sealed file with its password", { timeout: 300_000 }, () => {
-		const results = runLibreOffice(lo!, outputs.entries)
+		const results = runLibreOffice(lo!, entries)
 
-		for (const entry of outputs.entries) {
+		for (const entry of entries) {
 			const result = results.get(entry.name)
 
 			expect(result, `${entry.name}: no result`).toBeDefined()
