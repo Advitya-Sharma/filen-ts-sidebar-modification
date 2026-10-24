@@ -3,7 +3,7 @@ import { CellKind, NO_SPAN, RowFlag, blockOrigin } from "../core/xlsx/model/type
 import { SheetStore, StoreBuilder, type RowBlock } from "../core/xlsx/read/index"
 import { FormulaTable } from "../core/xlsx/model/formulas"
 import { SheetStrings } from "../core/xlsx/model/strings"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // The store as a sheet is read into it: rows out of order sorted, repeated rows merged, in steps a host can slice
 // (no step holds the thread for long), and a row of repeated cells never outgrows the builder.
@@ -55,7 +55,7 @@ describe("the store builder", () => {
 		expect([block.rowSpans[0], block.rowSpans[1]]).toEqual([NO_SPAN, NO_SPAN])
 		expect((block.rowFlags[0] ?? 0) & (RowFlag.DIRTY | RowFlag.NEW)).toBe(RowFlag.DIRTY | RowFlag.NEW)
 		expect(builder.totalCells).toBe(16_384)
-		expect(longest).toBeLessThan(50)
+		expect(longest).toBeLessThan(budget(50))
 	})
 
 	it("sorts 200,000 rows written in descending order in short steps, each keeping its span and cells", () => {
@@ -86,7 +86,7 @@ describe("the store builder", () => {
 		}
 
 		expect(expected).toBe(rows)
-		expect(longest).toBeLessThan(50)
+		expect(longest).toBeLessThan(budget(50))
 	})
 
 	it("folds a row of more repeated cells than its scratch holds, keeping each cell's source position", () => {

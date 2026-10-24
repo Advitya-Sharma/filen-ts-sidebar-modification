@@ -7,7 +7,7 @@ import { CORPUS_DIR } from "./corpusDir"
 import { openBytes } from "./docxEditFixtures"
 import { runEditScript } from "./docxWriteFixtures"
 import { buildDocx } from "./docxSynthetic"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 const FIXTURE = join(import.meta.dirname, "fixtures", "08-large-300p.docx")
 const TARIFF = join(CORPUS_DIR, "docx", "govuk__Tariff_of_the_United_Kingdom_v1.34.docx")
@@ -184,6 +184,6 @@ describe("docx writer performance: people", () => {
 		const orphan = await fastest(people("Zed"))
 
 		console.log(`people census: named ${named.toFixed(0)} ms, orphan ${orphan.toFixed(0)} ms`)
-		expect(orphan - named).toBeLessThan(25)
+		expect(orphan - named).toBeLessThan(budget(25))
 	})
 })

@@ -5,7 +5,7 @@ import { saveAsCellsFeature } from "../core/sheet/save/cells"
 import { saveAsXlsxFeature } from "../core/sheet/save/xlsx"
 import { openTextSession } from "../core/sheet/text"
 import { cells, firstTile, tileTexts } from "./sheetSessionFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // A text file with more records than a sheet holds opens as Excel and LibreOffice open it: its first SHEET_MAX_ROWS
 // rows, view-only, and nothing that would write the rest away (a save, a CSV, a copy in another format) is made.
@@ -30,7 +30,7 @@ describe("a CSV longer than a sheet", () => {
 
 		const { session, info } = opened
 
-		expect(spent).toBeLessThan(5_000)
+		expect(spent).toBeLessThan(budget(5_000))
 		expect(info.writability).toEqual({ state: "viewOnly", reason: "incomplete" })
 		expect(info.activeLayout.rowCount).toBe(SHEET_MAX_ROWS)
 		expect(tileTexts(await firstTile(session, 0)).get("0,0")).toBe("r0")

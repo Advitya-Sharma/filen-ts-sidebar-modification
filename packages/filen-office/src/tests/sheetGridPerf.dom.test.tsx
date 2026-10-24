@@ -8,7 +8,7 @@ import { SheetGrid, SheetGridModel, toDom, type SheetGridHandle } from "../react
 import { bodyTotal } from "../react/sheet/view"
 import { RecordingCanvas } from "./sheetGridCanvas"
 import { IMMEDIATE, SML, buildFixture } from "./sheetSessionFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // The grid's main-thread budgets at 1M cells (100k rows by 10 columns) on the in-thread host, the draw calls going
 // to a recording context (the browser's raster is measured apart): a scroll frame's script under 50 ms (no long
@@ -179,8 +179,8 @@ describe.skipIf(!PERF)("grid budgets at 1M cells", () => {
 			}
 
 			console.log(`grid perf: ${JSON.stringify(report)}`)
-			expect(report.scrollFrameMax).toBeLessThan(50)
-			expect(report.commitP95).toBeLessThanOrEqual(16)
+			expect(report.scrollFrameMax).toBeLessThan(budget(50))
+			expect(report.commitP95).toBeLessThanOrEqual(budget(16))
 			expect(report.cachedTiles).toBeLessThanOrEqual(24)
 
 			act(() => root.unmount())

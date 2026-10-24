@@ -17,6 +17,7 @@ import {
 import { parseTheme } from "../core/docx/theme/index"
 import type { XmlDocument } from "../core/xml/index"
 import { OFFICE_THEME, W, find, stylesXml, wordPart, xml } from "./docxFixtures"
+import { budget } from "./timing"
 
 interface Fixture {
 	readonly store: PropsStore
@@ -154,7 +155,7 @@ describe("styles part", () => {
 		for (let k = 0; k < 3000; k++) f.resolver.run(f.resolver.paragraph(f.paragraph(`<w:pStyle w:val="S${k}"/>`)), f.run(""))
 
 		// Linear work: well under a second even on slow machines (quadratic flattening took tens of seconds).
-		expect(performance.now() - started).toBeLessThan(5000)
+		expect(performance.now() - started).toBeLessThan(budget(5000))
 
 		const deepest = f.styles.byId("S2999")
 

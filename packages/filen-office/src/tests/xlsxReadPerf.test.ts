@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import { budget } from "./timing"
 
 // The reader's budgets on the benchmark workbooks (100,000 x 10 values; the same with a formula column, without
 // and with stored results; 300,000 x 10 values), each opened in a process of its own: the open plus the first
@@ -40,7 +41,7 @@ describe.skipIf(DIR === undefined || DIR === "")("xlsx reader budgets", () => {
 
 				console.log(`${name} ${mode}: ${JSON.stringify(run)}`)
 				expect(run.cells).toBe(1_000_000)
-				expect(run.cpuMs).toBeLessThanOrEqual(500)
+				expect(run.cpuMs).toBeLessThanOrEqual(budget(500))
 				expect(Math.max(run.retainedMB, run.storeMB)).toBeLessThanOrEqual(60)
 			}
 		})

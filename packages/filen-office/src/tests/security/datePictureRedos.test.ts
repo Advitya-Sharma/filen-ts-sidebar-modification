@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { parseControlDate } from "../../core/docx/forms/dates"
-import { cpuMs } from "../timing"
+import { budget, cpuMs } from "../timing"
 
 // A date control's picture comes from the document and becomes a pattern for reading typed text back: no
 // picture may make that read take more than linear-ish time.
@@ -16,16 +16,16 @@ function timed(run: () => unknown): number {
 describe("date pictures from documents", () => {
 	it("reads back text against a picture of many adjacent numeric fields quickly", () => {
 		// Exponential backtracking: 13 adjacent day/month groups took seconds, each more one about four times as long.
-		expect(timed(() => parseControlDate(`${"1".repeat(52)}1x`, "dM".repeat(13), "en-US"))).toBeLessThan(250)
+		expect(timed(() => parseControlDate(`${"1".repeat(52)}1x`, "dM".repeat(13), "en-US"))).toBeLessThan(budget(250))
 	})
 
 	it("reads back text against a picture of many whitespace runs quickly", () => {
-		expect(timed(() => parseControlDate(`1${" ".repeat(30)}x`, `d${" \t".repeat(12)}M`, "en-US"))).toBeLessThan(250)
+		expect(timed(() => parseControlDate(`1${" ".repeat(30)}x`, `d${" \t".repeat(12)}M`, "en-US"))).toBeLessThan(budget(250))
 	})
 
 	it("reads back text against a picture alternating quoted and bare spaces quickly", () => {
 		// Quoted spaces were literal spaces between \s* groups: a run of spaces before a non-digit split every way.
-		expect(timed(() => parseControlDate(`1${" ".repeat(42)}x`, `d${" ' '".repeat(14)} d`, "en-US"))).toBeLessThan(250)
+		expect(timed(() => parseControlDate(`1${" ".repeat(42)}x`, `d${" ' '".repeat(14)} d`, "en-US"))).toBeLessThan(budget(250))
 		expect(parseControlDate("16 de octubre de 2026", "d' de 'MMMM' de 'yyyy", "es-ES")).toBe("2026-10-16")
 	})
 

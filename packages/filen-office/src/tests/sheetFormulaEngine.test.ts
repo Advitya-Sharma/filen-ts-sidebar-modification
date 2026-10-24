@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { CYCLE, FormulaEngine, UNPARSEABLE, type EngineSheet } from "../core/sheet/formula/index"
+import { budget } from "./timing"
 
 function sheet(name: string, rows: EngineSheet["rows"], formulas: EngineSheet["formulas"] = []): EngineSheet {
 	return { name, rows, formulas }
@@ -125,7 +126,7 @@ describe("FormulaEngine at scale", () => {
 
 			expect(changed).toHaveLength(count * 2)
 			expect(engine.result(0, count - 1, 1)).toEqual({ value: count * 2 })
-			expect(elapsed).toBeLessThan(2_500)
+			expect(elapsed).toBeLessThan(budget(2_500))
 		} finally {
 			engine.destroy()
 		}

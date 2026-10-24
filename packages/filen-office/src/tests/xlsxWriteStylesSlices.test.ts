@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import { CellKind } from "../core/xlsx/model/types"
 import { saveXlsx } from "../core/xlsx/write/save"
 import { buildFixture, openWorkbook, parts } from "./xlsxWriteFixtures"
+import { budget } from "./timing"
 
 // A save that appends one cell format to a styles part of megabytes: the part is walked, spliced and checked in
 // slices, never parsed whole, so an in-thread host is never held over 50 ms of its CPU time.
@@ -88,7 +89,7 @@ describe("a sliced styles save", () => {
 		observer.disconnect()
 
 		expect(result.ok, JSON.stringify(result)).toBe(true)
-		expect(longest).toBeLessThan(50)
+		expect(longest).toBeLessThan(budget(50))
 
 		if (result.ok) {
 			const written = parts(result.bytes!)["xl/styles.xml"] ?? ""

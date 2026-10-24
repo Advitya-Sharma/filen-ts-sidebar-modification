@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import { CfbError, CfbFile, cfbBytes, isCompoundFile, type CfbWriteEntry } from "@filen/office/core/cfb"
 import { bytesSource } from "@filen/office/core/opc"
 import { CORPUS_DIR } from "./corpusDir"
+import { budget } from "./timing"
 
 // Mutated compound files (sector chains, sizes, directory links, header counts, truncation): the reader
 // answers each with a result or a CfbError, never another throw, and within a time bound.
@@ -217,7 +218,7 @@ describe("compound file reader under mutation", () => {
 		}
 
 		expect(untyped).toEqual([])
-		expect(slowest).toBeLessThan(BOUND_MS)
+		expect(slowest).toBeLessThan(budget(BOUND_MS))
 		// The mutants still reach the stream reader, not only the header checks.
 		expect(readSome).toBeGreaterThan(MUTANTS / 10)
 	})

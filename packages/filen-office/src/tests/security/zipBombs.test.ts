@@ -3,6 +3,7 @@ import { ZipArchive, ZipError, bytesSource, type ByteSource, type ZipLimits } fr
 import { openDocxPackage } from "@filen/office/core/docx"
 import { buildZip } from "../zipBuilder"
 import { deflateRawZeros } from "./generate"
+import { budget } from "../timing"
 
 // Zip-level bombs: every refusal is typed and comes before anything large is allocated or inflated.
 
@@ -65,7 +66,7 @@ describe("declared counts and sizes", () => {
 				open(buildZip(Array.from({ length: 20_001 }, (_, k) => ({ name: `t${k}`, data: new Uint8Array(0), method: 0 as const }))))
 			)
 		).toBe("tooManyEntries")
-		expect(performance.now() - started).toBeLessThan(5000)
+		expect(performance.now() - started).toBeLessThan(budget(5000))
 	})
 
 	it("refuses an end record declaring more entries than the directory holds", async () => {
@@ -123,7 +124,7 @@ describe("inflate cut-off", () => {
 
 		expect(await codeOf(() => archive.read(entry))).toBe("corrupt")
 		// Inflating the whole stream takes far longer than the cut-off does.
-		expect(performance.now() - started).toBeLessThan(500)
+		expect(performance.now() - started).toBeLessThan(budget(500))
 	})
 
 	it("stops pulling input from an injected inflate that never ends", async () => {

@@ -10,7 +10,7 @@ import { CORPUS_DIR as CORPUS } from "./corpusDir"
 import { equationRunProperties } from "../core/docx/math/edit"
 import { diffTrees, firstRunProperties, ommlStringTree, ommlTree, treeXml, withRunProperties } from "../core/math/ommlTrack"
 import { rng } from "./fuzz/config"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 const M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 
@@ -284,7 +284,7 @@ describe("OMML to the LaTeX subset", () => {
 		const started = cpuMs()
 		const changed = treeXml(diffTrees(before, after, stamp, "1", "2"))
 
-		expect(cpuMs() - started).toBeLessThan(250)
+		expect(cpuMs() - started).toBeLessThan(budget(250))
 		expect(process.memoryUsage().arrayBuffers - buffers).toBeLessThan(32 * 1024 * 1024)
 		expect(changed).toContain("<w:ins")
 

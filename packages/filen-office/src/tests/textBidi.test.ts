@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 import { BIDI_REMOVED, BidiResolver, applyL1, hasRightToLeft, reorder, type BidiDirection } from "../core/text/bidi"
 import { readCached } from "../scripts/unicodeTables"
+import { budget } from "./timing"
 
 const DIRECTIONS: readonly BidiDirection[] = ["ltr", "rtl", "auto"]
 
@@ -340,6 +341,6 @@ describe("performance", () => {
 
 		console.log(`bidi: 10k paragraphs in ${elapsed.toFixed(1)} ms`)
 		expect(Reflect.get(resolver, "cps")).toBe(scratch)
-		expect(elapsed).toBeLessThan(2000)
+		expect(elapsed).toBeLessThan(budget(2000))
 	})
 })

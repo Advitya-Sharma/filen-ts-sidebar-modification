@@ -1,4 +1,5 @@
 import { formatBytes } from "@filen/shared"
+import { budget } from "@filen/shared/tooling/testBudget"
 import { test, expect } from "./fixtures"
 import { archivePasswordPrompt, expectRows, expectRowSize, openArchive, openRowMenu } from "./helpers/archive"
 import { HOSTILE_MISLEADING_NAME, NOTE_TEXT, TREE_FILES, ZIPCRYPTO_PASSWORD } from "./helpers/archiveFixtures"
@@ -489,7 +490,7 @@ test.describe("archive browser", () => {
 		if (browserName === "chromium") {
 			const longTasks = await page.evaluate(() => (window as unknown as { __archiveLongTasks?: number[] }).__archiveLongTasks ?? [])
 
-			expect(longTasks.filter(duration => duration >= 500)).toEqual([])
+			expect(longTasks.filter(duration => duration >= budget(500))).toEqual([])
 			expect((await heapBytes()) - heapBefore).toBeLessThan(100 * 1024 * 1024)
 		}
 

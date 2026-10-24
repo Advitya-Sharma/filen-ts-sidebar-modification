@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { FormulaEngine, type EngineSheet } from "../core/sheet/formula/index"
 import { engineCellFormula } from "../core/sheet/refs/formulaRefs"
+import { budget } from "./timing"
 
 // The bond and depreciation functions against each function's page on support.microsoft.com (its example, cited by
 // the test) and the conditions the page gives #NUM! and #VALUE! for.
@@ -157,7 +158,7 @@ describe("AMORDEGRC and AMORLINC", () => {
 
 		expect(value("=AMORDEGRC(1000,1,2,0,1E9,1E-7)")).toBe(0)
 		expect(value("=AMORDEGRC(2400,39679,39813,300,1E9,0.15,1)")).toBe(0)
-		expect(performance.now() - started).toBeLessThan(1_000)
+		expect(performance.now() - started).toBeLessThan(budget(1_000))
 	})
 })
 

@@ -4,6 +4,7 @@ import { RevisionView } from "@filen/office/core/docx"
 import { readRtf, type RtfReadResult } from "../core/rtf/index"
 import { RtfTokenizer, Token } from "../core/rtf/tokenizer"
 import { layOut, pageLines } from "./layoutFixtures"
+import { budget } from "./timing"
 
 function bytes(text: string): Uint8Array {
 	// Latin-1: every character one byte (tests write \'hh for anything else).
@@ -418,7 +419,7 @@ describe("RTF reader on hostile input", () => {
 		const started = performance.now()
 		const result = await read(deep)
 
-		expect(performance.now() - started).toBeLessThan(2_000)
+		expect(performance.now() - started).toBeLessThan(budget(2_000))
 		expect(result.preserved.some(entry => entry.kind === "tooDeep")).toBe(true)
 		expect(texts(strFromU8(unzipSync(result.docx)["word/document.xml"] ?? new Uint8Array()))).toBe("ab")
 	})

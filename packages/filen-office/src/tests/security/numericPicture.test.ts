@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { numericPicture } from "../../core/docx/fields/evaluate"
+import { budget } from "../timing"
 
 // A field's \# picture comes from the document: no picture makes an update throw or take long.
 
@@ -14,7 +15,7 @@ describe("numeric pictures from documents", () => {
 		const started = performance.now()
 		const out = numericPicture(1, `#,${"0".repeat(60_000)}`)
 
-		expect(performance.now() - started).toBeLessThan(500)
+		expect(performance.now() - started).toBeLessThan(budget(500))
 		expect(out.replace(/[ ,]/g, "")).toBe(`${"0".repeat(59_999)}1`)
 		expect(
 			out

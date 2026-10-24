@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest"
 import { SHEET_MAX_ROWS } from "../core/sheet/protocol"
 import { borderPresetEdges } from "../core/sheet/style/borders"
 import { buildFixture, openFixture } from "./sheetSessionFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 import { STYLES } from "./xlsxWriteFixtures"
 
 // Download as CSV covers the data area, as LibreOffice's CSV export does (measured, 26.8): from A1 to the last row
@@ -86,7 +86,7 @@ describe("Download as CSV of a sparse sheet", () => {
 
 		// Memory near the output's own size (328 MB here), never a row × column array of it.
 		expect(process.resourceUsage().maxRSS * 1024 - peak).toBeLessThan(2 * csv.bytes.length)
-		expect((used.user + used.system) / 1000).toBeLessThan(3_000)
+		expect((used.user + used.system) / 1000).toBeLessThan(budget(3_000))
 
 		const width = 16_384
 		const line = width - 1 + 2
@@ -120,7 +120,7 @@ describe("Download as CSV of a sparse sheet", () => {
 		// 17 GB of commas, refused from its known size alone.
 		expect(csv).toEqual({ ok: false, refusal: { reason: "tooLarge", detail: "csv" } })
 		expect(process.resourceUsage().maxRSS * 1024 - peak).toBeLessThan(64 * 1024 * 1024)
-		expect(used).toBeLessThan(500)
+		expect(used).toBeLessThan(budget(500))
 	})
 
 	it("of a sheet whose part is missing is refused, never left unanswered", async () => {

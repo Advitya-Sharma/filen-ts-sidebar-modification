@@ -6,6 +6,7 @@ import { r1c1ToA1 } from "../core/sheet/clipboard/r1c1"
 import { SHEET_MAX_EDIT_CELLS, type SheetSessionApi } from "../core/sheet/protocol"
 import { firstTile, openFixture, savedBytes, tileEntry } from "./sheetSessionFixtures"
 import { openKeys, sheetBody } from "./sheetKeysFixtures"
+import { budget } from "./timing"
 
 // Clipboard HTML in and out: LibreOffice's (captured from 7.5 and 26.8, "HTML (StarCalc)", the filter its clipboard
 // uses, from fixtures/sheet-clipboard/source.fods), Google Sheets' attributes (data-sheets-*, as LibreOffice 26.8
@@ -160,7 +161,7 @@ describe("clipboard HTML reading", () => {
 		const started = performance.now()
 
 		expect(parseClipboardHtml("<".repeat(400_000) + "<table".repeat(50_000) + '<td x="'.repeat(20_000), 1000)).not.toBe("tooLarge")
-		expect(performance.now() - started).toBeLessThan(2000)
+		expect(performance.now() - started).toBeLessThan(budget(2000))
 	})
 })
 

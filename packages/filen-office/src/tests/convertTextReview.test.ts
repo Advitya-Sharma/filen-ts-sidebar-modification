@@ -7,6 +7,7 @@ import { OdfEmitter, OdtWriteRefusal } from "../core/odt/write/emit"
 import { bytesSource, ZipArchive } from "../core/opc/index"
 import { decodeUtf8, type XmlDocument } from "../core/xml/index"
 import { buildDocx, p, type SyntheticDocx } from "./docxSynthetic"
+import { budget } from "./timing"
 
 const cell = (tcPr: string, text = "c"): string => `<w:tc><w:tcPr>${tcPr}</w:tcPr>${p(text)}</w:tc>`
 const table = (rows: string): string => `<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>${rows}</w:tbl>${p("after")}`
@@ -49,7 +50,7 @@ describe("docx → odt on hostile sizes", () => {
 				body: table(`<w:sdt><w:sdtContent><w:tr>${cell('<w:gridSpan w:val="400000000"/>')}</w:tr></w:sdtContent></w:sdt>`)
 			})
 		).toBe("tooLarge")
-		expect(performance.now() - started).toBeLessThan(5000)
+		expect(performance.now() - started).toBeLessThan(budget(5000))
 	})
 
 	it("converts wide tables: 63 columns as a table, 64 and 1024 in the plain fallback", async () => {
@@ -190,7 +191,7 @@ describe("docx → odt on hostile sizes", () => {
 		const rows = `<w:tr><w:trPr><w:gridBefore w:val="1023"/></w:trPr>${cell("")}</w:tr>`.repeat(2000)
 
 		expect(await refusal({ body: table(rows) })).toBe("tooLarge")
-		expect(performance.now() - started).toBeLessThan(10_000)
+		expect(performance.now() - started).toBeLessThan(budget(10_000))
 	})
 
 	it("writes a note referenced many times once, later references as note references to it", { timeout: 20_000 }, async () => {
@@ -404,7 +405,7 @@ describe("byte-keyed caches on crafted keys", () => {
 
 		for (let round = 0; round < 3; round++) for (const key of keys) if (map.get(key) === undefined) map.set(key, 1)
 
-		expect(performance.now() - started).toBeLessThan(3000)
+		expect(performance.now() - started).toBeLessThan(budget(3000))
 	})
 })
 

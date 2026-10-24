@@ -138,6 +138,10 @@ jobs:
       group: filen-office-tests-${{ github.ref }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
+    env:
+      # The tests' time bounds are set on developer machines; these runners' CPUs are slower. A complexity
+      # regression still exceeds the scaled bounds.
+      FILEN_PERF_BUDGET_SCALE: '3'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -389,6 +393,9 @@ jobs:
       group: ${{ matrix.group }}
       cancel-in-progress: false
     env:
+      # The specs' time bounds are set on developer machines; these runners' CPUs are slower. A complexity
+      # regression still exceeds the scaled bounds.
+      FILEN_PERF_BUDGET_SCALE: '3'
       # The setup and teardown projects drive chromium whatever the lane browser.
       E2E_INSTALL: ${{ matrix.browser == 'all' && 'chromium firefox webkit' || matrix.browser == 'chromium' && 'chromium' || format('chromium {0}', matrix.browser) }}
     steps:

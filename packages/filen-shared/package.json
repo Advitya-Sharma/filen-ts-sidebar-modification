@@ -16,6 +16,7 @@
 		"./emojis": "./src/emojis/index.ts",
 		"./tooling": "./src/tooling/licenseNotices.ts",
 		"./tooling/i18n": "./src/tooling/i18nPipeline.ts",
+		"./tooling/testBudget": "./src/tooling/testBudget.ts",
 		"./assistant": "./src/assistant/index.ts",
 		"./videos": "./src/videos/index.ts",
 		"./videos/transportStreamHead": "./src/videos/transportStreamHead.ts",

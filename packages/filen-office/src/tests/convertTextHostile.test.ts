@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, describe, expect, it } from "vitest"
 import { buildDocx, p, type SyntheticDocx } from "./docxSynthetic"
+import { budget } from "./timing"
 
 // Hostile and very large .docx converted to .odt: each refuses with a typed reason or converts, in bounded time and
 // memory (a browser worker past its memory is a crash, not a refusal). Each converts in a process of its own, whose
@@ -135,7 +136,7 @@ describe("docx → odt in bounded memory", () => {
 			process.stdout.write(`${name}: ${result} ${String(Math.round(ms))} ms, peak ${String(Math.round(peak / 1e6))} MB\n`)
 
 			expect(result).toBe(expected)
-			expect(ms).toBeLessThan(time)
+			expect(ms).toBeLessThan(budget(time))
 			expect(peak).toBeLessThan(PEAK)
 			expect(buffers).toBeLessThan(256 * 1024 * 1024)
 		})

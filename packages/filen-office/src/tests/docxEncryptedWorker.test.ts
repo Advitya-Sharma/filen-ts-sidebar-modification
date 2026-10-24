@@ -8,7 +8,7 @@ import { CfbFile } from "@filen/office/core/cfb"
 import { docxProtectionServer } from "../dom/docx/protectionWorker"
 import { buildDocx, p } from "./docxSynthetic"
 import { decrypted, encryptedFile, lockedOf, workerHarness } from "./docxEncryptedFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // Password-protected documents through the docx worker, as the web opens them: the spin and the decrypted package
 // stay in the worker; the viewer's engine reads the worker's copy; only an editor's take() brings the package and
@@ -144,7 +144,7 @@ describe("encrypted docx in the docx worker", () => {
 				const taken = await document.take()
 
 				// The copy comes without the upgrade spin (100,000 SHA-512 digests).
-				expect(cpuMs() - started).toBeLessThan(250)
+				expect(cpuMs() - started).toBeLessThan(budget(250))
 				expect(taken.bytes).toEqual(PLAINTEXT)
 
 				const { sealer, release } = docxSealer(taken)
@@ -198,7 +198,7 @@ describe("encrypted docx in the docx worker", () => {
 
 			setTimeout(() => controller.abort(), 20)
 			expect(await pending).toEqual({ ok: false, reason: "aborted" })
-			expect(performance.now() - started).toBeLessThan(1500)
+			expect(performance.now() - started).toBeLessThan(budget(1500))
 
 			const aborted = new AbortController()
 

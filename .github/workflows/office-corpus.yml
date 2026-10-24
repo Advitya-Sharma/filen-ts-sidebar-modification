@@ -41,6 +41,10 @@ jobs:
       cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # The tests' time bounds are set on developer machines; these runners' CPUs are slower. A complexity
+      # regression still exceeds the scaled bounds.
+      FILEN_PERF_BUDGET_SCALE: '3'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -125,6 +129,8 @@ jobs:
       FILEN_OFFICE_CORPUS: ${{ github.workspace }}/packages/filen-office/.corpus
       FILEN_OFFICE_FUZZ_SEED: ${{ inputs.fuzz-seed || github.run_number }}
       FILEN_OFFICE_FUZZ_OUT: ${{ github.workspace }}/office-fuzz.jsonl
+      # Slower runners, as in test-office-corpus.
+      FILEN_PERF_BUDGET_SCALE: '3'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -187,6 +193,8 @@ jobs:
       FILEN_OFFICE_FUZZ_SAVES: ${{ github.workspace }}/office-saves
       FILEN_OFFICE_SOFFICE: /usr/bin/soffice
       FILEN_OFFICE_INTEROP_WORK: ${{ github.workspace }}/office-interop
+      # Slower runners, as in test-office-corpus.
+      FILEN_PERF_BUDGET_SCALE: '3'
     steps:
       - name: Checkout
         uses: actions/checkout@v5

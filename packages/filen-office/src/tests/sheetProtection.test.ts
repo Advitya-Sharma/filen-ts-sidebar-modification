@@ -4,6 +4,7 @@ import { legacySheetPassword, sheetPasswordCheck } from "../core/xlsx/edit/prote
 import { hashProtectionPassword, verifyProtectionPassword } from "../dom/protection"
 import { cells, openFixture, savedBytes } from "./sheetSessionFixtures"
 import { parts } from "./xlsxWriteFixtures"
+import { budget } from "./timing"
 
 // Sheet and workbook protection: honoured before any edit runs, set and taken off, and the passwords that guard
 // them ([MS-OFFCRYPTO] §2.3.7.1 legacy verifier, §2.4.2.4 modern hash).
@@ -72,7 +73,7 @@ describe("protection passwords", () => {
 		expect(await verifyProtectionPassword({ ...hash, spinCount: 1.5 }, "x")).toBe("unsupported")
 		expect(await verifyProtectionPassword({ ...hash, spinCount: Number.NaN }, "x")).toBe("unsupported")
 		expect(await verifyProtectionPassword({ ...hash, spinCount: -1 }, "x")).toBe("unsupported")
-		expect(performance.now() - started).toBeLessThan(1000)
+		expect(performance.now() - started).toBeLessThan(budget(1000))
 	})
 
 	it("stops a check when its signal aborts", async () => {

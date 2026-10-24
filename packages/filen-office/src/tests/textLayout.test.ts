@@ -31,7 +31,7 @@ import {
 } from "../core/text/index"
 import { lineSpacingUnits, verticalMetrics } from "../core/fonts/index"
 import { FakeMeasurer, GEOMETRY, harness, layOut, lines, testFont, texts } from "./textFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // The fake font at 20 px: "a" 10, space 5, "i"/"l"/"." 5, "m"/"w" 15, ideographs 20; lines 20 px high.
 
@@ -891,7 +891,7 @@ describe("performance", () => {
 		const view = layOut(h, b => b.append("x".repeat(1 << 20), h.base), { width: 624 })
 
 		expect(view.length).toBeGreaterThan(10_000)
-		expect(performance.now() - started).toBeLessThan(10_000)
+		expect(performance.now() - started).toBeLessThan(budget(10_000))
 
 		const prepared = h.layouter.prepare(h.builder.reset(h.base).append("short", h.base).finish(), { rtl: false })
 
@@ -970,6 +970,6 @@ describe("performance", () => {
 		expect(lineCount).toBeGreaterThan(40_000)
 		// Generous: vitest's module runner slows hot loops several times over a bundled build (src/bench/textBench.ts),
 		// and loaded CI machines slow it further; a quadratic regression would still be far beyond this.
-		expect(elapsed).toBeLessThan(15_000)
+		expect(elapsed).toBeLessThan(budget(15_000))
 	}, 60_000)
 })

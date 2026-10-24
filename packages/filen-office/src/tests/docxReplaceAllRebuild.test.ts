@@ -8,7 +8,7 @@ import { RebuildStep, nodesBetweenRanges, type Replace } from "../core/docx/edit
 import { openSpec } from "./docxEditFixtures"
 import { buildDocx, p } from "./docxSynthetic"
 import { pageDigest, pagedEditor, savedDigest, settleAll } from "./pagedFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // Replace All rebuilds blocks in few steps, each mapping positions as its replaces do: what lies between the
 // matches (a comment, a tracked change, the caret) keeps its place for every reader that maps positions.
@@ -94,7 +94,7 @@ describe("Replace All rebuilds", () => {
 		})
 
 		expect(visits).toBe(40_000)
-		expect(cpuMs() - start).toBeLessThan(250)
+		expect(cpuMs() - start).toBeLessThan(budget(250))
 	})
 })
 

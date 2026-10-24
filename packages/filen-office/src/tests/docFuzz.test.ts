@@ -6,6 +6,7 @@ import { bytesSource } from "@filen/office/core/opc"
 import { DocError, docText, readDoc } from "@filen/office/core/doc"
 import { CORPUS_DIR } from "./corpusDir"
 import { buildDoc, lists, plc, prl } from "./docFixtures"
+import { budget } from "./timing"
 
 // Mutated documents (bytes of the WordDocument and Table streams overwritten, the compound file rebuilt) must read
 // or be refused with a DocError, never throw anything else, and never take long.
@@ -137,7 +138,7 @@ describe("mutated Word binary documents", () => {
 		const { untyped, slowest } = await fuzz([await streams("synthetic", bytes)], 1500, 7)
 
 		expect(untyped).toEqual([])
-		expect(slowest).toBeLessThan(1000)
+		expect(slowest).toBeLessThan(budget(1000))
 	})
 
 	const files = existsSync(join(CORPUS_DIR, "doc"))
@@ -162,6 +163,6 @@ describe("mutated Word binary documents", () => {
 		const { untyped, slowest } = await fuzz(sources, 800, 11)
 
 		expect(untyped).toEqual([])
-		expect(slowest).toBeLessThan(2000)
+		expect(slowest).toBeLessThan(budget(2000))
 	})
 })

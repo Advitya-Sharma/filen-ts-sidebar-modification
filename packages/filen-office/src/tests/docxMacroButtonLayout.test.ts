@@ -4,7 +4,7 @@ import { macroButtonText } from "../core/docx/model/macroButton"
 import { buildDocx } from "./docxSynthetic"
 import { layOut, pageLines } from "./layoutFixtures"
 import { pagedEditor } from "./pagedFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 const instr = (text: string): string => `<w:r><w:instrText xml:space="preserve">${text}</w:instrText></w:r>`
 const char = (type: string): string => `<w:r><w:fldChar w:fldCharType="${type}"/></w:r>`
@@ -76,7 +76,7 @@ describe("MACROBUTTON display text", () => {
 
 		expect(macroButtonText(crafted(26))).toBe("\\*a".repeat(26) + " b")
 		expect(macroButtonText(crafted(20_000))?.length).toBe(60_002)
-		expect(cpuMs() - started).toBeLessThan(250)
+		expect(cpuMs() - started).toBeLessThan(budget(250))
 		expect(macroButtonText(" MACROBUTTON m Text \\* MERGEFORMAT ")).toBe("Text")
 		expect(macroButtonText(" MACROBUTTON m Text\\*Upper \\*  Lower ")).toBe("Text")
 	})
@@ -104,6 +104,6 @@ describe("MACROBUTTON display text", () => {
 		const layout = await layOut(buildDocx({ body: para(field) }))
 
 		expect(pageLines(layout, 0)[0]?.text).toContain(" b")
-		expect(performance.now() - started).toBeLessThan(5000)
+		expect(performance.now() - started).toBeLessThan(budget(5000))
 	})
 })

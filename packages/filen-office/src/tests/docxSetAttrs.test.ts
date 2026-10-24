@@ -9,6 +9,7 @@ import { AttrChanges, SetAttrsStep } from "../core/docx/edit/attrs"
 import { CORPUS_DIR } from "./corpusDir"
 import { openBytes, sessionOf } from "./docxEditFixtures"
 import { p } from "./docxSynthetic"
+import { budget } from "./timing"
 
 // Paragraph commands set the attributes of every paragraph in one step whatever the selection covers: the same
 // document as a step per attribute, an exact undo, and the same mapping as AttrStep.
@@ -179,7 +180,7 @@ describe("SetAttrsStep", () => {
 		console.log(`8000 paragraphs align.center ${ms.toFixed(0)} ms`)
 		expect(steps).toHaveLength(1)
 		// A step per paragraph took 3.3 s here.
-		expect(ms).toBeLessThan(1500)
+		expect(ms).toBeLessThan(budget(1500))
 	})
 })
 
@@ -218,7 +219,7 @@ describe("paragraph and Clear All Formatting commands over all of a long documen
 
 				times.push(`${command.type} ${ms.toFixed(0)} ms`)
 				// About 1 s untracked, 2 s tracked (a step per paragraph ran out of memory at 3 GB): a generous bound.
-				expect(ms).toBeLessThan(tracking ? 15_000 : 5000)
+				expect(ms).toBeLessThan(budget(tracking ? 15_000 : 5000))
 				expect(session.execute({ type: "history.undo" })).toBe(true)
 			}
 

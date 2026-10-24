@@ -8,6 +8,7 @@ import { saveDocx } from "@filen/office/core/docx/write"
 import { NAMESPACES, buildDocx, modelOf, type SyntheticDocx } from "../docxSynthetic"
 import { pagedEditor, settleAll } from "../pagedFixtures"
 import { engineServices, nest, trapGlobals, type Trap } from "./generate"
+import { budget } from "../timing"
 
 // XML from documents: no entity can expand, no external resource is read, and no part reader recurses on
 // the document's nesting.
@@ -62,7 +63,7 @@ describe("entities", () => {
 
 		expect(xmlCode(() => parseXml(encoder.encode(laughs)))).toBe("doctype")
 		expect(xmlCode(() => parseXml(encoder.encode(quadratic)))).toBe("doctype")
-		expect(performance.now() - started).toBeLessThan(1000)
+		expect(performance.now() - started).toBeLessThan(budget(1000))
 	})
 
 	it("shows nothing of a main part that declares entities", async () => {
@@ -72,7 +73,7 @@ describe("entities", () => {
 
 		// The part is refused whole (the model lists it as rejected); nothing of it is shown.
 		expect(opened.text).not.toContain("lol")
-		expect(opened.ms).toBeLessThan(2000)
+		expect(opened.ms).toBeLessThan(budget(2000))
 	})
 
 	it("knows only the five predefined entities and never expands another", () => {
@@ -149,7 +150,7 @@ describe("size and shape", () => {
 		const document = parseXml(bytes)
 
 		expect(document.attribute(1, "a")?.length).toBe(value.length)
-		expect(performance.now() - started).toBeLessThan(3000)
+		expect(performance.now() - started).toBeLessThan(budget(3000))
 	})
 
 	it("handles a million nested elements without recursing", () => {
@@ -268,7 +269,7 @@ describe("deep nesting in every part reader", () => {
 
 		expect(finalPages(opened)).toBe(true)
 		expect(opened.text).toContain("top")
-		expect(opened.ms).toBeLessThan(10_000)
+		expect(opened.ms).toBeLessThan(budget(10_000))
 	})
 
 	it("keeps content past the depth limit opaque and writes it back unchanged after an edit", async () => {

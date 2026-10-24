@@ -4,6 +4,7 @@ import { drawingTheme } from "../core/drawingml/color"
 import { DrawingList, ItemFloat, ItemInt, ItemKind, rgba, type DrawingText } from "../core/drawingml/displayList"
 import type { PaintContext } from "../core/drawingml/fill"
 import { parseXml } from "../core/xml/index"
+import { budget } from "./timing"
 
 const SCHEME: Readonly<Record<string, string>> = {
 	tx1: "000000",
@@ -335,7 +336,7 @@ describe("unsupported and hostile charts", () => {
 		expect(supported).toBe(true)
 		// 255 series at most, one point each.
 		expect(list.itemCount).toBeLessThan(2000)
-		expect(performance.now() - start).toBeLessThan(2000)
+		expect(performance.now() - start).toBeLessThan(budget(2000))
 	})
 
 	it("caps per-point data labels", () => {

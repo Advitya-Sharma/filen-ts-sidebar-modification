@@ -13,6 +13,7 @@ import { NAMESPACES, buildDocx, p } from "./docxSynthetic"
 import { STYLES_PART } from "./docxEditFixtures"
 import { layOut } from "./layoutFixtures"
 import { pagedEditor, settleAll } from "./pagedFixtures"
+import { budget } from "./timing"
 
 interface Opened {
 	readonly editor: PagedEditor
@@ -538,7 +539,7 @@ describe("comments in many notes", () => {
 			process.stderr.write(`notes read p95 per batch (CPU): ${sorted.map(value => value.toFixed(3)).join(", ")} ms\n`)
 			// Still only the notes of the pages read have a session (typing moves some onto them).
 			expect(editor.sessions).toHaveLength(1 + annotations.read(mounted).comments.filter(comment => comment.rectCount > 0).length)
-			expect(sorted[0]).toBeLessThan(1)
+			expect(sorted[0]).toBeLessThan(budget(1))
 			annotations.dispose()
 		}
 	)
@@ -775,7 +776,7 @@ describe("live annotations performance", () => {
 		const p95 = percentile(sorted, 0.95)
 
 		process.stderr.write(`annotations read per keystroke: median ${percentile(sorted, 0.5).toFixed(3)} ms, p95 ${p95.toFixed(3)} ms\n`)
-		expect(p95).toBeLessThan(1)
+		expect(p95).toBeLessThan(budget(1))
 		annotations.dispose()
 	})
 })

@@ -5,6 +5,7 @@ import { buildDocxModel, openDocxPackage } from "@filen/office/core/docx"
 import { bytesSource } from "@filen/office/core/opc"
 import { readRtf } from "../core/rtf/index"
 import { CORPUS_DIR } from "./corpusDir"
+import { budget } from "./timing"
 
 // Mutated RTF (control words, parameters, braces, \bin lengths, hex data, truncation, splices): the reader
 // answers each with a document or a refusal, never a throw, within a time bound, and the docx engine opens
@@ -213,7 +214,7 @@ describe("RTF reader fuzzing", () => {
 
 			expect(failure, `mutant ${k} of seed ${seedIndex}`).toBeUndefined()
 
-			if (elapsed > BOUND_MS) slow.push(`mutant ${k} of seed ${seedIndex}: ${Math.round(elapsed)} ms`)
+			if (elapsed > budget(BOUND_MS)) slow.push(`mutant ${k} of seed ${seedIndex}: ${Math.round(elapsed)} ms`)
 		}
 
 		expect(slow).toEqual([])

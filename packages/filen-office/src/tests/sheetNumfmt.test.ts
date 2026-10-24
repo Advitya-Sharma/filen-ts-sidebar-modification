@@ -12,6 +12,7 @@ import {
 	type NumFmtLocale,
 	type NumFmtOptions
 } from "../core/sheet/numfmt"
+import { budget } from "./timing"
 
 const FIGURE = " "
 
@@ -457,7 +458,7 @@ describe("compiling", () => {
 
 			parseNumFmt(code)
 
-			expect(Date.now() - started).toBeLessThan(1000)
+			expect(Date.now() - started).toBeLessThan(budget(1000))
 		}
 	})
 

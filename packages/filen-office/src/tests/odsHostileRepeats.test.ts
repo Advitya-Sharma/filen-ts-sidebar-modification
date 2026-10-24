@@ -8,7 +8,7 @@ import { inThreadSheetHost } from "../dom/sheet/host"
 import { createGridAxis } from "../react/sheet/axis"
 import { odsBytes, table } from "./odsFixtures"
 import { IMMEDIATE } from "./sheetSessionFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // A few kilobytes of OpenDocument can repeat a row or a cell millions of times: what each copy costs is charged to
 // the workbook's limits, the copies of one note or link share it, and past a limit the file is refused as too large.
@@ -26,7 +26,7 @@ describe("an ODS file's repeats", () => {
 
 		if (!result.ok) throw new Error(`${result.reason}: ${result.message}`)
 
-		expect(cpuMs() - started).toBeLessThan(5_000)
+		expect(cpuMs() - started).toBeLessThan(budget(5_000))
 		expect(result.workbook.sheets).toHaveLength(40)
 
 		for (const entry of result.workbook.sheets) {
@@ -128,7 +128,7 @@ describe("an ODS file's repeats", () => {
 		)
 
 		expect(result).toMatchObject({ ok: false, reason: "tooLarge" })
-		expect(cpuMs() - started).toBeLessThan(5_000)
+		expect(cpuMs() - started).toBeLessThan(budget(5_000))
 	}, 60_000)
 
 	it("shows every copy of a repeated note", async () => {

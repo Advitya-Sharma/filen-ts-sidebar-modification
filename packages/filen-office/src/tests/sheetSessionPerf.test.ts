@@ -7,6 +7,7 @@ import { openTextSession } from "../core/sheet/text"
 import { inThreadSheetHost } from "../dom/sheet/host"
 import { R, SML } from "./xlsxWriteFixtures"
 import { ZIP_ENTRY_TIME } from "./zipTime"
+import { budget } from "./timing"
 
 // The session's budgets at 1M cells (100k rows by 10 columns, no formulas): a keystroke's commit at most 5 ms of
 // CPU, an inserted row at most 150 ms with a change message of at most 64 KB, and an in-thread open that never
@@ -91,7 +92,7 @@ describe.skipIf(!PERF)("text session budget", () => {
 		if (opened.kind !== "opened") throw new Error(opened.kind)
 
 		process.stdout.write(`csv open ${(bytes.length / 1e6).toFixed(1)} MB: ${ms.toFixed(0)} ms\n`)
-		expect(ms).toBeLessThanOrEqual(200)
+		expect(ms).toBeLessThanOrEqual(budget(200))
 		opened.session.close()
 	})
 
@@ -122,7 +123,7 @@ describe.skipIf(!PERF)("text session budget", () => {
 		opened.session.close()
 		times.sort((a, z) => a - z)
 		process.stdout.write(`csv keystroke at 1M rows: p50 ${(times[10] ?? 0).toFixed(2)} ms\n`)
-		expect(times[10]).toBeLessThanOrEqual(5)
+		expect(times[10]).toBeLessThanOrEqual(budget(5))
 	})
 })
 
@@ -194,10 +195,10 @@ describe.skipIf(!PERF)("sheet session budgets at 1M cells", () => {
 			`open ${openMs.toFixed(0)} ms (longest slice ${longest.toFixed(1)} ms); keystroke p50 ${p50.toFixed(2)} ms p95 ${p95.toFixed(2)} ms; insert row ${insertMs.toFixed(1)} ms, message ${message} B\n`
 		)
 
-		expect(p95).toBeLessThanOrEqual(5)
-		expect(insertMs).toBeLessThanOrEqual(150)
+		expect(p95).toBeLessThanOrEqual(budget(5))
+		expect(insertMs).toBeLessThanOrEqual(budget(150))
 		expect(message).toBeLessThanOrEqual(64 * 1024)
-		expect(longest).toBeLessThanOrEqual(50)
+		expect(longest).toBeLessThanOrEqual(budget(50))
 		session.close()
 		host.dispose()
 	})

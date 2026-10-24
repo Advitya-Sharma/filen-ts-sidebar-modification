@@ -7,7 +7,7 @@ import { storyReviewIndex } from "../core/docx/review/accept"
 import { addComments, openEditor, percentile as share, typeBursts } from "../bench/editHarness"
 import { CORPUS_DIR } from "./corpusDir"
 import { openBytes } from "./docxEditFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // Recording tracked changes adds no document scan to a keystroke: typing, Backspace and Enter with tracking on
 // cost what they cost with it off, on the 300-page fixture and on Tariff; select-all edits stay bounded.
@@ -86,8 +86,8 @@ describe("docx tracked changes performance", () => {
 		const { off, on } = await measure(FIXTURE, "300p")
 
 		// The target is 16 ms of CPU time (wall time would count other processes); the bounds leave room for noise.
-		expect(on).toBeLessThan(48)
-		expect(on).toBeLessThan(Math.max(off * 3, off + 8))
+		expect(on).toBeLessThan(budget(48))
+		expect(on).toBeLessThan(Math.max(off * 3, off + budget(8)))
 	})
 
 	// Under review as the web shows it: Markup view, tracking on, 200 comments; keys in page view (the pages in
@@ -117,15 +117,15 @@ describe("docx tracked changes performance", () => {
 			opened.close()
 			expect(paged.refused + suspended.refused).toBe(0)
 			// The target is 8 ms (src/bench/editBench.ts measures the gate); the bounds leave room for loaded machines.
-			expect(share(paged.cpu, 0.95)).toBeLessThan(48)
-			expect(share(suspended.cpu, 0.95)).toBeLessThan(24)
+			expect(share(paged.cpu, 0.95)).toBeLessThan(budget(48))
+			expect(share(suspended.cpu, 0.95)).toBeLessThan(budget(24))
 		}
 	)
 
 	it.skipIf(!existsSync(TARIFF))("types into Tariff with tracking on, and deletes all of it", { timeout: 600_000 }, async () => {
 		const { off, on } = await measure(TARIFF, "Tariff")
 
-		expect(on).toBeLessThan(Math.max(off * 3, off + 8))
+		expect(on).toBeLessThan(Math.max(off * 3, off + budget(8)))
 
 		const session = await sessionOf(TARIFF, true)
 		const doc = session.state.doc
@@ -152,6 +152,6 @@ describe("docx tracked changes performance", () => {
 		)
 		expect(applied).toBe(true)
 		expect(session.state.doc.eq(doc)).toBe(true)
-		expect(deleteMs).toBeLessThan(20_000)
+		expect(deleteMs).toBeLessThan(budget(20_000))
 	})
 })

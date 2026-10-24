@@ -13,6 +13,7 @@ import { symbolTable, symbolText } from "../core/fonts/symbols"
 import { CORPUS_DIR } from "./corpusDir"
 import { docxBodyText } from "./docToDocxFixtures"
 import { OpenXmlSdk, openXmlSdkMissing } from "./oracles/openXmlSdk"
+import { budget } from "./timing"
 
 // The corpus converted: .odt and .rtf to .docx, .docx to .odt (.doc to .docx is the Word binary converter's, tested by
 // docToDocxCorpus; here its packages are validated and scanned). Each file converts or is refused with its typed
@@ -146,7 +147,7 @@ describe.skipIf(!fetched)("text conversions over the corpus", () => {
 			}
 
 			// Generous for a loaded machine.
-			if (ms > 1000 + (1500 * bytes.length) / 1e6) slow.push(`${path}: ${ms.toFixed(0)} ms`)
+			if (ms > budget(1000 + (1500 * bytes.length) / 1e6)) slow.push(`${path}: ${ms.toFixed(0)} ms`)
 
 			marked.push(...(await internalMarkers(converted.bytes)).map(found => `${path}: ${found}`))
 
@@ -208,7 +209,7 @@ describe.skipIf(!fetched)("text conversions over the corpus", () => {
 				continue
 			}
 
-			if (ms > 1000 + (5000 * bytes.length) / 1e6) slow.push(`${path}: ${ms.toFixed(0)} ms`)
+			if (ms > budget(1000 + (5000 * bytes.length) / 1e6)) slow.push(`${path}: ${ms.toFixed(0)} ms`)
 
 			const gone = missing(words(docxBodyText(await docxModel(bytes))), words(docxBodyText(await odtModel(converted.bytes))))
 

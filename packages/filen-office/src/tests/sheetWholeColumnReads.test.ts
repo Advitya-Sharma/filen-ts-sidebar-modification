@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { FormulaEngine, type EngineSheet } from "../core/sheet/formula/index"
 import { cells, firstTile, openFixture, tileEntry } from "./sheetSessionFixtures"
+import { budget } from "./timing"
 
 // Whole-column references end at the last cell of the columns the sheet's whole-column references cover: a cell
 // written in the grid's last row elsewhere leaves each recalculation reading those columns' cells only, and one
@@ -34,8 +35,8 @@ describe("whole-column references after a cell in the grid's last row", () => {
 		await timed(4, 1, "3")
 		await timed(LAST, 4, "x")
 
-		expect(await timed(5, 1, "7")).toBeLessThan(2_000)
-		expect(await timed(6, 0, "70")).toBeLessThan(2_000)
+		expect(await timed(5, 1, "7")).toBeLessThan(budget(2_000))
+		expect(await timed(6, 0, "70")).toBeLessThan(budget(2_000))
 
 		const tile = await firstTile(session, sheet)
 
@@ -58,7 +59,7 @@ describe("whole-column references after a cell in the grid's last row", () => {
 			built.set(0, [{ row: LAST, col: 0, content: 5 }])
 			built.set(0, [{ row: 5, col: 1, content: 7 }])
 
-			expect(performance.now() - start).toBeLessThan(10_000)
+			expect(performance.now() - start).toBeLessThan(budget(10_000))
 			expect(held).toHaveLength(100)
 			expect(built.result(0, 0, 3)).toEqual({ value: 460 })
 		} finally {
@@ -391,7 +392,7 @@ describe("whole-column lookups over columns running to the grid's last row", () 
 		const built = engine(rows)
 
 		try {
-			expect((process.cpuUsage().user - start) / 1000).toBeLessThan(3_000)
+			expect((process.cpuUsage().user - start) / 1000).toBeLessThan(budget(3_000))
 			expect(built.result(0, 0, 1)).toEqual({ value: 10 })
 			expect(built.result(0, 299, 1)).toEqual({ value: 3000 })
 

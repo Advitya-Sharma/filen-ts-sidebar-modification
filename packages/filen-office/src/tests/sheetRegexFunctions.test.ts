@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { FormulaEngine, type EngineSheet } from "../core/sheet/formula/index"
 import { engineCellFormula } from "../core/sheet/refs/formulaRefs"
+import { budget } from "./timing"
 
 // REGEXTEST, REGEXEXTRACT and REGEXREPLACE through the engine, against the examples of their pages on
 // support.microsoft.com ("REGEXTEST function", "REGEXEXTRACT function", "REGEXREPLACE function"), which use PCRE2.
@@ -273,6 +274,6 @@ describe("regex functions: user patterns cannot hang the calculation", () => {
 		// result.
 		expect(heldResult('REGEXEXTRACT(REPT("a",30000),"(.*a){20}")=REPT("a",30000)', "stored")).toEqual({ value: true })
 		expect(heldResult('ROWS(REGEXEXTRACT(REPT("a",30000),"(?:a*a*a*a*c)|a",1))', "stored")).toEqual({ value: "stored" })
-		expect(Date.now() - start).toBeLessThan(5000)
+		expect(Date.now() - start).toBeLessThan(budget(5000))
 	})
 })

@@ -6,7 +6,7 @@ import { DocxDocBuilder, DocxEditorSession, docxSchema } from "@filen/office/cor
 import { key, memory, openEditor, percentile as share, placeCaret, spreadPosition, typeBursts } from "../bench/editHarness"
 import { CORPUS_DIR } from "./corpusDir"
 import { openBytes } from "./docxEditFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 const FIXTURE = join(import.meta.dirname, "fixtures", "08-large-300p.docx")
 const TARIFF = join(CORPUS_DIR, "docx", "govuk__Tariff_of_the_United_Kingdom_v1.34.docx")
@@ -101,9 +101,9 @@ describe("docx editing performance", () => {
 		)
 		expect(session.state.doc.type).toBe(docxSchema.nodes.doc)
 		// The target is 16 ms of CPU time; the bound leaves room for noise.
-		expect(p95).toBeLessThan(48)
-		expect(percentile(enter, 0.95)).toBeLessThan(48)
-		expect(percentile(backspace, 0.95)).toBeLessThan(48)
+		expect(p95).toBeLessThan(budget(48))
+		expect(percentile(enter, 0.95)).toBeLessThan(budget(48))
+		expect(percentile(backspace, 0.95)).toBeLessThan(budget(48))
 	})
 
 	// As the web edits: the in-thread editing host (sliced open with the writer's proof), the pages in view laid
@@ -131,7 +131,7 @@ describe("docx editing performance", () => {
 			opened.close()
 			expect(typed.refused).toBe(0)
 			// The target is 16 ms (src/bench/editBench.ts measures the gate); the bound leaves room for loaded CI machines.
-			expect(p95).toBeLessThan(48)
+			expect(p95).toBeLessThan(budget(48))
 		}
 	)
 
@@ -174,7 +174,7 @@ describe("docx editing performance", () => {
 				`select-all snapshot cold ${cold.toFixed(0)} ms, after an edit ${warm.toFixed(1)} ms; shift+arrow over half p50 ${percentile(arrows, 0.5).toFixed(2)} ms`
 		)
 		expect(blocks).toBeGreaterThan(0)
-		expect(warm).toBeLessThan(150)
-		expect(percentile(arrows, 0.5)).toBeLessThan(15)
+		expect(warm).toBeLessThan(budget(150))
+		expect(percentile(arrows, 0.5)).toBeLessThan(budget(15))
 	})
 })

@@ -8,7 +8,7 @@ import { AxisFlag } from "../core/sheet/protocol"
 import type { SheetStore } from "../core/xlsx/model/store"
 import { encryptedEntry, odsBytes, odsDocument, openOdsFixture, shownRows, table } from "./odsFixtures"
 import { buildZip, text } from "./zipBuilder"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // The OpenDocument spreadsheet reader: content.xml streamed into the xlsx sheet model, repeats never expanded where
 // only formats repeat, values and texts as ODF 1.3 Part 3 §19 writes them.
@@ -137,7 +137,7 @@ describe("the ODS reader", () => {
 		const started = cpuMs()
 		const result = await openOds(bytesSource(bytes))
 
-		expect(cpuMs() - started).toBeLessThan(50)
+		expect(cpuMs() - started).toBeLessThan(budget(50))
 		expect(result.ok && result.workbook.sheets[0]?.model?.store.cellCount).toBe(0)
 	})
 

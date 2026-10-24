@@ -10,6 +10,7 @@ import { convertDocToDocx, docxPackage } from "../core/doc/toDocx/index"
 import { CORPUS_DIR } from "./corpusDir"
 import { docxBodyText, reopen } from "./docToDocxFixtures"
 import { OpenXmlSdk, openXmlSdkMissing } from "./oracles/openXmlSdk"
+import { budget } from "./timing"
 
 // The corpus .doc/.dot files converted to WordprocessingML: each converts or is refused with the reader's typed
 // reason; the package reads back through the docx reader with the body text of the Word binary document (list
@@ -76,7 +77,7 @@ describe.skipIf(!fetched)("Word binary corpus to WordprocessingML", () => {
 			const ms = performance.now() - started
 
 			// Generous for a loaded machine: a few tens of milliseconds per megabyte are measured.
-			if (ms > 500 + (600 * bytes.length) / 1e6) slow.push(`${path}: ${ms.toFixed(0)} ms`)
+			if (ms > budget(500 + (600 * bytes.length) / 1e6)) slow.push(`${path}: ${ms.toFixed(0)} ms`)
 
 			const ours = words(docText(await readDoc(bytesSource(bytes)), { labels: false, framed: true, hidden: true }))
 			const back = words(docxBodyText(await reopen(result)))
@@ -201,6 +202,6 @@ describe.skipIf(!fetched)("mutated Word binary documents to WordprocessingML", (
 		}
 
 		expect(untyped).toEqual([])
-		expect(slowest).toBeLessThan(3000)
+		expect(slowest).toBeLessThan(budget(3000))
 	})
 })

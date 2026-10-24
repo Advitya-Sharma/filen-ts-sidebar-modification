@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import { ZipArchive, ZipError } from "@filen/office/core/opc"
 import { openDocxPackage } from "@filen/office/core/docx"
 import { compoundFile, countingSource, directoryEntry, type CompoundFile } from "./generate"
+import { budget } from "../timing"
 
 // Telling encrypted OOXML from legacy binary files (core/cfb's reader under openDocxPackage): every walk is
 // capped and no count in the file is trusted, so a hostile header costs a bounded number of reads and answers
@@ -110,7 +111,7 @@ describe("hostile compound files", () => {
 
 		expect(result.reason).toBe("compoundFile")
 		expect(result.reads).toBeLessThan(10)
-		expect(performance.now() - started).toBeLessThan(1000)
+		expect(performance.now() - started).toBeLessThan(budget(1000))
 	})
 
 	it("caps a long directory chain at a bounded number of sector reads", async () => {

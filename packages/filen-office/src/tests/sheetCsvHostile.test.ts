@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { parseCsv } from "../core/sheet/csv/csvParse"
 import { openTextSession } from "../core/sheet/text"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // A text file past the cell or column limit is refused while it is read, before its rows are built (one past the row
 // limit opens its first rows, view-only): memory stays near what the limit allows, whatever the file holds.
@@ -33,7 +33,7 @@ describe("a hostile CSV", () => {
 		expect(opened.info.writability).toEqual({ state: "viewOnly", reason: "incomplete" })
 		// The text decoded (60 MB as UTF-16) and at most the limit's rows of one empty field each.
 		expect(process.memoryUsage().rss - before).toBeLessThan(400_000_000)
-		expect(used).toBeLessThan(5_000)
+		expect(used).toBeLessThan(budget(5_000))
 		opened.session.close()
 	})
 

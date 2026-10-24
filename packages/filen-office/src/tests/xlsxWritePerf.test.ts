@@ -8,6 +8,7 @@ import { bytesSource } from "../core/opc/index"
 import { openXlsx } from "../core/xlsx/read/index"
 import { R, SML } from "./xlsxWriteFixtures"
 import { ZIP_ENTRY_TIME } from "./zipTime"
+import { budget } from "./timing"
 
 // The save budget at 1M cells: after a one-cell edit, ≤ 0.6 s of CPU on the thread that saves, only the edited
 // part deflated (every other entry copied as stored), and a peak of at most the open's memory plus twice the
@@ -139,7 +140,7 @@ describe.skipIf(!PERF)("xlsx save at 1M cells", () => {
 		// The edited sheet alone (its new size is within a few bytes of the source's).
 		expect(deflated.length).toBe(1)
 		expect(Math.abs((deflated[0] ?? 0) - sheetBytes)).toBeLessThan(64)
-		expect(cpuMs).toBeLessThanOrEqual(600)
+		expect(cpuMs).toBeLessThanOrEqual(budget(600))
 		expect(peak - before).toBeLessThanOrEqual(2 * sheetBytes)
 	})
 })

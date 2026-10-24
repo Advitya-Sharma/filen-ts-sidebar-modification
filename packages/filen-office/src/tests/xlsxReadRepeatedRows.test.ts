@@ -4,7 +4,7 @@ import { bytesSource } from "../core/opc/index"
 import { openXlsx } from "../core/xlsx/read/index"
 import { encodeUtf8 } from "../core/xml/index"
 import { SML, workbookFiles } from "./xlsxReadFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 import { ZIP_ENTRY_TIME } from "./zipTime"
 
 // Repeated rows are merged in steps on the reader's slice clock: no long task, and an abort is heard meanwhile.
@@ -45,6 +45,6 @@ describe("xlsx reader: repeated rows", () => {
 
 		longest = Math.max(longest, cpuMs() - last)
 		expect(model.store.cellCount).toBe(16_384)
-		expect(longest).toBeLessThan(50)
+		expect(longest).toBeLessThan(budget(50))
 	})
 })

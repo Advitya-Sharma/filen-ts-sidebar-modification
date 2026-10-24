@@ -13,6 +13,7 @@ import {
 	selectAlternateContent,
 	type XmlDocument
 } from "@filen/office/core/xml"
+import { budget } from "./timing"
 
 const encoder = new TextEncoder()
 
@@ -519,7 +520,7 @@ describe("linear time on hostile shapes", () => {
 				new Namespaces(document)
 				assertWellFormed(document)
 			})
-		).toBeLessThan(5000)
+		).toBeLessThan(budget(5000))
 	})
 
 	it("handles a deep chain of nested namespace declarations", () => {
@@ -536,7 +537,7 @@ describe("linear time on hostile shapes", () => {
 				expect(namespaces.elementUri(document.count - 1)).toBe("u")
 				assertWellFormed(document)
 			})
-		).toBeLessThan(5000)
+		).toBeLessThan(budget(5000))
 	})
 
 	it("handles an element with 40,000 attributes", () => {
@@ -552,6 +553,6 @@ describe("linear time on hostile shapes", () => {
 
 				for (let k = 0; k < 100; k++) document.attribute(1, "a39999")
 			})
-		).toBeLessThan(5000)
+		).toBeLessThan(budget(5000))
 	})
 })

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 import { planRefEdit } from "../core/xlsx/refs/index"
 import { rows, sheetBody } from "./xlsxRefsFixtures"
 import { buildFixture, openWorkbook, saved } from "./xlsxWriteFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // Planning and applying a structure edit costs in proportion to what refers to cells: a sheet of 100,000 rows with
 // a formula on each, a shared column and a few hundred conditional formats, against the same sheet without them.
@@ -66,6 +66,6 @@ describe("structure edit cost", () => {
 			`refs perf, ${ROWS} rows: plain plan ${plain.plan.toFixed(0)} ms apply ${plain.apply.toFixed(0)} ms save ${plain.save.toFixed(0)} ms; with ${ROWS * 2} formulas and 300 rules plan ${rich.plan.toFixed(0)} ms apply ${rich.apply.toFixed(0)} ms save ${rich.save.toFixed(0)} ms`
 		)
 		// Nothing to move but cells: planning reads no row.
-		expect(plain.plan).toBeLessThan(50)
+		expect(plain.plan).toBeLessThan(budget(50))
 	})
 })

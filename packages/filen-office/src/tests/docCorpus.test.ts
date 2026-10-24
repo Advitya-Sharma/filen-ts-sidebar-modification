@@ -6,6 +6,7 @@ import { bytesSource } from "@filen/office/core/opc"
 import { DocError, docText, readDoc, type DocErrorCode } from "@filen/office/core/doc"
 import { CORPUS_DIR } from "./corpusDir"
 import { convert, offices, outputPath } from "./interop/soffice"
+import { budget } from "./timing"
 
 // The corpus .doc/.dot files: each reads or is refused with its typed reason, in time linear in its size. With
 // FILEN_OFFICE_SOFFICE set, the plain text of each equals LibreOffice's .doc → .txt export (whitespace collapsed)
@@ -125,7 +126,7 @@ describe.skipIf(!fetched)("Word binary corpus", () => {
 			const ms = performance.now() - started
 
 			// Generous for a loaded machine: tens of milliseconds per megabyte are measured.
-			if (ms > 250 + (400 * bytes.length) / 1e6) slow.push(`${path}: ${ms.toFixed(0)} ms for ${bytes.length} bytes`)
+			if (ms > budget(250 + (400 * bytes.length) / 1e6)) slow.push(`${path}: ${ms.toFixed(0)} ms for ${bytes.length} bytes`)
 		}
 
 		expect(slow).toEqual([])

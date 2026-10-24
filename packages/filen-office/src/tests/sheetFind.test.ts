@@ -4,6 +4,7 @@ import { findMatcher, foldText } from "../core/sheet/find/match"
 import { CellFlag, type SheetQueryResult, type SheetSessionApi } from "../core/sheet/protocol"
 import { buildFixture, firstTile, tileEntry } from "./sheetSessionFixtures"
 import { openKeys, sheetBody } from "./sheetKeysFixtures"
+import { budget } from "./timing"
 
 function triples(result: SheetQueryResult<"find">): number[][] {
 	const out: number[][] = []
@@ -114,7 +115,7 @@ describe("find matching", () => {
 
 		expect(findMatcher("*a*a*a*a*a*a*a*a*b", plain)?.test(text)).toBe(false)
 		expect(findMatcher("a*a*a*a*b", plain)?.replace(text, "x")).toBeNull()
-		expect(performance.now() - started).toBeLessThan(5_000)
+		expect(performance.now() - started).toBeLessThan(budget(5_000))
 	})
 })
 

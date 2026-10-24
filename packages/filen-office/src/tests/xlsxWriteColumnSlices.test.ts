@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import { planRefEdit } from "../core/xlsx/refs/index"
 import { saveXlsx } from "../core/xlsx/write/save"
 import { buildFixture, openWorkbook } from "./xlsxWriteFixtures"
+import { budget } from "./timing"
 
 // A save after a column insert on a million cells, on an in-thread host: every row spliced and checked (the store
 // and the rows read back) in slices, so the thread is never held over 50 ms of its CPU time.
@@ -90,6 +91,6 @@ describe("a sliced save after a column insert", () => {
 		console.log(
 			`sliced column-insert save, ${ROWS} rows: ${wall.toFixed(0)} ms wall, ${used.toFixed(0)} ms CPU, ${turns} turns, longest task ${longest.toFixed(1)} ms, ${JSON.stringify(result.ok ? result.timings : null)}`
 		)
-		expect(longest).toBeLessThan(50)
+		expect(longest).toBeLessThan(budget(50))
 	})
 })

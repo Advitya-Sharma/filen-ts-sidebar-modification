@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { rangeAddress, translateFormula } from "../core/ods/formula/toXlsx"
 import { wellFormedFormula } from "../core/sheet/refs/formulaRefs"
+import { budget } from "./timing"
 
 // OpenFormula (ODF 1.3 Part 4) as the store's Excel grammar: the cases of Part 4 §5 the corpus lacks, and the ones it
 // has.
@@ -115,14 +116,14 @@ describe("OpenFormula to Excel's grammar", () => {
 
 		expect(refused(long(200_000))).toBe("formula too long")
 		expect(refused(`msoxl:=${"A1+".repeat(5_000)}1`)).toBe("formula too long")
-		expect(performance.now() - started).toBeLessThan(100)
+		expect(performance.now() - started).toBeLessThan(budget(100))
 
 		// Just under the source bound: read through, then refused for its translated length.
 		const longest = long(1_900)
 
 		started = performance.now()
 		expect(refused(longest)).toBe("formula too long")
-		expect(performance.now() - started).toBeLessThan(100)
+		expect(performance.now() - started).toBeLessThan(budget(100))
 	})
 
 	it("spells functions as Excel stores them", () => {

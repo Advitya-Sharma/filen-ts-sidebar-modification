@@ -25,7 +25,7 @@ import { buildDocx, type SyntheticDocx } from "./docxSynthetic"
 import { HmtxMeasurer, layOut, layoutDigest, loadDocx, pageLines, type LineInfo } from "./layoutFixtures"
 import { wordLikeDocument } from "./wordLike"
 import { ZIP_ENTRY_TIME } from "./zipTime"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // Letter paper, 1 in margins: a 624 x 864 px text area. Without a styles part text is Times New Roman 10 pt
 // (Tinos metrics: 15.33 px lines), so a page holds 56 lines.
@@ -141,9 +141,9 @@ describe("pages", () => {
 		const total = cpuMs() - started
 
 		expect(result.pages.length).toBeGreaterThan(300)
-		expect(first).toBeLessThan(300)
+		expect(first).toBeLessThan(budget(300))
 		// About 0.4 s on a laptop; generous for shared CI machines.
-		expect(total).toBeLessThan(3000)
+		expect(total).toBeLessThan(budget(3000))
 	})
 
 	it("reports the style, decoration and object entries each event adds", async () => {

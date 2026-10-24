@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest"
 import { convertMetafile, type MetafileConversion } from "../core/metafile/index"
 import { CORPUS_DIR as CORPUS } from "./corpusDir"
 import { ByteWriter, EmfBuilder, WmfBuilder, plusHeader, plusRecord } from "./metafileFixtures"
+import { budget } from "./timing"
 
 // Adversarial input: each case must end quickly with bounded memory (playback stops at a limit and keeps
 // what it drew) and never throw.
@@ -47,7 +48,7 @@ describe("metafile limits", () => {
 			const { result, ms, heap } = timed(plusFile(records))
 
 			expect(result.ok).toBe(true)
-			expect(ms).toBeLessThan(5000)
+			expect(ms).toBeLessThan(budget(5000))
 			expect(heap).toBeLessThan(256 * 1024 * 1024)
 		}
 	})
@@ -62,7 +63,7 @@ describe("metafile limits", () => {
 		const { result, ms } = timed(builder.build([0, 0, 1000, 1000]))
 
 		expect(result.ok).toBe(true)
-		expect(ms).toBeLessThan(5000)
+		expect(ms).toBeLessThan(budget(5000))
 	})
 
 	it("allocates nothing from declared sizes: continued objects and path point counts", () => {
@@ -79,7 +80,7 @@ describe("metafile limits", () => {
 			const { result, ms, heap } = timed(plusFile(records))
 
 			expect(result.ok).toBe(true)
-			expect(ms).toBeLessThan(2000)
+			expect(ms).toBeLessThan(budget(2000))
 			expect(heap).toBeLessThan(128 * 1024 * 1024)
 		}
 	})
@@ -200,7 +201,7 @@ describe.skipIf(!existsSync(CORPUS))("metafile fuzzing over corpus seeds", () =>
 		)
 
 		expect(failures).toEqual([])
-		expect(worst).toBeLessThan(3000)
+		expect(worst).toBeLessThan(budget(3000))
 		expect(worstHeap).toBeLessThan(512 * 1024 * 1024)
 	})
 })

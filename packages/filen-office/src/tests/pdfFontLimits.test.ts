@@ -8,7 +8,7 @@ import { PdfWriter } from "../core/pdfwrite"
 import type { PdfByteStream, PdfFontAssets } from "../core/pdfwrite/fonts/assets"
 import { PdfFontSet, type PdfFontFaceRequest, type PdfShapedText } from "../core/pdfwrite/fonts/fontSet"
 import { directoryRecord, gsubTable, multiply, recurse, withTable } from "./pdfFontLimitsFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // Fonts whose layout tables or glyph data are hostile: shaping stays within HarfBuzz's buffer limits and a font
 // that cannot be subset gives way to its substitute, so the export finishes either way.
@@ -97,7 +97,7 @@ describe("PDF font limits", () => {
 
 		expect(glyphCount(result)).toBe(10)
 		expect(fonts.unshaped()).toBe(1)
-		expect(ms).toBeLessThan(500)
+		expect(ms).toBeLessThan(budget(500))
 		fonts.close()
 	})
 
@@ -106,7 +106,7 @@ describe("PDF font limits", () => {
 
 		expect(glyphCount(result)).toBe(4)
 		expect(fonts.unshaped()).toBe(1)
-		expect(ms).toBeLessThan(500)
+		expect(ms).toBeLessThan(budget(500))
 		fonts.close()
 	})
 
@@ -129,7 +129,7 @@ describe("PDF font limits", () => {
 		const { fonts, shaped: result, ms } = await shaped(CALADEA, text)
 
 		expect(glyphCount(result)).toBe(20000)
-		expect(ms).toBeLessThan(1000)
+		expect(ms).toBeLessThan(budget(1000))
 		fonts.close()
 	})
 

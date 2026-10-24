@@ -12,3 +12,5 @@ export function cpuMs(): number {
 
 	return (usage.user + usage.system) / 1000
 }
+
+export { budget } from "@filen/shared/tooling/testBudget"

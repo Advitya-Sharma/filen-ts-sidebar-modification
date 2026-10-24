@@ -3,7 +3,7 @@ import type { SheetSessionApi, SheetWorkbookInfo } from "../core/sheet/protocol"
 import { exportSheetPdf, type SheetPdfRequest } from "../react/sheet/print/pdfExport"
 import { nodeFontAssets, pdfBytes } from "./sheetPdfFixtures"
 import { openFixture } from "./sheetSessionFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 import { buildFixture } from "./xlsxWriteFixtures"
 
 // A custom paper size is bounded by what a PDF page can be, and an export is cancelled within a page however much
@@ -77,7 +77,7 @@ describe("a sheet's PDF on a hostile paper size", () => {
 		}
 
 		expect(result.pages).toBe(3)
-		expect(cpuMs() - started).toBeLessThan(10_000)
+		expect(cpuMs() - started).toBeLessThan(budget(10_000))
 		session.close()
 	}, 120_000)
 
@@ -99,7 +99,7 @@ describe("a sheet's PDF on a hostile paper size", () => {
 		expect(result.pages).toBe(4)
 		expect(text.match(/\/S\s*\/Table\b/g)).toHaveLength(4)
 		expect(text.match(/\/TD <<\/MCID \d+>> BDC/g)).toHaveLength(600 * 260)
-		expect(cpuMs() - started).toBeLessThan(60_000)
+		expect(cpuMs() - started).toBeLessThan(budget(60_000))
 		session.close()
 	}, 300_000)
 
@@ -117,7 +117,7 @@ describe("a sheet's PDF on a hostile paper size", () => {
 		const result = await exportSheetPdf(await request(session, info), { session, assets: nodeFontAssets, deterministic: true })
 
 		expect(result).toEqual({ ok: false, reason: "pageTooLarge", pages: 1 })
-		expect(cpuMs() - started).toBeLessThan(30_000)
+		expect(cpuMs() - started).toBeLessThan(budget(30_000))
 		session.close()
 	}, 600_000)
 

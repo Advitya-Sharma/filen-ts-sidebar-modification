@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { FormulaEngine, type EngineSheet } from "../core/sheet/formula/index"
+import { budget } from "./timing"
 
 // A range where one value is wanted (=B:B in an ordinary formula, written FILEN.INTERSECT(B:B) for the engine) reads
 // the one cell in the formula's row: never the range's every value, which made each such formula cost the range.
@@ -18,7 +19,7 @@ describe("implicit intersection", () => {
 			const start = performance.now()
 			const changes = engine.set(0, [{ row: 2_000, col: 1, content: -1 }])
 
-			expect(performance.now() - start).toBeLessThan(500)
+			expect(performance.now() - start).toBeLessThan(budget(500))
 			expect(changes).toContainEqual({ sheet: 0, row: 2_000, col: 0, value: -1 })
 		} finally {
 			engine.destroy()

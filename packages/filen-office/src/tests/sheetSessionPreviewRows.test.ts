@@ -36,7 +36,8 @@ describe("the active sheet's preview", () => {
 		session.close()
 	})
 
-	it("is not used when the rows it reads are out of order", async () => {
+	// Builds, zips and parses a 6 MB part: about a second here, past the default timeout on loaded runners.
+	it("is not used when the rows it reads are out of order", { timeout: 10_000 }, async () => {
 		const descending = `<sheetData>${rows(1, 70, row => `<c r="A${71 - row}"><v>${71 - row}</v></c>`).replace(/<row r="(\d+)">/g, (_, row: string) => `<row r="${71 - Number(row)}">`)}${rows(71, 3000, row => `<c r="A${row}" t="inlineStr"><is><t>${noise(2000, row)}</t></is></c>`)}</sheetData>`
 		const { session, events } = await openFixture({ sheets: [{ name: "One", body: descending }] })
 		const tile = await firstTile(session, 0)

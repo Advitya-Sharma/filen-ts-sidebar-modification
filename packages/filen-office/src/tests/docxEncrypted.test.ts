@@ -24,6 +24,7 @@ import {
 	unlockFile
 } from "./docxEncryptedFixtures"
 import { agileInfo, agileStreams, standardStreams } from "@filen/office/testing/encryption"
+import { budget } from "./timing"
 
 const openProtected: typeof PROTECTION.open = (source, options) => PROTECTION.open(source, options)
 
@@ -206,7 +207,7 @@ describe("encrypted docx: unlock", () => {
 		setTimeout(() => (signal.aborted = true), 20)
 
 		expect(await pending).toEqual({ ok: false, reason: "aborted" })
-		expect(performance.now() - started).toBeLessThan(1000)
+		expect(performance.now() - started).toBeLessThan(budget(1000))
 
 		const aborted = { aborted: true }
 

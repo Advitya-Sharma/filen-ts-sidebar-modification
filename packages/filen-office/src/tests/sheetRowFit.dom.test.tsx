@@ -10,6 +10,7 @@ import { measureRows } from "../react/sheet/rowFit"
 import { RecordingCanvas } from "./sheetGridCanvas"
 import { IMMEDIATE, buildFixture, savedBytes } from "./sheetSessionFixtures"
 import { STYLES, parts } from "./xlsxWriteFixtures"
+import { budget } from "./timing"
 
 // Rows without a height of their own fit the wrapped text an edit changes, measured by the grid as it draws it:
 // wrap turned on grows the row, a wider column or wrap turned off shrinks it, a height set by hand stays, and a
@@ -153,6 +154,6 @@ describe("rows fitted to wrapped text", () => {
 		expect(fits.length).toBe(1)
 		expect(fits[0]?.[0].type === "axis.fit" ? fits[0][0].rows.length : -1).toBeLessThanOrEqual(64)
 		expect(height(model, 0)).toBe(56)
-		expect(performance.now() - started).toBeLessThan(1000)
+		expect(performance.now() - started).toBeLessThan(budget(1000))
 	})
 })

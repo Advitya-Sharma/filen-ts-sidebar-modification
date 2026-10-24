@@ -13,7 +13,7 @@ import { buildWorkbook } from "./xlsxReadFixtures"
 import { odsBytes, shownRows, table } from "./odsFixtures"
 import { inThreadSheetHost } from "../dom/sheet/host"
 import { IMMEDIATE } from "./sheetSessionFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 import { cellRef } from "../core/xlsx/write/text"
 import { renameSheetInFormula } from "../core/sheet/refs/formulaRefs"
 
@@ -880,7 +880,7 @@ describe("xlsx to ods", () => {
 			const { result, ms } = await timed(withDrawing(head + anchor.repeat(500) + "</xdr:wsDr>"))
 
 			expect(result.ok).toBe(true)
-			expect(ms).toBeLessThan(3000)
+			expect(ms).toBeLessThan(budget(3000))
 		})
 
 		it("refuses groups nested past a depth, before going down them", { timeout: 120_000 }, async () => {
@@ -897,7 +897,7 @@ describe("xlsx to ods", () => {
 			const deep = await timed(nested(20_000))
 
 			expect(deep.result.ok ? null : deep.result.reason).toBe("tooLarge")
-			expect(deep.ms).toBeLessThan(3000)
+			expect(deep.ms).toBeLessThan(budget(3000))
 		})
 
 		const rule = (sqref: string, k: number): string =>
@@ -921,7 +921,7 @@ describe("xlsx to ods", () => {
 			const { result, ms } = await timed(validations(rules))
 
 			expect(result.ok).toBe(true)
-			expect(ms).toBeLessThan(4000)
+			expect(ms).toBeLessThan(budget(4000))
 		})
 
 		it("holds 6,000 whole-row validations in linear time", { timeout: 120_000 }, async () => {
@@ -930,7 +930,7 @@ describe("xlsx to ods", () => {
 			)
 
 			expect(result.ok).toBe(true)
-			expect(ms).toBeLessThan(4000)
+			expect(ms).toBeLessThan(budget(4000))
 		})
 
 		it("names 16,384 new validations in linear time, and answers an abort within about 100 ms", { timeout: 120_000 }, async () => {
@@ -944,11 +944,15 @@ describe("xlsx to ods", () => {
 			const runs = [await timed(source), await timed(source)]
 
 			expect(runs.every(run => run.result.ok)).toBe(true)
-			expect(Math.min(...runs.map(run => run.ms))).toBeLessThan(1000)
+			expect(Math.min(...runs.map(run => run.ms))).toBeLessThan(budget(1000))
 
 			// Aborted part way: the CPU time spent after the abort, at most a slice or two.
 			const signal = { aborted: false }
-			const slicing = { sliceMs: 20, now: () => performance.now(), pause: () => new Promise<void>(resolve => setTimeout(resolve, 0)) }
+			const slicing = {
+				sliceMs: 20,
+				now: () => performance.now(),
+				pause: () => new Promise<void>(resolve => setTimeout(resolve, 0))
+			}
 			let abortedAt = Number.NaN
 
 			setTimeout(() => {
@@ -959,7 +963,7 @@ describe("xlsx to ods", () => {
 			const aborted = await convertSheet(source, "xlsx", "ods", { turns: { signal, slicing } })
 
 			expect(aborted.ok ? null : aborted.reason).toBe("aborted")
-			expect(cpuMs() - abortedAt).toBeLessThan(100)
+			expect(cpuMs() - abortedAt).toBeLessThan(budget(100))
 		})
 
 		it("stops a long conversion when aborted midway", { timeout: 120_000 }, async () => {
@@ -1162,7 +1166,7 @@ describe("ods to xlsx", () => {
 			const started = cpuMs()
 			const result = converted(await convertSheet(source, "ods", "xlsx"))
 
-			expect(cpuMs() - started).toBeLessThan(1000)
+			expect(cpuMs() - started).toBeLessThan(budget(1000))
 			expect(result.bytes.length).toBeLessThan(64 * 1024)
 
 			const back = await readXlsx(result.bytes)
@@ -1206,7 +1210,7 @@ describe("ods to xlsx", () => {
 		const result = await convertSheet(source, "ods", "xlsx")
 
 		expect(result.ok ? null : result.reason).toBe("tooLarge")
-		expect(cpuMs() - started).toBeLessThan(3000)
+		expect(cpuMs() - started).toBeLessThan(budget(3000))
 	})
 
 	it(
@@ -1229,7 +1233,7 @@ describe("ods to xlsx", () => {
 			const result = converted(await convertSheet(source, "ods", "xlsx"))
 			const after = process.memoryUsage()
 
-			expect(cpuMs() - started).toBeLessThan(1000)
+			expect(cpuMs() - started).toBeLessThan(budget(1000))
 			expect(after.heapUsed + after.arrayBuffers - before.heapUsed - before.arrayBuffers).toBeLessThan(64 * 1024 * 1024)
 
 			const sheet = strFromU8(unzipSync(result.bytes)["xl/worksheets/sheet1.xml"] ?? new Uint8Array(0))
@@ -1259,7 +1263,7 @@ describe("ods to xlsx", () => {
 		const result = await convertSheet(source, "ods", "xlsx")
 
 		expect(result.ok ? null : result.reason).toBe("tooLarge")
-		expect(cpuMs() - started).toBeLessThan(3000)
+		expect(cpuMs() - started).toBeLessThan(budget(3000))
 	})
 
 	it("writes a workbook without sheets as one of an empty sheet", async () => {

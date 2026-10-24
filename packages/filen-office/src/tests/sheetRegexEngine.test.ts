@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { Regex, RegexSyntaxError, RegexUnsupportedError } from "../core/sheet/formula/regex/index"
+import { budget } from "./timing"
 
 // The linear-time PCRE2 engine behind REGEXTEST, REGEXEXTRACT and REGEXREPLACE. Expected values are PCRE2's
 // (pcre2pattern(3) and pcre2api(3) on pcre2project.github.io describe each construct).
@@ -323,7 +324,7 @@ describe("regex engine: linear time", () => {
 			regex.exec(subject)
 		})
 
-		expect(elapsed).toBeLessThan(2000)
+		expect(elapsed).toBeLessThan(budget(2000))
 	})
 
 	it("finds every match of a pathological pattern over 30,000 characters in linear time", () => {
@@ -332,7 +333,7 @@ describe("regex engine: linear time", () => {
 			expect([...regex.matches(text)]).toHaveLength(30_000)
 		})
 
-		expect(elapsed).toBeLessThan(2000)
+		expect(elapsed).toBeLessThan(budget(2000))
 	})
 
 	it("scales linearly with the text", () => {
@@ -348,7 +349,7 @@ describe("regex engine: linear time", () => {
 		})
 
 		// Ten times the text: about ten times the time, far from the hundred times a quadratic search would take.
-		expect(large).toBeLessThan(Math.max(50, small * 30))
+		expect(large).toBeLessThan(Math.max(budget(50), small * 30))
 	})
 
 	it("passes over text that cannot start or hold a match, caseless letters too, finding the same matches", () => {

@@ -3,6 +3,7 @@ import { zlibSync } from "fflate"
 import type { DrawingImage } from "@filen/office/core/drawingml"
 import { effectImage } from "../../core/metafile/effects"
 import { png, zlibZeros } from "./generate"
+import { budget } from "../timing"
 
 // A picture recoloured by a colour change decodes its PNG: the inflate stops at the size the header
 // declares, however far the compressed data would expand.
@@ -27,7 +28,7 @@ describe("PNG decoding in metafile pictures", () => {
 		const started = performance.now()
 		const out = recolour(png(1, 1, zlibZeros(1024)))
 
-		expect(performance.now() - started).toBeLessThan(500)
+		expect(performance.now() - started).toBeLessThan(budget(500))
 		expect(out.format).toBe("png")
 	})
 

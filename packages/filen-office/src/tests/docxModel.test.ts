@@ -21,7 +21,7 @@ import {
 } from "@filen/office/core/docx"
 import { modelProblems } from "./docxIntegrity"
 import { NAMESPACES, modelOf, p } from "./docxSynthetic"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 function itemsOf(part: StoryPart, kind: number): number[] {
 	const out: number[] = []
@@ -838,7 +838,7 @@ describe("hostile and malformed input", () => {
 		const baseline = await time("")
 		const flooded = await time(aliases)
 
-		expect(flooded).toBeLessThan(baseline * 5 + 200)
+		expect(flooded).toBeLessThan(baseline * 5 + budget(200))
 
 		const aliased = await sound({
 			document: `<?xml version="1.0"?><w:document ${aliases} ${NAMESPACES}><w:body><w:p><w:pPr><w:pStyle q2999:val="X"/></w:pPr></w:p></w:body></w:document>`
@@ -914,7 +914,7 @@ describe("hostile and malformed input", () => {
 		for (let field = 0; field < part.fields.count; field++) expect(part.fieldType(field)).toBe("PAGE")
 
 		expect(part.fields.count).toBe(count)
-		expect(performance.now() - start).toBeLessThan(2000)
+		expect(performance.now() - start).toBeLessThan(budget(2000))
 	})
 })
 

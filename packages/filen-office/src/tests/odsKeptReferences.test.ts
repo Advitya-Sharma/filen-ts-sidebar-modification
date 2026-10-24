@@ -8,7 +8,7 @@ import { SourceAxis } from "../core/ods/write/axis"
 import { ChangeLog } from "../core/xlsx/model/changes"
 import { odsBytes, table, type OdsParts } from "./odsFixtures"
 import { IMMEDIATE } from "./sheetSessionFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // What an OpenDocument spreadsheet names cells by but the model does not carry (formulas outside the engine's
 // grammar, shapes anchored to a range, refused names, database, label and DataPilot ranges): moved with the rows
@@ -435,7 +435,7 @@ describe("ODS structure edits over hostile and tall sheets", () => {
 		const started = cpuMs()
 		const xml = await saved(session)
 
-		expect(cpuMs() - started).toBeLessThan(5_000)
+		expect(cpuMs() - started).toBeLessThan(budget(5_000))
 		expect(xml).toContain('<table:table-cell table:number-columns-repeated="16382"/>')
 		session.close()
 	})
@@ -453,7 +453,7 @@ describe("ODS structure edits over hostile and tall sheets", () => {
 		const started = cpuMs()
 		const xml = await saved(session)
 
-		expect(cpuMs() - started).toBeLessThan(5_000)
+		expect(cpuMs() - started).toBeLessThan(budget(5_000))
 		expect(xml).toContain('<table:table-cell office:value-type="float" office:value="1"><text:p>1</text:p></table:table-cell>')
 		session.close()
 	})
@@ -472,7 +472,7 @@ describe("ODS structure edits over hostile and tall sheets", () => {
 		await saved(session)
 
 		// Walking the merge's million rows for each of the 3,000 row elements took 13 s.
-		expect(cpuMs() - started).toBeLessThan(6_000)
+		expect(cpuMs() - started).toBeLessThan(budget(6_000))
 		session.close()
 	})
 })

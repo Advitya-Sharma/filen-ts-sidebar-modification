@@ -9,6 +9,7 @@ import { openXlsx, XlsxReadError, type SheetStore } from "../core/xlsx/read/inde
 import { CORPUS_DIR } from "./corpusDir"
 import { DEFAULT_STYLES, workbookFiles } from "./xlsxReadFixtures"
 import { ZIP_ENTRY_TIME } from "./zipTime"
+import { budget } from "./timing"
 
 // Workbooks with mutated parts (bytes flipped, markup characters inserted, spans deleted, duplicated or swapped,
 // parts truncated) and mutated archives: the reader opens each, loads every sheet and walks everything it read,
@@ -274,7 +275,7 @@ describe("xlsx reader fuzz", () => {
 
 			slowest = Math.max(slowest, elapsed)
 			outcomes.set(outcome, (outcomes.get(outcome) ?? 0) + 1)
-			expect(elapsed, `mutant ${n}`).toBeLessThan(BOUND_MS)
+			expect(elapsed, `mutant ${n}`).toBeLessThan(budget(BOUND_MS))
 		}
 
 		console.log(

@@ -9,7 +9,7 @@ import { EditSink } from "../react/docx/edit/sink"
 import { ReflowView } from "../react/docx/reflow/view"
 import { buildDocx, p } from "./docxSynthetic"
 import { pagedEditor } from "./pagedDomFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // Mobile view over a long document: what opening it holds (DOM, blocks in the view) does not grow with the
 // document, and a keystroke stays under a frame (CPU time, which other processes' scheduling does not inflate).
@@ -117,8 +117,8 @@ describe("Mobile view performance", () => {
 		// The DOM and the view's blocks hold a window: the same for 30 pages as for 300.
 		expect(large.elements).toBeLessThan(small.elements * 1.5 + 50)
 		expect(large.blocks).toBeLessThan(80)
-		expect(large.openMs).toBeLessThan(Math.max(250, small.openMs * 4))
-		expect(p95).toBeLessThan(16)
+		expect(large.openMs).toBeLessThan(Math.max(budget(250), small.openMs * 4))
+		expect(p95).toBeLessThan(budget(16))
 	})
 
 	it(
@@ -183,7 +183,7 @@ describe("Mobile view performance", () => {
 
 			expect(session.state.doc.textContent).toContain(`r1${"a".repeat(100)}500a`)
 			expect(elements).toBeLessThan(1000)
-			expect(percentile(times, 0.95)).toBeLessThan(16)
+			expect(percentile(times, 0.95)).toBeLessThan(budget(16))
 
 			// The input view holds rows around the selection only.
 			const host = document.createElement("div")

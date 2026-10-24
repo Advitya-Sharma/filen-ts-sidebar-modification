@@ -4,6 +4,7 @@ import { Fragment, Slice, type Node } from "prosemirror-model"
 import { describe, expect, it } from "vitest"
 import { docxSchema } from "../core/docx/edit/index"
 import { LiveStarts, changedRange } from "../react/docx/edit/window"
+import { budget } from "./timing"
 
 // The body's block starts kept up to date from each transaction's steps (Mobile view's window and heights):
 // they must equal a fresh count after any edit, found in one pass over the steps.
@@ -136,7 +137,7 @@ describe("LiveStarts", () => {
 		expect(Array.from(live.starts)).toEqual(fresh(replace.doc))
 		expect(Array.from(boldLive.starts)).toEqual(starts)
 		// A mapping inverted per step took seconds here; one pass takes a few milliseconds.
-		expect(replaced).toBeLessThan(250)
-		expect(bolded).toBeLessThan(250)
+		expect(replaced).toBeLessThan(budget(250))
+		expect(bolded).toBeLessThan(budget(250))
 	})
 })

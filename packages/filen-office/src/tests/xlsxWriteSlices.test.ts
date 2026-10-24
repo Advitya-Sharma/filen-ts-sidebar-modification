@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import { planRefEdit } from "../core/xlsx/refs/index"
 import { saveXlsx } from "../core/xlsx/write/save"
 import { buildFixture, openWorkbook } from "./xlsxWriteFixtures"
+import { budget } from "./timing"
 
 // A save after a structure edit on a large sheet, on an in-thread host: written and checked in slices, so the
 // thread is never held over 50 ms of its CPU time, and its cost (wall and this thread's CPU time) is logged.
@@ -30,7 +31,11 @@ describe("a sliced save", () => {
 
 		await workbook.load(0)
 
-		const planned = await planRefEdit(workbook, { kind: "axis", sheet: 0, shift: { type: "insert", axis: "rows", at: 1, count: 1 } })
+		const planned = await planRefEdit(workbook, {
+			kind: "axis",
+			sheet: 0,
+			shift: { type: "insert", axis: "rows", at: 1, count: 1 }
+		})
 
 		if (!planned.ok) throw new Error(JSON.stringify(planned.refusal))
 
@@ -91,6 +96,6 @@ describe("a sliced save", () => {
 		console.log(
 			`sliced save, ${ROWS} rows: ${wall.toFixed(0)} ms wall, ${used.toFixed(0)} ms CPU, ${turns} turns, longest task ${longest.toFixed(1)} ms, ${JSON.stringify(result.ok ? result.timings : null)}`
 		)
-		expect(longest).toBeLessThan(50)
+		expect(longest).toBeLessThan(budget(50))
 	})
 })

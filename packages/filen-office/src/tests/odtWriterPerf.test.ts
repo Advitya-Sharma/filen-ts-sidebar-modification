@@ -5,7 +5,7 @@ import { openOdtSource } from "../core/odt/write/source"
 import { proveOdt, writeOdt } from "../core/odt/write/writer"
 import { CORPUS_DIR } from "./corpusDir"
 import { decodeUtf8, encodeUtf8 } from "@filen/office/core/xml"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 
 // The largest corpus ODT (14 MB, pictures mostly) read, proved and saved where the web runs it (the docx worker):
 // CPU time per step, peak memory growth, and the longest stretch the worker goes without a turn when the steps run
@@ -80,8 +80,8 @@ describe.skipIf(!existsSync(FILE))("ODT writer on a 14 MB document", () => {
 
 		expect(written.bytes.length).toBeGreaterThan(bytes.length / 2)
 		// The docx editor's save budget for a document this size; no task of the save or the proof past 50 ms.
-		expect(saveMs).toBeLessThan(5000)
-		expect(saveLongest).toBeLessThan(50)
-		expect(proveLongest).toBeLessThan(50)
+		expect(saveMs).toBeLessThan(budget(5000))
+		expect(saveLongest).toBeLessThan(budget(50))
+		expect(proveLongest).toBeLessThan(budget(50))
 	})
 })

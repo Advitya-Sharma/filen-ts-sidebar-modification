@@ -11,7 +11,7 @@ import {
 } from "@filen/office/core/docx/spelling"
 import { ParagraphScanner, addressSpans } from "../core/docx/spelling/scan"
 import { STYLES_PART, sessionOf } from "./docxEditFixtures"
-import { cpuMs } from "./timing"
+import { budget, cpuMs } from "./timing"
 import type { SyntheticDocx } from "./docxSynthetic"
 
 // A spellchecker over fixed word lists, answering checks asynchronously like a worker would.
@@ -270,7 +270,7 @@ describe("DocxSpelling", () => {
 		]) {
 			const quarter = least(make(10_000))
 
-			expect(least(make(40_000)) / Math.max(quarter, 0.2)).toBeLessThan(9)
+			expect(least(make(40_000)) / Math.max(quarter, budget(0.2))).toBeLessThan(9)
 		}
 	})
 

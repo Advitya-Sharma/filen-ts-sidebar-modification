@@ -4,6 +4,7 @@ import { withHidden } from "../core/xlsx/edit/hide"
 import { ColFlag } from "../core/xlsx/model/types"
 import { parts } from "./xlsxWriteFixtures"
 import { openFixture, savedBytes } from "./sheetSessionFixtures"
+import { budget } from "./timing"
 
 // Rows and columns hidden and shown: the row and col records written, the layout's flags, protection.
 
@@ -108,7 +109,7 @@ describe("sheet session: rows and columns hidden", () => {
 		)
 
 		// One row at a time rebuilt each row's block: seconds.
-		expect(performance.now() - started).toBeLessThan(3000)
+		expect(performance.now() - started).toBeLessThan(budget(3000))
 
 		const layout = change.layouts[0]?.layout.rows
 		const hidden = (row: number): boolean => {
