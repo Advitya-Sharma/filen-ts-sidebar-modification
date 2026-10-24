@@ -95,6 +95,7 @@
 		"oracles:sheet-suites": "tsx src/tests/oracles/sheet/functionSuites.ts --fetch",
 		"corpus:manifest": "tsx src/scripts/corpusManifest.ts",
 		"corpus:fetch": "tsx src/scripts/fetchCorpus.ts",
+		"corpus:mirror": "tsx src/scripts/mirrorCorpus.ts",
 		"lint": "eslint src/ && prettier --check \"src/**/*.{ts,tsx,css}\""
 	},
 	"engines": {

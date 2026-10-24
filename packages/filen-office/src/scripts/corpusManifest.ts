@@ -4,9 +4,11 @@ import { parseArgs } from "node:util"
 
 // Generates corpus/manifest.json, corpus/catalogue.json and corpus/README.md from the full manifest the corpus
 // was assembled with. Only what fetching, verifying and attributing the files needs is committed; the files
-// themselves never are (see fetchCorpus.ts).
+// themselves never are (see fetchCorpus.ts). --drop instead rewrites the committed three without some files (one
+// whose pinned bytes no source serves any more).
 //
 //   pnpm run corpus:manifest [--from <MANIFEST.json>]
+//   pnpm run corpus:manifest --drop <path>[,<path>...]
 
 const OUT = fileURLToPath(new URL("../../corpus/", import.meta.url))
 const DEFAULT_FROM = fileURLToPath(new URL("../../../filen-web/docs/office/corpus/MANIFEST.json", import.meta.url))
@@ -174,6 +176,8 @@ function readme(manifest: CorpusManifest): string {
 		"",
 		"Real-world documents, spreadsheets and presentations in every format the office engines support, for the opt-in corpus tests. The files are not in the repository: `pnpm run corpus:fetch` downloads them from their original sources into `.corpus/` and verifies each against its SHA-256 here. Every file is an unmodified download; none was authored or re-saved for the corpus.",
 		"",
+		"GOV.UK and EIA replace a publication's attachments in place, so their files come from the `office-corpus-mirror` release of this repository first, each asset named by its SHA-256 (`pnpm run corpus:mirror` uploads what it lacks), and from the source only if the mirror lacks them.",
+		"",
 		"- `manifest.json`: per file the path, size, SHA-256, source, licence and download URL (raw files at pinned commits, GOV.UK asset URLs).",
 		"- `catalogue.json`: per file the producer and version, application metadata and feature counts (zero and empty values omitted), to pick files by feature. Counts are cheap heuristics over the raw parts and records, not engine output; `container` appears only where a file is not the container its extension implies (an encrypted OOXML package, an RTF or HTML file named `.doc`, a pre-OLE Excel or Word stream).",
 		"- `pnpm run corpus:fetch --family pptx,ppt` fetches only some families.",
@@ -211,8 +215,37 @@ function readme(manifest: CorpusManifest): string {
 	].join("\n")
 }
 
+function writeAll(manifest: CorpusManifest, catalogue: readonly unknown[]): void {
+	writeFileSync(
+		`${OUT}manifest.json`,
+		rows({ version: manifest.version, generated: manifest.generated, sources: manifest.sources }, "files", manifest.files)
+	)
+	writeFileSync(`${OUT}catalogue.json`, rows({ generated: manifest.generated }, "files", catalogue))
+	writeFileSync(`${OUT}README.md`, readme(manifest))
+}
+
+function drop(paths: ReadonlySet<string>): void {
+	const manifest = JSON.parse(readFileSync(`${OUT}manifest.json`, "utf8")) as CorpusManifest
+	const catalogue = JSON.parse(readFileSync(`${OUT}catalogue.json`, "utf8")) as { files: { path: string }[] }
+	const unknown = [...paths].filter(path => !manifest.files.some(file => file.path === path))
+
+	if (unknown.length > 0) throw new Error(`not in the manifest: ${unknown.join(", ")}`)
+
+	writeAll(
+		{ ...manifest, files: manifest.files.filter(file => !paths.has(file.path)) },
+		catalogue.files.filter(entry => !paths.has(entry.path))
+	)
+}
+
 function main(): void {
-	const { values } = parseArgs({ options: { from: { type: "string", default: DEFAULT_FROM } } })
+	const { values } = parseArgs({ options: { from: { type: "string", default: DEFAULT_FROM }, drop: { type: "string" } } })
+
+	if (values.drop !== undefined) {
+		drop(new Set(values.drop.split(",").map(path => path.trim())))
+
+		return
+	}
+
 	const source = JSON.parse(readFileSync(values.from, "utf8")) as SourceManifest
 	const sources = new Map<string, CorpusSource>()
 	const files: CorpusFile[] = []
@@ -273,12 +306,7 @@ function main(): void {
 		files
 	}
 
-	writeFileSync(
-		`${OUT}manifest.json`,
-		rows({ version: manifest.version, generated: manifest.generated, sources: manifest.sources }, "files", files)
-	)
-	writeFileSync(`${OUT}catalogue.json`, rows({ generated: manifest.generated }, "files", catalogue))
-	writeFileSync(`${OUT}README.md`, readme(manifest))
+	writeAll(manifest, catalogue)
 }
 
 function fileCount(files: readonly CorpusFile[], id: string): number {

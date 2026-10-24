@@ -7,7 +7,8 @@ import { parseArgs } from "node:util"
 import { FAMILIES, familyOf, unavailableAllowed, type CorpusFamily, type CorpusFile, type CorpusManifest } from "./corpusManifest"
 
 // Downloads the real-world corpus listed in corpus/manifest.json into a cache directory (default .corpus/).
-// Resumable: files already present with the right SHA-256 are kept. Every download is verified before it is
+// Files of a source that replaces its attachments in place come from this repository's mirror first (see
+// MIRRORED_SOURCES), the rest straight from their pinned source. Resumable: files already present with the right SHA-256 are kept. Every download is verified before it is
 // renamed into place, so the cache never holds an unverified file. Files no longer in the manifest are removed.
 // Exits non-zero when more than a few files are unavailable (any with --strict). --check-remote also asks every
 // source of an already cached file whether it is still there, without downloading it. --family limits the
@@ -24,6 +25,17 @@ const HOST_CONCURRENCY: Readonly<Record<string, number>> = { "assets.publishing.
 const ATTEMPTS = 4
 const TIMEOUT_MS = 120_000
 const RETRYABLE = new Set([408, 425, 429, 500, 502, 503, 504])
+
+// Publication attachments are replaced in place at the same URL, which loses the pinned bytes; repository fixtures
+// are pinned at a commit and never change. A mirrored file is a release asset named by its SHA-256
+// (`pnpm run corpus:mirror` uploads what is missing); its source URL is the fallback and stays its provenance.
+export const MIRRORED_SOURCES: ReadonlySet<string> = new Set(["govuk", "eia"])
+export const MIRROR_TAG = "office-corpus-mirror"
+const MIRROR = `https://github.com/FilenCloudDienste/filen-ts/releases/download/${MIRROR_TAG}/`
+
+function urls(file: CorpusFile): readonly string[] {
+	return MIRRORED_SOURCES.has(file.source) ? [`${MIRROR}${file.sha256}`, file.url] : [file.url]
+}
 
 type Failure = { kind: "missing" | "changed" | "failed"; detail: string }
 
@@ -49,7 +61,7 @@ async function sha256File(path: string): Promise<string> {
 	return hash.digest("hex")
 }
 
-async function isVerified(path: string, file: CorpusFile): Promise<boolean> {
+export async function isVerified(path: string, file: CorpusFile): Promise<boolean> {
 	try {
 		return (await stat(path)).size === file.size && (await sha256File(path)) === file.sha256
 	} catch {
@@ -83,8 +95,21 @@ async function receive(body: ReadableStream<Uint8Array>, part: string, file: Cor
 	if (digest !== file.sha256) throw new Changed(`SHA-256 ${digest}`)
 }
 
-// null once the file is verified in place.
+// null once the file is verified in place: from the first of its URLs that serves the pinned bytes, else the
+// source's failure.
 async function download(file: CorpusFile, path: string): Promise<Failure | null> {
+	let failure: Failure | null = null
+
+	for (const url of urls(file)) {
+		failure = await downloadFrom(url, file, path)
+
+		if (failure === null) return null
+	}
+
+	return failure
+}
+
+async function downloadFrom(url: string, file: CorpusFile, path: string): Promise<Failure | null> {
 	const part = `${path}.part`
 	let detail = ""
 
@@ -92,7 +117,7 @@ async function download(file: CorpusFile, path: string): Promise<Failure | null>
 		let retryAfter: string | null = null
 
 		try {
-			const response = await fetch(file.url, { signal: AbortSignal.timeout(TIMEOUT_MS) })
+			const response = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) })
 
 			if (response.ok && response.body !== null) {
 				await receive(response.body, part, file)
@@ -164,9 +189,14 @@ async function probe(file: CorpusFile): Promise<Failure | null> {
 	}
 }
 
-// Runs `work` over the files, in order per host, with at most CONCURRENCY in flight and HOST_CONCURRENCY per host.
-async function pool(files: readonly CorpusFile[], work: (file: CorpusFile) => Promise<void>): Promise<void> {
-	const byHost = Map.groupBy(files, file => new URL(file.url).host)
+// Runs `work` over the files, in order per host asked first, with at most CONCURRENCY in flight and HOST_CONCURRENCY
+// per host. `host` is the URL `work` requests first.
+async function pool(
+	files: readonly CorpusFile[],
+	host: (file: CorpusFile) => string,
+	work: (file: CorpusFile) => Promise<void>
+): Promise<void> {
+	const byHost = Map.groupBy(files, file => new URL(host(file)).host)
 	let free = CONCURRENCY
 	const waiting: (() => void)[] = []
 	const acquire = async (): Promise<void> => {
@@ -279,6 +309,7 @@ async function main(): Promise<void> {
 	// Largest first, so one big file does not trail at the end.
 	await pool(
 		[...wanted].sort((a, b) => b.size - a.size),
+		file => urls(file)[0] ?? file.url,
 		async file => {
 			const path = join(directory, file.path)
 
@@ -303,11 +334,15 @@ async function main(): Promise<void> {
 	)
 
 	if (values["check-remote"]) {
-		await pool(cached, async file => {
-			const failure = await probe(file)
+		await pool(
+			cached,
+			file => file.url,
+			async file => {
+				const failure = await probe(file)
 
-			if (failure !== null) remote.set(file, failure)
-		})
+				if (failure !== null) remote.set(file, failure)
+			}
+		)
 	}
 
 	await copyFile(MANIFEST, join(directory, "manifest.json"))

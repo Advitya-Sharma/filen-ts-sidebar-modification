@@ -275,6 +275,6 @@ describe.skipIf(!existsSync(ODT) || !existsSync(ODS))("ODF corpus packages", () 
 			"lo__password.ods": "encrypted",
 			"odftk__testInvalidPkg2.odt": "invalidPackage"
 		})
-		expect(opened).toBe(145)
+		expect(opened).toBe(144)
 	})
 })
