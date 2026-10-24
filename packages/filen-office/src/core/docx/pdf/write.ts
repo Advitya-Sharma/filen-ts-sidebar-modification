@@ -122,7 +122,7 @@ async function write(doc: DocxPdfDocument, options: DocxPdfOptions): Promise<Doc
 		const writer = await PdfWriter.create({
 			tagged: options.tagged !== false,
 			deterministic: options.deterministic === true,
-			...(doc.title === undefined ? {} : { title: doc.title }),
+			title: doc.title,
 			...((doc.lang ?? options.lang) === undefined ? {} : { lang: doc.lang ?? options.lang }),
 			...(options.password === undefined ? {} : { password: options.password }),
 			...(options.signal === undefined ? {} : { signal: options.signal }),

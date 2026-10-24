@@ -2,6 +2,7 @@ import { buildZip, text } from "./zipBuilder"
 import { bytesSource } from "@filen/office/core/opc"
 import { openOdtAsDocx, translateOdt, type OdtTranslation } from "../core/odt/index"
 import {
+	type DocumentLayout,
 	buildDocxModel,
 	layoutDocument,
 	parseNumbering,
@@ -92,6 +93,13 @@ export async function documentXml(parts: OdtParts): Promise<string> {
 
 // Lays out a translated document as the viewer does (bundled faces, hmtx advances, no browser).
 export async function layOutOdt(bytes: Uint8Array): Promise<{ readonly pages: number; readonly translation: OdtTranslation }> {
+	const { layout, translation } = await odtLayout(bytes)
+
+	return { pages: layout.pages.length, translation }
+}
+
+// The layout itself, for line positions (layoutFixtures pageLines).
+export async function odtLayout(bytes: Uint8Array): Promise<{ readonly layout: DocumentLayout; readonly translation: OdtTranslation }> {
 	const opened = await openOdtAsDocx(bytesSource(bytes))
 
 	if (!opened.ok) throw new Error(`${opened.reason}: ${opened.message}`)
@@ -114,5 +122,5 @@ export async function layOutOdt(bytes: Uint8Array): Promise<{ readonly pages: nu
 
 	await layout.done
 
-	return { pages: layout.pages.length, translation: opened.translation }
+	return { layout, translation: opened.translation }
 }

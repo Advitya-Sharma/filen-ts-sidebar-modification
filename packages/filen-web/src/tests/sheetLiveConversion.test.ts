@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const mocks = vi.hoisted(() => ({ openSheet: vi.fn(), textToXlsx: vi.fn() }))
 
@@ -28,6 +28,12 @@ function handle(answer: unknown = { bytes: CELLS }, encrypted?: string) {
 beforeEach(() => {
 	mocks.openSheet.mockReset()
 	mocks.textToXlsx.mockReset()
+	// An .ods written takes the user's language as its default (numbers shown and read in it).
+	vi.spyOn(navigator, "languages", "get").mockReturnValue(["de-DE"])
+})
+
+afterEach(() => {
+	vi.restoreAllMocks()
 })
 
 describe("liveConversion", () => {
@@ -59,7 +65,7 @@ describe("liveConversion", () => {
 		expect(await liveConversion(text, "tsv", "data.tsv", () => Promise.resolve(true))?.("ods", signal)).toEqual(ods)
 		expect(mocks.openSheet.mock.calls[0]?.[0]).toBe(XLSX)
 		expect(mocks.openSheet.mock.calls[0]?.[1]).toMatchObject({ kind: "xlsx" })
-		expect(workbook.query).toHaveBeenCalledWith("saveAs.format", { format: "ods" }, { signal })
+		expect(workbook.query).toHaveBeenCalledWith("saveAs.format", { format: "ods", language: "de-DE" }, { signal })
 		expect(workbook.close).toHaveBeenCalledOnce()
 	})
 
@@ -71,7 +77,7 @@ describe("liveConversion", () => {
 
 		expect(await liveConversion(book, "xlsx", "book.xlsx", commit)?.("ods", signal)).toEqual(ods)
 		expect(commit.mock.invocationCallOrder[0]).toBeLessThan(query.mock.invocationCallOrder[0] ?? 0)
-		expect(query).toHaveBeenCalledWith("saveAs.format", { format: "ods" }, { signal })
+		expect(query).toHaveBeenCalledWith("saveAs.format", { format: "ods", language: "de-DE" }, { signal })
 	})
 
 	it("refuses when the open entry cannot be committed, converting nothing", async () => {

@@ -1,4 +1,4 @@
-import type { Node } from "prosemirror-model"
+import type { Mark, Node } from "prosemirror-model"
 import { EditorState, Plugin, TextSelection, type Selection as EditorSelection, type Transaction } from "prosemirror-state"
 import { Mapping, StepMap } from "prosemirror-transform"
 import { DecorationSet, EditorView } from "prosemirror-view"
@@ -35,6 +35,7 @@ import {
 	shownSlice,
 	writeClipboardEvent
 } from "../edit/clipboard"
+import { composedFormatting, deleteBeforeComposition, deleteSelectionKey, inputTransaction, selectionFormatting } from "../edit/input"
 import type { DocxEditorMark } from "../edit/surface"
 import {
 	blockIndex,
@@ -167,6 +168,8 @@ class StoryView {
 	// Text typed (beforeinput insertText) the view has not read yet.
 	private typing = false
 	private compositionText = ""
+	// What text composed over a selection takes (selectionFormatting), until the composition ends.
+	private composeFormatting: readonly Mark[] | undefined = undefined
 	private readOnlyShown: boolean
 	private rewindowed = false
 	// The view exists (its state is first made while it is being made), and was taken down.
@@ -243,14 +246,21 @@ class StoryView {
 
 					return false
 				},
-				beforeinput: (_view, event) => {
+				beforeinput: (view, event) => {
 					if (event.inputType === "insertText") this.typing = true
 
-					return this.historyInput(event)
+					return this.historyInput(event) || this.editInput(view, event)
 				},
 				copy: (_view, event) => this.copyEvent(event, false),
 				cut: (_view, event) => this.copyEvent(event, true),
 				compositionstart: view => {
+					// Composed over a selection: the selection goes first, as a transaction.
+					if (!this.readOnly) {
+						this.readSelection()
+						this.composeFormatting = selectionFormatting(this.session.state)
+						this.run(deleteBeforeComposition(this.session.state))
+					}
+
 					this.compositionStart = view.state.selection.from
 					this.compositionText = ""
 
@@ -261,8 +271,9 @@ class StoryView {
 
 					return false
 				},
-				compositionend: view => {
+				compositionend: (view, event) => {
 					readComposition(view)
+					this.formatComposed(typeof event.data === "string" ? event.data : this.compositionText)
 					this.compositionStart = -1
 					this.compositionText = ""
 					editor.setComposition(undefined)
@@ -579,6 +590,45 @@ class StoryView {
 		return true
 	}
 
+	// A composition that started over a selection ends: its text gets the formatting it takes, wherever the
+	// browser composed it (it composes into the run its selection ended in).
+	private formatComposed(text: string): void {
+		const formatting = this.composeFormatting
+
+		this.composeFormatting = undefined
+
+		if (formatting === undefined || this.compositionStart < 0 || this.readOnly) return
+
+		const state = this.session.state
+		const from = compositionFrom(state.doc, state.selection.head, this.compositionStart, text)
+
+		this.run(composedFormatting(state, from, text, formatting))
+	}
+
+	// beforeinput that would edit the DOM across runs (see inputTransaction): made on the session's state.
+	private editInput(view: EditorView, event: InputEvent): boolean {
+		if (this.readOnly || !event.cancelable) return false
+
+		this.readSelection()
+
+		const tr = inputTransaction(view, this.session.state, event)
+
+		if (tr === undefined) return false
+
+		event.preventDefault()
+		this.run(tr)
+
+		// Typed text leaves the caret right after a character on its line (see lineEnd).
+		if (this.typing) {
+			const selection = this.session.state.selection
+
+			this.typing = false
+			this.lineEnd = selection.empty ? selection : undefined
+		}
+
+		return true
+	}
+
 	// The selection as a copy writes it, or undefined when it is empty.
 	clipboardContent(): { readonly html: string; readonly text: string } | undefined {
 		const state = this.session.state
@@ -710,7 +760,9 @@ class StoryView {
 				if (readOnly) return false
 				if (this.windowed && deletesBreakBefore(editor)) return true
 
-				return this.run(joinBackward(state))
+				this.readSelection()
+
+				return this.run(deleteSelectionKey(this.session.state) ?? joinBackward(this.session.state))
 			case "Delete":
 				if (readOnly || extend) return false
 
@@ -720,7 +772,9 @@ class StoryView {
 					return true
 				}
 
-				return this.run(joinForward(state))
+				this.readSelection()
+
+				return this.run(deleteSelectionKey(this.session.state) ?? joinForward(this.session.state))
 			case "Escape":
 				if (editor.painter !== undefined) {
 					editor.setPainter(undefined)
@@ -1933,6 +1987,11 @@ export class ReflowView implements ReflowNodeHost {
 
 		if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 2000 })
 		else setTimeout(run, 0)
+	}
+
+	// Before the view is taken out of the document (see EditSink.releaseFocus).
+	releaseFocus(): void {
+		if (this.scroller.dataset["foFocused"] !== undefined) handFocus(this.editor)
 	}
 
 	destroy(): void {

@@ -121,6 +121,10 @@ export class ErrorWithDTO extends Error {
 // main-thread logic needs out of a worker throw's otherwise-opaque plain Error (see
 // previewSave.logic.ts's own isUnresolvableParentError, today's only consumer). Not a general
 // error-kind taxonomy entry: a plain Error has no `kind`, only this literal `message` prefix to match.
+// The kind of a download refused on a page the service worker does not control (saveDownload.ts's
+// assertSwControlled), labelled in the "errors" catalog so every download path tells the user alike.
+export const DOWNLOAD_NEEDS_RELOAD = "DownloadNeedsReload"
+
 export const PARENT_NOT_FOUND_PREFIX = "parent directory not found: "
 
 // listDirectory's own thrown message (sdk.worker.ts, `kind: "uuid"` branch) when the uuid a caller

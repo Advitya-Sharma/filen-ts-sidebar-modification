@@ -1,10 +1,11 @@
 import { defineSheetFeature } from "../../sheet/registry"
 import type { Slicing } from "../../slicing"
-import type { XlsxDocument } from "../../xlsx/edit/document"
+import { isLegacyKind, type XlsxDocument } from "../../xlsx/edit/document"
 import { saveXlsx } from "../../xlsx/write/save"
 import type { ByteSource } from "../../opc/io"
 import { odsSource } from "../source"
 import { convertSheet } from "./convert"
+import type { SheetLossyFeature } from "./report"
 import type { SheetConversion, SheetConversionFormat } from "./types"
 
 // Save as .ods or .xlsx of an open workbook: the workbook as the session holds it now (unsaved edits too), written
@@ -34,6 +35,8 @@ const WORKER_SLICING: Slicing = {
 		})
 	}
 }
+
+const VALUES_ONLY: SheetLossyFeature = { kind: "valuesOnly", count: 1, sheets: [] }
 
 // The bytes of a package as it was read.
 async function sourceBytes(source: ByteSource): Promise<Uint8Array> {
@@ -82,13 +85,17 @@ export const saveAsFormatFeature = defineSheetFeature<XlsxDocument>({
 				if (!own.ok) return { ok: false, reason: "unsupported", message: own.message }
 
 				const family = document.workbook.format === "ods" ? "ods" : "xlsx"
+				// A legacy workbook's session holds its values alone: the copy says what that left out.
+				const read: readonly SheetLossyFeature[] = isLegacyKind(document.kind) ? [VALUES_ONLY] : []
 
-				if (request.format === family) return { ok: true, bytes: own.bytes, lossy: [] }
+				if (request.format === family) return { ok: true, bytes: own.bytes, lossy: read }
 
-				return convertSheet(own.bytes, family, request.format, {
+				const converted = await convertSheet(own.bytes, family, request.format, {
 					turns: { signal, slicing },
 					...(request.language !== undefined && { language: request.language })
 				})
+
+				return converted.ok && read.length > 0 ? { ...converted, lossy: [...read, ...converted.lossy] } : converted
 			}
 		}
 	}

@@ -134,4 +134,18 @@ describe("sheet worker hosts", () => {
 		expect(tile?.strings).toEqual(expect.arrayContaining(["Name", "Qty", "Apples", "3"]))
 		session.close()
 	})
+
+	it("detects a text file's separator as the browser's locale breaks a tie, as the grid then reads it", async () => {
+		const languages = vi.spyOn(navigator, "languages", "get").mockReturnValue(["de-DE"])
+
+		try {
+			const { session, info } = await opened("1,5;2,5\r\n3,25;4,75\r\n")
+			const { tiles } = await session.tiles(info.activeSheet, Uint32Array.of(0, 0))
+
+			expect(tiles[0]?.strings).toEqual(expect.arrayContaining(["1,5", "2,5", "3,25", "4,75"]))
+			session.close()
+		} finally {
+			languages.mockRestore()
+		}
+	})
 })

@@ -1,6 +1,7 @@
 import type { SheetFileKind } from "@filen/office/core/sheet"
 import type { LiveConversion } from "@/features/drive/lib/downloadAs"
 import type { SheetHandle } from "@/features/spreadsheet/hooks/useSheetSession"
+import { browserLanguage } from "@/features/spreadsheet/formulaBar/sheetLocale"
 import { isTextSheetKind, openSheet, textToXlsx } from "@/features/spreadsheet/lib/sheetHosts"
 import { fileStem } from "@/features/spreadsheet/save/sheetSave.logic"
 
@@ -27,7 +28,7 @@ export function liveConversion(
 		}
 
 		if (!isTextSheetKind(kind)) {
-			return unlessAborted(await handle.session.query("saveAs.format", { format }, { signal }), signal)
+			return unlessAborted(await handle.session.query("saveAs.format", { format, language: browserLanguage() }, { signal }), signal)
 		}
 
 		const { bytes } = await handle.session.query("saveAs.cells", {}, { signal })
@@ -74,7 +75,8 @@ export async function commitForExport(model: EntryModel, sayInvalid: () => void)
 	return false
 }
 
-// An .xlsx converted to .ods in a workbook session of its own (bytes transferred), closed once done.
+// An .xlsx converted to .ods in a workbook session of its own (bytes transferred), closed once done. Every .ods
+// written takes the user's language as its default, as a new one does.
 async function odsOf(xlsx: Uint8Array, signal: AbortSignal): Promise<LiveAnswer> {
 	const opened = await openSheet(xlsx, { kind: "xlsx", signal }, () => undefined)
 
@@ -91,7 +93,7 @@ async function odsOf(xlsx: Uint8Array, signal: AbortSignal): Promise<LiveAnswer>
 	}
 
 	try {
-		return await opened.session.query("saveAs.format", { format: "ods" }, { signal })
+		return await opened.session.query("saveAs.format", { format: "ods", language: browserLanguage() }, { signal })
 	} finally {
 		opened.session.close()
 	}

@@ -40,6 +40,7 @@ import {
 	type DocxToolbarSlotProps
 } from "@/features/preview/components/docxEditor.logic"
 import { DocxChoiceField } from "@/features/preview/components/docxFields"
+import { useCommandMenuFocus } from "@/features/preview/components/docxInsert.logic"
 import { DocxColorGrid, SwatchButton } from "@/features/office/components/officeColorGrid"
 import { FormDialog } from "@/components/dialogs/formDialog"
 import { Button } from "@/components/ui/button"
@@ -236,16 +237,21 @@ function fontItems(fonts: readonly DocxFontChoice[], current: DocxValuesSnapshot
 	return { groups, all, value, extra: all.filter(item => !groups.some(group => group.items.includes(item))) }
 }
 
+// Where a picker gives focus back once closed (see useCommandMenuFocus).
+type MenuFocus = ReturnType<typeof useCommandMenuFocus>
+
 function FontPicker({
 	fonts,
 	font,
 	disabled,
-	execute
+	execute,
+	focus
 }: {
 	fonts: readonly DocxFontChoice[]
 	font: DocxValuesSnapshot["font"]
 	disabled: boolean
 	execute: (command: DocxEditorCommand) => void
+	focus: MenuFocus
 }) {
 	const { t } = useTranslation("preview")
 	const { groups, all, value, extra } = fontItems(fonts, font, t)
@@ -255,6 +261,8 @@ function FontPicker({
 			items={all}
 			value={value}
 			disabled={disabled}
+			onOpenChange={focus.opened}
+			onOpenChangeComplete={focus.settled}
 			onValueChange={next => {
 				if (typeof next === "string" && next !== MIXED) {
 					execute({ type: "font.family", family: next })
@@ -310,11 +318,13 @@ function points(halfPoints: number): string {
 function SizePicker({
 	size,
 	disabled,
-	execute
+	execute,
+	focus
 }: {
 	size: DocxValuesSnapshot["size"]
 	disabled: boolean
 	execute: (command: DocxEditorCommand) => void
+	focus: MenuFocus
 }) {
 	const { t } = useTranslation("preview")
 	const value = size === null || size === "mixed" ? MIXED : String(size)
@@ -332,6 +342,8 @@ function SizePicker({
 			items={items}
 			value={value}
 			disabled={disabled}
+			onOpenChange={focus.opened}
+			onOpenChangeComplete={focus.settled}
 			onValueChange={next => {
 				if (typeof next === "string" && next !== MIXED) {
 					execute({ type: "font.size", halfPoints: Number(next) })
@@ -366,7 +378,13 @@ function SizePicker({
 
 export function DocxFormatControls(props: DocxFormatControlsProps) {
 	const { t } = useTranslation("preview")
-	const { snapshot, readOnly, execute, commands } = props
+	const { snapshot, readOnly, commands } = props
+	const focus = useCommandMenuFocus()
+	// Run from a menu or picker, which gives focus back to the document once closed.
+	const execute = (command: DocxEditorCommand): void => {
+		props.execute(command)
+		focus.ran()
+	}
 	const values = snapshot?.values
 	const has = (type: DocxEditorCommandType): DocxToolbarCommand | undefined => commands.find(command => command.info.type === type)
 	const off = (type: DocxEditorCommandType): boolean =>
@@ -427,12 +445,14 @@ export function DocxFormatControls(props: DocxFormatControlsProps) {
 						font={values?.font ?? null}
 						disabled={off("font.family")}
 						execute={execute}
+						focus={focus}
 					/>
 					{has("font.size") === undefined ? null : (
 						<SizePicker
 							size={values?.size ?? null}
 							disabled={off("font.size")}
 							execute={execute}
+							focus={focus}
 						/>
 					)}
 				</>
@@ -459,7 +479,7 @@ export function DocxFormatControls(props: DocxFormatControlsProps) {
 					)}
 				</>
 			) : null}
-			<DropdownMenu>
+			<DropdownMenu onOpenChange={focus.opened}>
 				<Tooltip>
 					<TooltipTrigger
 						render={
@@ -481,7 +501,10 @@ export function DocxFormatControls(props: DocxFormatControlsProps) {
 					/>
 					<TooltipContent>{t("previewDocxMoreFormatting")}</TooltipContent>
 				</Tooltip>
-				<DropdownMenuContent data-preview-surface>
+				<DropdownMenuContent
+					finalFocus={focus.finalFocus}
+					data-preview-surface
+				>
 					{!fontShown && has("font.family") !== undefined ? (
 						<DropdownMenuSub>
 							<DropdownMenuSubTrigger disabled={off("font.family")}>{t("previewDocxFont")}</DropdownMenuSubTrigger>
@@ -634,6 +657,7 @@ export function DocxFormatControls(props: DocxFormatControlsProps) {
 									execute({ type: "format.copy" })
 								} else {
 									props.onPainterCancel()
+									focus.kept()
 								}
 							}}
 						>
@@ -669,7 +693,7 @@ export function DocxFormatControls(props: DocxFormatControlsProps) {
 						if (action === "cancel") {
 							props.onPainterCancel()
 						} else {
-							execute({ type: "format.copy", ...(action === "sticky" ? { sticky: true } : {}) })
+							props.execute({ type: "format.copy", ...(action === "sticky" ? { sticky: true } : {}) })
 						}
 					}}
 				>

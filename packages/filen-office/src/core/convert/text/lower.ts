@@ -103,7 +103,6 @@ const MARK_REVISIONS = new Set(["ins", "del", "moveFrom", "moveTo", "rPrChange"]
 const UNWRAPPED = new Set(["smartTag", "customXml", "dir", "bdo", "sdtContent"])
 const DROPPED_INLINE = new Set([
 	"proofErr",
-	"permStart",
 	"permEnd",
 	"moveFromRangeStart",
 	"moveFromRangeEnd",
@@ -544,9 +543,11 @@ export class Lowering {
 			case "altChunk":
 				this.lossy.add("altChunk")
 				break
+			case "permStart":
+				this.lossy.add("documentProtection")
+				break
 			case "sectPr":
 			case "proofErr":
-			case "permStart":
 			case "permEnd":
 			case "commentRangeStart":
 			case "commentRangeEnd":
@@ -998,6 +999,10 @@ export class Lowering {
 				case "subDoc":
 					this.lossy.add("subDocument")
 					break
+				case "permStart":
+					// A range a restriction leaves editable: an OpenDocument text has no such range.
+					this.lossy.add("documentProtection")
+					break
 				default:
 					if (!DROPPED_INLINE.has(local) && !UNWRAPPED.has(local) && document.textContent(node).trim() !== "") {
 						this.lossy.add("unknownElement")
@@ -1022,13 +1027,15 @@ export class Lowering {
 		if (relationship !== undefined && relationship.external) target = relationship.target
 		else if (anchor !== undefined) target = `#${anchor}`
 
-		if (target === undefined || this.suppressed()) {
+		const linked = target === undefined || this.suppressed() ? undefined : this.linkId(target)
+
+		if (linked === undefined) {
 			this.inline(node, state)
 
 			return
 		}
 
-		state.out += `<w:hyperlink r:id="${this.ids.hyperlink(target)}">`
+		state.out += `<w:hyperlink r:id="${linked}">`
 		state.depth++
 		this.inline(node, state)
 		state.depth--
@@ -1068,9 +1075,10 @@ export class Lowering {
 		}
 
 		const target = code === "HYPERLINK" ? hyperlinkTarget(instruction) : undefined
+		const id = target === undefined ? undefined : this.linkId(target)
 
-		if (target !== undefined) {
-			state.out += `<w:hyperlink r:id="${this.ids.hyperlink(target)}">`
+		if (id !== undefined) {
+			state.out += `<w:hyperlink r:id="${id}">`
 			this.inline(node, state)
 			state.out += "</w:hyperlink>"
 
@@ -1274,7 +1282,11 @@ export class Lowering {
 		const target = code === "HYPERLINK" ? hyperlinkTarget(field.code) : undefined
 
 		if (local && target !== undefined && !state.splits.some(split => split.at > field.resultAt)) {
-			state.out = `${state.out.slice(0, field.resultAt)}<w:hyperlink r:id="${this.ids.hyperlink(target)}">${state.out.slice(field.resultAt)}</w:hyperlink>`
+			const id = this.linkId(target)
+
+			// A target no URI can name: the result stays as text, counted.
+			if (id !== undefined)
+				state.out = `${state.out.slice(0, field.resultAt)}<w:hyperlink r:id="${id}">${state.out.slice(field.resultAt)}</w:hyperlink>`
 
 			return
 		}
@@ -1296,6 +1308,15 @@ export class Lowering {
 
 		// Fields without a result shown are nothing to keep (XE, TC, bookmarks of a TOC...).
 		if (code !== "" && field.resultAt >= 0) this.lossy.add("field")
+	}
+
+	// A link target's package id, as a URI; undefined (counted) for a target no URI names.
+	private linkId(target: string): string | undefined {
+		const uri = linkUri(target)
+
+		if (uri === undefined) this.lossy.add("linkTarget")
+
+		return uri === undefined ? undefined : this.ids.hyperlink(uri)
 	}
 
 	// A text the converter could not keep as what it was, as plain text in a run.
@@ -1711,6 +1732,7 @@ export class Lowering {
 		const name = node < 0 ? "" : this.document.localName(node)
 
 		if (name === local) return [node]
+		if (name === "permStart") this.lossy.add("documentProtection")
 		if (name === "sdt") {
 			this.lossy.add("contentControl")
 
@@ -2108,6 +2130,48 @@ export function hyperlinkTarget(instruction: string): string | undefined {
 	const target = url?.[1] ?? url?.[2]
 
 	return target === undefined || target === "" || target.startsWith("\\") ? undefined : target
+}
+
+// Characters a URI holds as they are (RFC 3986 §2.2, §2.3), but "#" (one only) and "%" (an escape only).
+const URI_CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?@!$&'()*+,;="
+const UTF8 = new TextEncoder()
+
+// A link target as a URI (RFC 3986), encoded the way LibreOffice encodes one: a Windows path as a file URI, every other character
+// percent-encoded as UTF-8 (RFC 3987 §3.1), a fragment's further "#" too; a relative reference whose first segment
+// holds ":" behind "./" (RFC 3986 §4.2). Undefined for a target that names nothing: empty, or a scheme alone.
+export function linkUri(target: string): string | undefined {
+	let text = target.trim()
+
+	if (/^[A-Za-z]:[\\/]/u.test(text)) text = `file:///${text.replaceAll("\\", "/")}`
+	else if (text.startsWith("\\\\")) text = `file:${text.replaceAll("\\", "/")}`
+
+	const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:/u.exec(text)?.[0]
+
+	if (text === "" || (scheme !== undefined && scheme.length === text.length)) return undefined
+
+	// An IP literal's brackets (§3.2.2) stay in the authority only.
+	const authority = scheme !== undefined && text.startsWith("//", scheme.length) ? scheme.length + 2 : -1
+	const authorityLength = authority < 0 ? -1 : (/[/?#]|$/u.exec(text.slice(authority))?.index ?? 0)
+	let out = ""
+	let fragment = false
+
+	for (let at = 0; at < text.length;) {
+		const char = String.fromCodePoint(text.codePointAt(at) ?? 0)
+		const kept =
+			URI_CHARACTERS.includes(char) ||
+			((char === "[" || char === "]") && at >= authority && at < authority + authorityLength) ||
+			(char === "#" && !fragment) ||
+			(char === "%" && /^[0-9A-Fa-f]{2}$/u.test(text.slice(at + 1, at + 3)))
+
+		if (char === "#") fragment = true
+
+		if (kept) out += char
+		else for (const byte of UTF8.encode(char)) out += `%${byte.toString(16).toUpperCase().padStart(2, "0")}`
+
+		at += char.length
+	}
+
+	return scheme === undefined && /^[^/?#]*:/u.test(out) ? `./${out}` : out
 }
 
 // Run property children in schema order once rFonts was moved (sym).

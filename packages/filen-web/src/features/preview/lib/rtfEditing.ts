@@ -55,6 +55,7 @@ export function rtfEditingBackend(
 	})
 
 	return {
+		untranslated: document.untranslated,
 		// Converts to .docx as edited where the document is held (its package with the docx writer's parts), never
 		// through its own writer.
 		convertEdited: async (prepared: DocxPreparedSave, signal: AbortSignal) =>

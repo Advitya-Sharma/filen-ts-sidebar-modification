@@ -27,7 +27,16 @@ import type { FrameProps, ResolvedBorder, ResolvedParagraphBorders, ResolvedPara
 import type { CellFormat, ParagraphFormat, PropertyResolver } from "../styles/resolve"
 import { BuiltParagraph, ContentBuilder, FieldFlag, type PageValues, type StoryContext } from "./content"
 import { FieldKind, fieldInfo, numberText } from "./fields"
-import { FIXED_AUTO_SPACING, Geometry, paragraphGeometry, spaceAfter, spaceBefore, type AutoSpacing, type LayoutCompat } from "./geometry"
+import {
+	borderInset,
+	FIXED_AUTO_SPACING,
+	Geometry,
+	paragraphGeometry,
+	spaceAfter,
+	spaceBefore,
+	type AutoSpacing,
+	type LayoutCompat
+} from "./geometry"
 import type { NoteNumbering } from "./notes"
 import { ObjectKind, type FloatSpec, type ObjectSizer, type ObjectTable } from "./objects"
 import { PageGraphic, Layer, OBJECT_FLOATS, OBJECT_INTS, OutputMark, PageOutput, Region, SourceFlag } from "./output"
@@ -2209,6 +2218,8 @@ export class BlockFlow {
 		const borders = props.borders
 		const shading = this.engine.decorations.shading(props.shading)
 
+		if (this.engine.compat.joinsBoxes) return this.joinBox(area, props, top)
+
 		if (
 			box.open &&
 			box.borders === borders &&
@@ -2250,6 +2261,42 @@ export class BlockFlow {
 		return topBorder === undefined ? top : top + borderWidth(topBorder) + points(topBorder.space)
 	}
 
+	// openBox for LayoutCompat.joinsBoxes: a paragraph joins the open box when its lines and text edges agree (the
+	// space above and below a line apart), and one without borders opens an empty box another may join.
+	private joinBox(area: Area, props: ResolvedParagraphProps, top: number): number {
+		const box = this.box
+		const borders = props.borders
+		const shading = this.engine.decorations.shading(props.shading)
+		// The box's edges are the text's: the borders sit inside the indents.
+		const left = area.left + paragraphLeft(props) + borderInset(props.bidi ? borders?.end : borders?.start)
+		const right = area.left + area.width - paragraphRight(props) - borderInset(props.bidi ? borders?.start : borders?.end)
+
+		if (box.open && box.shading === shading && box.left === left && box.right === right && joinable(box.borders, borders)) {
+			box.joins.push(box.bottom)
+			box.borders = borders
+
+			return top
+		}
+
+		const before = this.y
+
+		this.closeBox(area)
+		top += this.y - before
+
+		box.open = true
+		box.borders = borders
+		box.shading = shading
+		box.left = left
+		box.right = right
+		box.joins.length = 0
+		box.top = top
+		box.bottom = top
+
+		const topBorder = borders?.top
+
+		return topBorder === undefined ? top : top + borderWidth(topBorder) + points(topBorder.space)
+	}
+
 	// Draws the open border box.
 	closeBox(area: Area): void {
 		const box = this.box
@@ -2272,7 +2319,7 @@ export class BlockFlow {
 		if (borders === undefined) return
 
 		const line = (border: ResolvedBorder | undefined, x: number, y: number, horizontal: boolean, length: number): void => {
-			if (border === undefined) return
+			if (border === undefined || border.style === "none") return
 
 			const width = borderWidth(border)
 
@@ -2300,6 +2347,28 @@ export class BlockFlow {
 
 function points(value: number): number {
 	return (value * 4) / 3
+}
+
+// Whether a paragraph's borders join the open box's (LayoutCompat.joinsBoxes): the same lines on every side, a border
+// that draws nothing counting as none unless it carries a shadow (which keeps neighbours apart), the same spacing at
+// the start and end, and no w:frame on the open box's bottom (style:join-border false).
+function joinable(a: ResolvedParagraphBorders | undefined, b: ResolvedParagraphBorders | undefined): boolean {
+	if (a?.bottom?.style === "none" && a.bottom.frame) return false
+	if (a === b) return true
+
+	const line = (border: ResolvedBorder | undefined): ResolvedBorder | undefined =>
+		border?.style === "none" && !border.shadow ? undefined : border
+	const same = (x: ResolvedBorder | undefined, y: ResolvedBorder | undefined): boolean => {
+		const p = line(x)
+		const q = line(y)
+
+		return (
+			p === q ||
+			(p !== undefined && q !== undefined && p.style === q.style && p.size === q.size && p.color === q.color && p.shadow === q.shadow)
+		)
+	}
+
+	return same(a?.top, b?.top) && same(a?.bottom, b?.bottom) && line(a?.start) === line(b?.start) && line(a?.end) === line(b?.end)
 }
 
 function paragraphLeft(props: ResolvedParagraphProps): number {

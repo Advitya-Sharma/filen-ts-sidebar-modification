@@ -243,7 +243,14 @@ export const LINE_METRICS: ReadonlyMap<string, LineMetricsEntry> = new Map<strin
 			metrics: verticalMetrics(2048, 1705, -615, 0, 1255, -386, 0, 1705, 615, false)
 		}
 	],
-	["georgia", { basis: "substitute" }],
+	[
+		"georgia",
+		{
+			basis: "original",
+			source: "Georgia Regular, Bold, Italic and Bold Italic, Version 5.00x-4 (macOS /System/Library/Fonts/Supplemental/Georgia*.ttf): head unitsPerEm, hhea, OS/2 typo and win values",
+			metrics: verticalMetrics(2048, 1878, -449, 0, 1549, -444, 198, 1878, 449, false)
+		}
+	],
 	["segoe ui", { basis: "substitute" }],
 	["segoe ui light", { basis: "substitute" }],
 	["segoe ui semilight", { basis: "substitute" }],
@@ -299,6 +306,13 @@ export const CLONE_METRICS: ReadonlyMap<BundledFamily, OriginalMetrics> = new Ma
 		{
 			source: "LiberationMono-Regular.ttf (Liberation Fonts 2.1.5)",
 			metrics: verticalMetrics(2048, 1705, -615, 0, 1255, -386, 0, 1705, 615, false)
+		}
+	],
+	[
+		"gelasio",
+		{
+			source: "Georgia Regular, Bold, Italic and Bold Italic, Version 5.00x-4 (macOS /System/Library/Fonts/Supplemental/Georgia*.ttf): head unitsPerEm, hhea, OS/2 typo and win values",
+			metrics: verticalMetrics(2048, 1878, -449, 0, 1549, -444, 198, 1878, 449, false)
 		}
 	]
 ])

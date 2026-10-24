@@ -35,6 +35,9 @@ export interface DocxRtfDocument {
 	// The viewer's source: { host, bytes }. The host opens the package where it is held; `bytes` gives its size only.
 	readonly host: DocxHost
 	readonly bytes: ByteSource
+	// What the file shows that the package leaves out (an RTF's equations, shapes, form fields...), counted: a PDF of
+	// the package reports it (DocxPdfExportOptions.untranslated).
+	readonly untranslated: number
 	// A copy of the package, for the editor.
 	take(): Promise<Uint8Array>
 	// Gate 1 (once, when the document is to be edited): the top-level blocks the RTF writer cannot write.

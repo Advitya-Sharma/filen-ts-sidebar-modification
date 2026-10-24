@@ -194,6 +194,9 @@ function fontKey(request: FontRequest): string {
 
 // Drawn thickness of a border in px. Double and multi-line styles take more room than their stroke width.
 export function borderWidth(border: ResolvedBorder): number {
+	// Padding kept as a border that draws nothing (StyleSettings.paddingBorders).
+	if (border.style === "none") return 0
+
 	const size = eighthPoints(border.size > 0 ? border.size : 2)
 
 	switch (border.style) {

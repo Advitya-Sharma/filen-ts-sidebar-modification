@@ -440,7 +440,12 @@ export class PropertyResolver {
 	}
 
 	border(border: BorderProps | undefined): ResolvedBorder | undefined {
-		if (border === undefined || border.style === "nil" || border.style === "none") return undefined
+		if (border === undefined || border.style === "nil") return undefined
+		if (
+			border.style === "none" &&
+			(this.settings.paddingBorders !== true || ((border.space ?? 0) <= 0 && border.shadow !== true && border.frame !== true))
+		)
+			return undefined
 
 		return this.borderInterner.intern({
 			style: border.style,

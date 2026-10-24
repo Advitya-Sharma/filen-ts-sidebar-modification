@@ -4,6 +4,7 @@ import { FileDiffIcon } from "lucide-react"
 import { isWriteCommand, type DocxEditorCommand, type DocxEditorCommandType } from "@filen/office/core/docx/edit"
 import { DOCX_MARKUP_MODES, type DocxMarkupMode } from "@filen/office/dom/docx"
 import type { DocxToolbarSlotProps } from "@/features/preview/components/docxEditor.logic"
+import { useCommandMenuFocus } from "@/features/preview/components/docxInsert.logic"
 import { MARKUP_LABELS } from "@/features/preview/components/docxViewer.logic"
 import { Button } from "@/components/ui/button"
 import {
@@ -51,8 +52,14 @@ const ALL_ITEMS: readonly Item[] = [
 // The toolbar's one Review menu: the track changes switch (a dot on the button while on), a new comment and
 // stepping through comments, stepping through changes and accepting or rejecting the one at the caret or all of
 // them, and the markup modes (it replaces the markup menu).
-export function DocxReviewMenu({ commands, snapshot, readOnly, execute, requestInput, markup, onMarkupChange }: DocxReviewMenuProps) {
+export function DocxReviewMenu(props: DocxReviewMenuProps) {
+	const { commands, snapshot, readOnly, requestInput, markup, onMarkupChange } = props
 	const { t } = useTranslation("preview")
+	const focus = useCommandMenuFocus()
+	const execute = (command: DocxEditorCommand): void => {
+		props.execute(command)
+		focus.ran()
+	}
 	const tracking = snapshot?.review.tracking === true
 	const labels = new Map(commands.map(command => [command.info.type, command.label]))
 	const trackLabel = labels.get("review.track")
@@ -93,7 +100,7 @@ export function DocxReviewMenu({ commands, snapshot, readOnly, execute, requestI
 	const all = items(ALL_ITEMS)
 
 	return (
-		<DropdownMenu>
+		<DropdownMenu onOpenChange={focus.opened}>
 			<Tooltip>
 				<TooltipTrigger
 					render={
@@ -123,6 +130,7 @@ export function DocxReviewMenu({ commands, snapshot, readOnly, execute, requestI
 			</Tooltip>
 			<DropdownMenuContent
 				align="end"
+				finalFocus={focus.finalFocus}
 				className="w-auto min-w-48"
 			>
 				{trackLabel === undefined ? null : (
@@ -152,6 +160,7 @@ export function DocxReviewMenu({ commands, snapshot, readOnly, execute, requestI
 							value={markup}
 							onValueChange={(mode: DocxMarkupMode) => {
 								onMarkupChange(mode)
+								focus.ran()
 							}}
 						>
 							<DropdownMenuLabel>{t("previewDocxMarkup")}</DropdownMenuLabel>

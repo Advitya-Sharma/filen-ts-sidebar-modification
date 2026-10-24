@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { parseCellInput } from "../core/sheet/input/cellInput"
-import { delocalizeFormula, localizedDate, localizedInput, localizedNumber, localizeFormula } from "../core/sheet/input/locale"
+import { delocalizeFormula, localizedDate, localizedInput, localizedNumber, localizeFormula, textNumber } from "../core/sheet/input/locale"
 import type { SheetLocale } from "../core/sheet/protocol"
 
 const DE: SheetLocale = { decimal: ",", group: ".", argument: ";", dateOrder: "dmy" }
@@ -75,5 +75,27 @@ describe("values typed in a locale", () => {
 		expect(localizedInput("a.b", DE)).toBe("a.b")
 		expect(localizedInput("2024-01-02", DE)).toBe("2024-01-02")
 		expect(localizedInput("1.5", US)).toBe("1.5")
+	})
+})
+
+describe("numbers typed with an Arabic decimal separator locale", () => {
+	// Intl's ar-EG, ar-SA, fa-IR and ps-AF: U+066B as the decimal point, U+066C between groups.
+	const AR: SheetLocale = { decimal: "٫", group: "٬", argument: ",", dateOrder: "dmy" }
+
+	it("take '.' as the decimal point too, as LibreOffice 7.5 reads entries in ar-EG and fa-IR", () => {
+		expect(parseCellInput("3.5", AR)).toEqual({ type: "value", value: 3.5 })
+		expect(parseCellInput("3٫5", AR)).toEqual({ type: "value", value: 3.5 })
+		expect(localizedNumber("1٬234.5", AR)?.value).toBe(1234.5)
+		expect(localizedNumber("12.5%", AR)?.value).toBe(0.125)
+	})
+
+	it("read text in formulas with either decimal point", () => {
+		expect(textNumber("3.5", AR)).toBe(3.5)
+		expect(textNumber(".5", AR)).toBe(0.5)
+		expect(textNumber("3٫5", AR)).toBe(3.5)
+	})
+
+	it("keep '.' as no decimal point where the locale's is a comma", () => {
+		expect(localizedNumber("3.5", DE)).toBeNull()
 	})
 })

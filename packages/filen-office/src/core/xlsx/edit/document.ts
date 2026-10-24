@@ -2,7 +2,7 @@ import type { RawCellContent } from "hyperformula"
 import { isSealedOfficeFile } from "../../encryption/index"
 import type { SliceClock, Slicing } from "../../slicing"
 import { decodeUtf8, encodeUtf8 } from "../../xml/index"
-import { writeCsv } from "../../sheet/csv/csvParse"
+import { csvField, utf8Length } from "../../sheet/csv/csvParse"
 import {
 	CYCLE,
 	FormulaEngine,
@@ -155,6 +155,11 @@ export interface XlsxFormatWriter {
 }
 
 const LEGACY_KINDS: ReadonlySet<SheetFileKind> = new Set(["xls", "xlt"])
+
+// An Excel 97–2003 workbook (.xls, .xlt), which a session opens from an .xlsx made of its values alone.
+export function isLegacyKind(kind: SheetFileKind): boolean {
+	return LEGACY_KINDS.has(kind)
+}
 
 // What a formula the engine does not calculate shows when its file stored no result for it.
 const NAME_ERROR = "#NAME?"
@@ -810,6 +815,10 @@ export class XlsxDocument {
 			: { structure: protection.structure, windows: protection.windows, hasPassword: hasHash(protection.hash) }
 	}
 
+	title(): string | undefined {
+		return this.workbook.title
+	}
+
 	fileSharing(): SheetFileSharing | null {
 		const sharing = this.workbook.fileSharing
 
@@ -846,7 +855,7 @@ export class XlsxDocument {
 	// else waits for the proof.
 	initialWritability(): SheetWritability {
 		// An OpenDocument spreadsheet saves through its own writer, without which it is shown only.
-		if (LEGACY_KINDS.has(this.kind) || (this.workbook.format === "ods" && this.writer === undefined))
+		if (isLegacyKind(this.kind) || (this.workbook.format === "ods" && this.writer === undefined))
 			return { state: "viewOnly", reason: "legacyFormat" }
 		const refusal = this.writer?.viewOnly ?? null
 
@@ -2821,6 +2830,17 @@ export class XlsxDocument {
 		// handing out the zip.
 		if (encryption?.sealer.released === true) return { ok: false, reason: "seal", message: "The workbook's key was released" }
 
+		// Unedited: the sealed file as read (a copy, the source kept), not a fresh seal under a new salt.
+		const sealed = encryption?.sealed
+
+		if (options.untouched === true && sealed !== undefined) {
+			const bytes = (await sealed.read(0, sealed.size)).slice()
+
+			if (this.closed) return { ok: false, reason: "closed", message: "The session is closed" }
+
+			return { ok: true, bytes, changedParts: [] }
+		}
+
 		// Asked for while an edited formula's result is still one this session could not calculate (an undo takes it
 		// back, so it is decided at each save).
 		const changes = this.workbook.changes as ChangeLog
@@ -2860,50 +2880,83 @@ export class XlsxDocument {
 	}
 
 	// The sheet as Excel's "CSV UTF-8": its data area, from A1 to the last row and column holding a value or a
-	// formula, every row that wide, as LibreOffice's CSV export writes it, with a BOM. A cell holding only a format is no data.
+	// formula, every row that wide, as LibreOffice's CSV export writes it, with a BOM. A cell holding only a format is
+	// no data. Written row by row into one array of the output's exact size: memory is the output and the data cells,
+	// never a row × column grid nor an array per field. A field holding a separator the next open weighs is quoted (writeCsv's stable).
 	csv(sheet: SheetId): Uint8Array | null {
 		const model = this.model(sheet)
 
 		if (model === null) return null
 
 		const store = model.store as SheetStore
+		const rows: number[] = []
+		const cols: number[] = []
+		const fields: string[] = []
 		let lastRow = -1
 		let lastCol = -1
+		let sorted = true
+		let size = 0
 
 		for (const block of store.blocks) {
 			for (let i = 0; i < block.rowCount; i++) {
+				const row = block.firstRow + (block.rows[i] ?? 0)
+
 				for (let k = block.rowStarts[i] ?? 0; k < (block.rowStarts[i + 1] ?? 0); k++) {
 					if (block.kinds[k] === CellKind.EMPTY && (block.formulas?.[k] ?? -1) < 0) continue
 
-					lastRow = Math.max(lastRow, block.firstRow + (block.rows[i] ?? 0))
-					lastCol = Math.max(lastCol, block.cols[k] ?? 0)
-				}
-			}
-		}
-
-		const rows: string[][] = Array.from({ length: lastRow + 1 }, () => new Array<string>(lastCol + 1).fill(""))
-
-		for (const block of store.blocks) {
-			for (let i = 0; i < block.rowCount; i++) {
-				const values = rows[block.firstRow + (block.rows[i] ?? 0)]
-
-				if (values === undefined) continue
-
-				for (let k = block.rowStarts[i] ?? 0; k < (block.rowStarts[i + 1] ?? 0); k++) {
 					const col = block.cols[k] ?? 0
 
-					if (col <= lastCol && (block.kinds[k] !== CellKind.EMPTY || (block.formulas?.[k] ?? -1) >= 0))
-						values[col] = this.cellView(sheet, block.firstRow + (block.rows[i] ?? 0), col).text
+					lastRow = Math.max(lastRow, row)
+					lastCol = Math.max(lastCol, col)
+
+					const text = this.cellView(sheet, row, col).text
+
+					if (text === "") continue
+
+					const last = rows.length - 1
+
+					if (last >= 0 && (row < (rows[last] ?? 0) || (row === rows[last] && col <= (cols[last] ?? 0)))) sorted = false
+
+					const field = csvField(text, ",", true)
+
+					rows.push(row)
+					cols.push(col)
+					fields.push(field)
+					size += utf8Length(field)
 				}
 			}
 		}
 
-		// Each row ends with a line end, the last too.
-		const text = encodeUtf8(rows.length === 0 ? "" : `${writeCsv(rows, ",", "\r\n")}\r\n`)
-		const bytes = new Uint8Array(text.length + 3)
+		const order = Array.from(fields, (_, index) => index)
+
+		if (!sorted) order.sort((a, z) => (rows[a] ?? 0) - (rows[z] ?? 0) || (cols[a] ?? 0) - (cols[z] ?? 0))
+
+		// Each row ends with a line end, the last too: lastCol commas and CRLF a row, and the fields.
+		const bytes = new Uint8Array(3 + (lastRow + 1) * (lastCol + 2) + size)
+		const encoder = new TextEncoder()
+		let at = 3
+		let next = 0
 
 		bytes.set([0xef, 0xbb, 0xbf], 0)
-		bytes.set(text, 3)
+
+		for (let row = 0; row <= lastRow; row++) {
+			let col = 0
+
+			for (; next < order.length && rows[order[next] ?? 0] === row; next++) {
+				const index = order[next] ?? 0
+				const target = cols[index] ?? 0
+
+				bytes.fill(0x2c, at, at + target - col)
+				at += target - col
+				col = target
+				at += encoder.encodeInto(fields[index] ?? "", bytes.subarray(at)).written
+			}
+
+			bytes.fill(0x2c, at, at + lastCol - col)
+			at += lastCol - col
+			bytes[at++] = 0x0d
+			bytes[at++] = 0x0a
+		}
 
 		return bytes
 	}

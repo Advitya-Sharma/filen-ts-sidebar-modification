@@ -168,7 +168,7 @@ describe("floating object stacking in the PDF export", () => {
 			headers: { rIdH: "<w:p/>" }
 		})
 		const exported = await exportDocxPdf(bytes, services(), pdfAssets, {
-			options: { deterministic: true },
+			options: { title: "Floats", deterministic: true },
 			signal: { aborted: false },
 			onProgress: () => undefined
 		})

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest"
 import { convertText } from "../core/convert/text/index"
 import { bytesSource, ZipArchive } from "../core/opc/index"
 import { translateOdt } from "../core/odt/index"
-import { decodeUtf8, encodeUtf8 } from "../core/xml/index"
+import { decodeUtf8, encodeUtf8, parseXml } from "../core/xml/index"
+import { docxConvertServer } from "../dom/docx/convert"
+import { buildDoc } from "./docFixtures"
 import { buildDocx, p, type SyntheticDocx } from "./docxSynthetic"
 
 const WML = "application/vnd.openxmlformats-officedocument.wordprocessingml"
@@ -232,5 +234,219 @@ describe("convertText docx → odt", () => {
 				turns: { signal: { aborted: true }, slicing: { pause: () => Promise.resolve(), sliceMs: 0, now: () => 0 } }
 			})
 		).toMatchObject({ ok: false, refusal: { reason: "aborted" } })
+	})
+})
+
+async function converted(
+	source: SyntheticDocx
+): Promise<{ parts: Map<string, string>; features: readonly { kind: string; count: number }[] }> {
+	const result = await convertText(buildDocx(source), "docx", "odt")
+
+	if (!result.ok) throw new Error(result.refusal.message)
+
+	const parts = new Map<string, string>()
+
+	for (const [name, bytes] of await odtParts(result.bytes)) if (name.endsWith(".xml")) parts.set(name, decodeUtf8(bytes))
+
+	return { parts, features: result.lossy.features }
+}
+
+const WPS = 'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"'
+const LETTER = '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr>'
+const TEXT_BOX = `<w:drawing><wp:anchor ${WPS} distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="3000000" cy="1000000"/><wp:wrapNone/><wp:docPr id="1" name="TB"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent>${p("item a", LETTER)}${p("item b", LETTER)}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>`
+
+describe("convertText docx → odt: tracked changes, notes, protection and links", () => {
+	it("writes a tracked deletion of a text box holding a list as well-formed content, its list named", async () => {
+		const { parts } = await converted(
+			spec(
+				`<w:p><w:r><w:t>Before</w:t></w:r><w:del w:id="5" w:author="A" w:date="2020-01-01T00:00:00Z"><w:r>${TEXT_BOX}</w:r></w:del><w:r><w:t>After</w:t></w:r></w:p>${p("Later", LETTER)}`
+			)
+		)
+		const content = parts.get("content.xml") ?? ""
+
+		expect(content.includes("\u0002") || content.includes("\u0003")).toBe(false)
+		expect(() => parseXml(encodeUtf8(content))).not.toThrow()
+		expect(content).toMatch(
+			/<text:tracked-changes text:track-changes="false"><text:changed-region [^>]*><text:deletion>[\s\S]*<text:list [^>]*xml:id="[^"]+"/u
+		)
+	})
+
+	it("writes Word's footnote and endnote numbering as notes configurations, counting what has no form", async () => {
+		const notes = (kind: "footnote" | "endnote"): string =>
+			`<w:${kind} w:id="1"><w:p><w:r><w:${kind}Ref/></w:r><w:r><w:t xml:space="preserve"> a note</w:t></w:r></w:p></w:${kind}>`
+		const body = (sectPr: string): string =>
+			`<w:p><w:r><w:t>Text</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:endnoteReference w:id="1"/></w:r></w:p><w:sectPr>${sectPr}</w:sectPr>`
+		const configurations = (styles: string): string[] =>
+			[...styles.matchAll(/<text:notes-configuration [^>]*\/>/gu)].map(match => match[0])
+		const exact = await converted(
+			spec(body('<w:footnotePr><w:numFmt w:val="lowerLetter"/><w:numRestart w:val="eachPage"/></w:footnotePr>'), {
+				footnotes: notes("footnote"),
+				endnotes: notes("endnote"),
+				settings:
+					'<w:footnotePr><w:numFmt w:val="decimal"/></w:footnotePr><w:endnotePr><w:numFmt w:val="upperRoman"/><w:numStart w:val="5"/></w:endnotePr>'
+			})
+		)
+
+		// The section's settings win over the document's; a start other than 1 is counted from 0, as LibreOffice reads it.
+		expect(configurations(exact.parts.get("styles.xml") ?? "")).toEqual([
+			'<text:notes-configuration text:note-class="footnote" style:num-format="a" style:num-letter-sync="true" text:footnotes-position="page" text:start-numbering-at="page"/>',
+			'<text:notes-configuration text:note-class="endnote" style:num-format="I" text:start-value="4"/>'
+		])
+		expect(exact.features).toEqual([])
+
+		const approximated = await converted(
+			spec(
+				body(
+					'<w:footnotePr><w:pos w:val="beneathText"/><w:numFmt w:val="chicago"/><w:numRestart w:val="eachSect"/></w:footnotePr><w:endnotePr><w:pos w:val="sectEnd"/></w:endnotePr>'
+				),
+				{ footnotes: notes("footnote"), endnotes: notes("endnote") }
+			)
+		)
+
+		expect(configurations(approximated.parts.get("styles.xml") ?? "")).toEqual([
+			'<text:notes-configuration text:note-class="footnote" style:num-format="1" text:footnotes-position="text" text:start-numbering-at="chapter"/>',
+			'<text:notes-configuration text:note-class="endnote" style:num-format="i"/>'
+		])
+		expect(approximated.features).toEqual([{ kind: "noteSettings", count: 3 }])
+
+		const atEnd = await converted(
+			spec(body('<w:footnotePr><w:pos w:val="docEnd"/></w:footnotePr>'), { footnotes: notes("footnote"), endnotes: notes("endnote") })
+		)
+
+		expect(configurations(atEnd.parts.get("styles.xml") ?? "")[0]).toContain('text:footnotes-position="document"')
+		expect(atEnd.features).toEqual([])
+	})
+
+	it("keeps read-only protection, forms protection and Track Changes as LibreOffice does, counting what has no form", async () => {
+		const settings = (xml: string): string =>
+			xml.match(/<config:config-item-set config:name="ooo:configuration-settings">[\s\S]*?<\/config:config-item-set>/u)?.[0] ?? ""
+		const readOnly = await converted(
+			spec(p("Locked"), { settings: '<w:documentProtection w:edit="readOnly" w:enforcement="1"/><w:trackRevisions/>' })
+		)
+
+		expect(settings(readOnly.parts.get("settings.xml") ?? "")).toContain(
+			'<config:config-item config:name="LoadReadonly" config:type="boolean">true</config:config-item>'
+		)
+		// LibreOffice reads the set's name as a qualified name.
+		expect(readOnly.parts.get("settings.xml")).toContain('xmlns:ooo="http://openoffice.org/2004/office"')
+		expect(readOnly.parts.get("content.xml")).toContain('<text:tracked-changes text:track-changes="true"/>')
+		expect(readOnly.features).toEqual([])
+
+		// Forms protection: ProtectForm, and each section Word protects (all but those with w:formProt off) a protected section.
+		const forms = await converted(
+			spec(
+				`<w:p><w:pPr><w:sectPr><w:formProt w:val="0"/></w:sectPr></w:pPr><w:r><w:t>Free</w:t></w:r></w:p>${p("Locked")}<w:sectPr/>`,
+				{
+					settings: '<w:documentProtection w:edit="forms" w:enforcement="1"/>'
+				}
+			)
+		)
+		const content = forms.parts.get("content.xml") ?? ""
+
+		expect(settings(forms.parts.get("settings.xml") ?? "")).toContain(
+			'<config:config-item config:name="ProtectForm" config:type="boolean">true</config:config-item>'
+		)
+		expect(content).toMatch(
+			/<text:p[^>]*>Free<\/text:p><text:section text:name="[^"]+" text:protected="true"><text:p[^>]*>Locked<\/text:p><\/text:section>/u
+		)
+		expect(() => parseXml(encodeUtf8(content))).not.toThrow()
+		expect(forms.features).toEqual([])
+
+		// What ODF holds no form for: comments-only editing, a password, an editable range; unenforced protection is none.
+		const comments = await converted(spec(p("Locked"), { settings: '<w:documentProtection w:edit="comments" w:enforcement="1"/>' }))
+		const password = await converted(
+			spec(
+				'<w:p><w:r><w:t>Locked</w:t></w:r><w:permStart w:id="1" w:edGrp="everyone"/><w:r><w:t>free</w:t></w:r><w:permEnd w:id="1"/></w:p>',
+				{
+					settings:
+						'<w:documentProtection w:edit="readOnly" w:enforcement="1" w:cryptProviderType="rsaAES" w:cryptAlgorithmClass="hash" w:cryptAlgorithmType="typeAny" w:cryptAlgorithmSid="14" w:cryptSpinCount="100000" w:hash="oYUhnRSm+XHtRUzWvE6CO+f+b6Poo1K+Lvfb9bCIkIwxtmabNieIN7lxTaRfbYFaLurTi/W1d+fsH55dIt7VSg==" w:salt="l35GbpzSqi3r6QltK5QyFw=="/>'
+				}
+			)
+		)
+		const unenforced = await converted(spec(p("Open"), { settings: '<w:documentProtection w:edit="readOnly" w:enforcement="0"/>' }))
+
+		expect(comments.features).toEqual([{ kind: "documentProtection", count: 1 }])
+		expect(password.features).toEqual([{ kind: "documentProtection", count: 2 }])
+		expect(settings(password.parts.get("settings.xml") ?? "")).toContain('"LoadReadonly" config:type="boolean">true<')
+		expect(unenforced.parts.get("settings.xml")).not.toContain("LoadReadonly")
+		expect(unenforced.features).toEqual([])
+	})
+
+	it("joins a Word 97–2003 document's protection report with what the OpenDocument text keeps", async () => {
+		const server = docxConvertServer({ pause: () => Promise.resolve(), sliceMs: 1_000_000, now: () => 0 })
+		const doc = async (setup: (dop: Uint8Array) => void): Promise<Uint8Array> => {
+			const dop = new Uint8Array(616)
+
+			setup(dop)
+
+			return buildDoc({ pieces: [{ text: "x\r" }], structures: { dop }, nFib: 0x10d })
+		}
+		// Forms protection (Dop2003's iDocProtCur 2, enforced) with a password: kept, its password not.
+		const forms = await server.convert(
+			1,
+			await doc(dop => {
+				new DataView(dop.buffer).setUint32(78, 0x1234_5678, true)
+				dop[598] = 0x08 | (2 << 4)
+			}),
+			"doc",
+			"odt"
+		)
+		// Comments-only editing: the .docx keeps it, the OpenDocument text does not.
+		const comments = await server.convert(1, await doc(dop => (dop[598] = 0x08 | (1 << 4))), "doc", "odt")
+
+		if (!forms.ok || !comments.ok) throw new Error("refused")
+
+		expect(forms.lossy.features).toEqual([{ kind: "passwordProtection", count: 1 }])
+		expect(decodeUtf8((await odtParts(forms.bytes)).get("settings.xml") ?? new Uint8Array())).toContain(
+			'"ProtectForm" config:type="boolean">true<'
+		)
+		expect(comments.lossy.features).toEqual([{ kind: "documentProtection", count: 1 }])
+	})
+
+	it("numbers a list from 0 as Word does, counting a deeper level that restarts at 1 (ODF level styles start at 1)", async () => {
+		const level = (ilvl: number): string =>
+			`<w:lvl w:ilvl="${String(ilvl)}"><w:start w:val="0"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%${String(ilvl + 1)}."/></w:lvl>`
+		const numbering = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0">${level(0)}${level(1)}</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`
+		const { parts, features } = await converted({
+			body: p("Zero", '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>'),
+			parts: [{ name: "word/numbering.xml", contentType: `${WML}.numbering+xml`, data: numbering }],
+			relationships: [{ id: "rIdN", type: "numbering", target: "numbering.xml" }]
+		})
+
+		expect(parts.get("styles.xml")).toMatch(/<text:list-level-style-number text:level="1" style:num-format="1"/u)
+		expect(parts.get("styles.xml")).not.toMatch(/text:start-value="0"/u)
+		expect(parts.get("content.xml")).toMatch(/<text:list-item text:start-value="0"><text:p[^>]*>Zero</u)
+		expect(features).toEqual([{ kind: "listFormat", count: 1 }])
+	})
+
+	it("writes link targets as URIs (RFC 3986), keeping a link that cannot be one as its text, counted", async () => {
+		const link = (id: string, text: string): string => `<w:hyperlink r:id="${id}"><w:r><w:t>${text}</w:t></w:r></w:hyperlink>`
+		const targets = [
+			"&quot;http://example.com/",
+			"http://example.com/a b/ü?q=[1]",
+			"#A#B",
+			"G:\\dir\\f.xls#R",
+			"mailto:",
+			"https://[::1]:80/x"
+		]
+		const { parts, features } = await converted(
+			spec(`<w:p>${targets.map((_, k) => link(`rIdT${String(k)}`, `t${String(k)}`)).join("")}</w:p>`, {
+				relationships: targets.map((target, k) => ({ id: `rIdT${String(k)}`, type: "hyperlink", target, external: true }))
+			})
+		)
+		const hrefs = [...(parts.get("content.xml") ?? "").matchAll(/<text:a [^>]*xlink:href="([^"]*)">(t\d)</gu)].map(match => [
+			match[2],
+			match[1]
+		])
+
+		expect(hrefs).toEqual([
+			["t0", "./%22http://example.com/"],
+			["t1", "http://example.com/a%20b/%C3%BC?q=%5B1%5D"],
+			["t2", "#A%23B"],
+			["t3", "file:///G:/dir/f.xls#R"],
+			["t5", "https://[::1]:80/x"]
+		])
+		expect(parts.get("content.xml")).toMatch(/>t4</u)
+		expect(features).toEqual([{ kind: "linkTarget", count: 1 }])
 	})
 })

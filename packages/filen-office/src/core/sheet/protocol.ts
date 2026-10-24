@@ -473,6 +473,9 @@ export interface SheetWorkbookInfo {
 	readonly date1904: boolean
 	readonly protection: SheetWorkbookProtection | null
 	readonly fileSharing: SheetFileSharing | null
+	// The workbook's own title (docProps/core.xml dc:title, an OpenDocument spreadsheet's meta.xml dc:title); absent:
+	// it names none (a PDF of it is titled from its file name).
+	readonly title?: string
 	// The file was password-protected: opened decrypted, and every save is sealed. verified: the Agile HMAC
 	// matched; unchecked: the file carries none.
 	readonly encrypted?: "verified" | "unchecked"
@@ -919,6 +922,8 @@ export interface SheetSealer {
 export interface SheetEncryption {
 	readonly sealer: SheetSealer
 	readonly integrity: "verified" | "unchecked"
+	// The file as it was read, sealed: an unedited save hands it out as it is.
+	readonly sealed?: ByteSource
 	release(): void
 }
 

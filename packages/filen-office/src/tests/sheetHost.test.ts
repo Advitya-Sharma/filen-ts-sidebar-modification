@@ -140,6 +140,37 @@ describe("worker sheet host", () => {
 })
 
 describe("password-protected workbooks", () => {
+	it("saves an unchanged workbook as the file's own bytes, an edit undone too", async () => {
+		const file = await encryptedOfficeFile(agileStreams(buildFixture(BASIC), "secret"))
+		const host = inThreadSheetHost()
+		const result = await host.open(file.slice(), { kind: "xlsx", slicing: IMMEDIATE }, () => undefined)
+
+		if (result.kind !== "needsPassword") throw new Error(result.kind)
+
+		const unlocked = await result.locked.unlock("secret")
+
+		if (!unlocked.ok) throw new Error(unlocked.reason)
+
+		const untouched = await unlocked.session.save()
+
+		if (!untouched.ok) throw new Error(untouched.message)
+
+		expect(untouched.bytes).toEqual(file)
+
+		const one = unlocked.info.sheets[0]!.id
+
+		expect((await unlocked.session.command({ type: "cells.set", sheet: one, cells: cells([[0, 0, "8"]]) })).ok).toBe(true)
+		expect((await unlocked.session.undo()).ok).toBe(true)
+
+		const undone = await unlocked.session.save()
+
+		if (!undone.ok) throw new Error(undone.message)
+
+		expect(undone.bytes).toEqual(file)
+		unlocked.session.close()
+		host.dispose()
+	})
+
 	it("asks for the password, unlocks where the session runs and seals every save", async () => {
 		const zip = buildFixture(BASIC)
 		const file = await encryptedOfficeFile(agileStreams(zip, "secret"))

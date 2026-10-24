@@ -4131,14 +4131,13 @@ class OdtWrite {
 						attribute => canonicalAttribute(tree.namespaces, child, attribute.name) === "xlink:href"
 					)
 
-					if (href !== undefined) {
-						const decoded = href.value
+					if (href !== undefined && !this.context.links.has(href.value)) {
+						const open = decodeUtf8(
+							tree.document.raw(child).subarray(0, tree.document.openEnd(child) - tree.document.start(child))
+						)
 
-						if (!this.context.links.has(decoded))
-							this.context.links.set(
-								decoded,
-								decodeUtf8(tree.document.raw(child).subarray(0, tree.document.openEnd(child) - tree.document.start(child)))
-							)
+						// An empty link's tag is self-closed; the link written anew wraps its text.
+						this.context.links.set(href.value, tree.document.isSelfClosing(child) ? open.replace(/\s*\/>$/u, ">") : open)
 					}
 				}
 

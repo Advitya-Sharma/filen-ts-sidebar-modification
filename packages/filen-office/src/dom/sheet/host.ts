@@ -147,14 +147,16 @@ function opened(result: XlsxSessionOpen, track: (session: SheetSessionApi) => vo
 	return result
 }
 
-// Opens a decrypted package; its key goes when the session closes (or at once when it does not open).
+// Opens a decrypted package; its key goes when the session closes (or at once when it does not open). `sealed`: the
+// file as read, which an unedited save hands out.
 async function openDecrypted(
 	document: DecryptedPackage,
+	sealed: ByteSource,
 	options: SheetOpenOptions,
 	onEvent: (event: SheetEvent) => void,
 	features: readonly SheetFeature<XlsxDocument>[]
 ): Promise<XlsxSessionOpen> {
-	const encryption = sheetEncryption(document)
+	const encryption = sheetEncryption(document, sealed)
 	const sessionOptions: SheetSessionOptions = { ...options, encryption }
 	let result: XlsxSessionOpen
 
@@ -173,6 +175,7 @@ async function openDecrypted(
 
 function lockedFile(
 	locked: LockedPackage,
+	sealed: ByteSource,
 	options: SheetOpenOptions,
 	onEvent: (event: SheetEvent) => void,
 	features: readonly SheetFeature<XlsxDocument>[],
@@ -204,7 +207,7 @@ function lockedFile(
 					return { ok: false, reason: "aborted" }
 				}
 
-				const session = await openDecrypted(result.document, options, onEvent, features)
+				const session = await openDecrypted(result.document, sealed, options, onEvent, features)
 
 				if (session.kind === "opened" && disposed) {
 					session.session.close()
@@ -257,9 +260,9 @@ export async function openWorkbook(
 		case "aborted":
 			return { kind: "aborted" }
 		case "needsPassword":
-			return { kind: "needsPassword", locked: lockedFile(protectedOpen.locked, options, onEvent, workbook, track) }
+			return { kind: "needsPassword", locked: lockedFile(protectedOpen.locked, source, options, onEvent, workbook, track) }
 		case "unlocked":
-			return opened(await openDecrypted(protectedOpen.document, options, onEvent, workbook), track)
+			return opened(await openDecrypted(protectedOpen.document, source, options, onEvent, workbook), track)
 		case "plain":
 			return opened(await openXlsxSession(source, options, onEvent, workbook), track)
 	}

@@ -1,5 +1,6 @@
 import { csvCellView } from "../csv/csvView"
-import { SHEET_MAX_COLS, SHEET_MAX_ROWS, type SheetCommandOf } from "../protocol"
+import { EN_US_LOCALE, localizedNumber } from "../input/locale"
+import { SHEET_MAX_COLS, SHEET_MAX_ROWS, type SheetCommandOf, type SheetLocale } from "../protocol"
 import { defineSheetFeature, type SheetChangeSink, type SheetHandled } from "../registry"
 import { TEXT_SHEET, type TextSheetDocument } from "../text"
 import { BLANK_SORT_VALUE, SortType, sortOrder, textSortKey, type SortValue } from "./order"
@@ -23,17 +24,17 @@ const ERRORS: ReadonlySet<string> = new Set([
 	"#CALC!"
 ])
 
-function valueOf(text: string, caseSensitive: boolean): SortValue {
+// A field that shows as a number is the number the session's locale reads it as (as the clipboard reads it): "1,5" is
+// 1.5 in de-DE and text in en-US, "50%" 0.5.
+function valueOf(text: string, caseSensitive: boolean, locale: SheetLocale): SortValue {
 	if (text === "") return BLANK_SORT_VALUE
 
 	const trimmed = text.trim()
 
 	if (csvCellView(text)?.numeric === true) {
-		// Excel reads "50%" as 0.5.
-		const percent = trimmed.endsWith("%")
-		const number = Number((percent ? trimmed.slice(0, -1) : trimmed).replace(/,/g, ""))
+		const number = localizedNumber(trimmed, locale)
 
-		if (Number.isFinite(number)) return { type: SortType.NUMBER, number: percent ? number / 100 : number, key: "" }
+		if (number !== null && Number.isFinite(number.value)) return { type: SortType.NUMBER, number: number.value, key: "" }
 	}
 
 	const upper = trimmed.toUpperCase()
@@ -88,11 +89,12 @@ export function sortText(document: TextSheetDocument, command: SheetCommandOf<"s
 	if (last <= first) return null
 
 	const count = last - first + 1
+	const locale = document.settings.locale ?? EN_US_LOCALE
 	const order = sortOrder(count, keys, (key, item) => {
 		const line = first + item
 		const index = keys[key]?.index ?? 0
 
-		return valueOf(rows ? (table[line]?.[index] ?? "") : (table[index]?.[line] ?? ""), caseSensitive)
+		return valueOf(rows ? (table[line]?.[index] ?? "") : (table[index]?.[line] ?? ""), caseSensitive, locale)
 	})
 	let moved = false
 

@@ -524,7 +524,12 @@ export function DocxEditView({
 	// Download as ▸ PDF: the document with its unsaved edits in the Final view (markup left out, the toast says so).
 	const pdf = useDocxPdfExport({
 		fileName: alt,
-		source: () => ({ kind: "editor", live: signal => opened.editing.pdfSource(signal), markup: reviewing && shownMode !== "none" }),
+		source: () => ({
+			kind: "editor",
+			live: signal => opened.editing.pdfSource(signal),
+			markup: reviewing && shownMode !== "none",
+			...(backend?.untranslated === undefined ? {} : { untranslated: backend.untranslated })
+		}),
 		encryptedFile
 	})
 	// Download as ▸ another format: the document as the editor holds it, unsaved edits included. A password-protected

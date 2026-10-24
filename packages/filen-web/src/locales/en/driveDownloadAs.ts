@@ -45,6 +45,9 @@ export const driveDownloadAs = {
 	driveDownloadAsConvertLegacyVersion: "Documents from Word 95 and earlier can't be converted",
 	/** Download as warning — the converted copy lacks something the file has (pictures, charts, macros, formatting the other format cannot hold…) */
 	driveDownloadAsConvertLossy: "Some of this file's content or formatting is not in the converted copy",
+	/** Download as warning — an Excel 97–2003 workbook (.xls) converted: only its cell values are in the copy, as the viewer's Save as .xlsx also says */
+	driveDownloadAsConvertValuesOnly:
+		"Only the values are in the converted copy: formulas become their results, and formatting, column widths, row heights and named ranges are not kept",
 	/** Download as warning — formulas the other spreadsheet format cannot express, written as the values they showed */
 	driveDownloadAsConvertFormulas_one: "{{count}} formula is kept only as its value",
 	driveDownloadAsConvertFormulas_other: "{{count}} formulas are kept only as their values",

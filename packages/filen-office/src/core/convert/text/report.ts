@@ -63,6 +63,15 @@ export type DocxToOdtLossyKind =
 	// header or footer): its text written where it is referenced, the notes it references in turn (past 16 deep, left out
 	// and counted once more).
 	| "nestedNote"
+	// Footnote or endnote numbering or placement ODF's notes configuration has no form for (a number format other than
+	// decimal, letters or roman numerals, numbering restarting per section, endnotes ending each section, settings
+	// differing by section): the nearest written.
+	| "noteSettings"
+	// An editing restriction, or part of one, an OpenDocument text cannot hold: comments-only editing, the lock on
+	// change tracking, a restriction's password, a range left editable.
+	| "documentProtection"
+	// A link whose target cannot be written as a URI (RFC 3986): kept as its text.
+	| "linkTarget"
 
 // What a standalone .docx of an ODT translation leaves out beyond the translation's own approximations.
 export type OdtToDocxLossyKind =
@@ -71,6 +80,13 @@ export type OdtToDocxLossyKind =
 	| "floatsOnAnchorPage"
 	// A comment's range marks inside another comment's text: the comment is anchored where its range starts.
 	| "commentRange"
+	// A line holding only as-char objects, which LibreOffice makes as tall as they are (Word adds the paragraph
+	// mark's font): the translation's object-line-height compatibility setting, which w:compatSetting cannot hold.
+	| "objectLineHeight"
+	// Paragraph borders and padding as LibreOffice lays them out (the translation's paragraph-padding setting): a start
+	// or end border inside the indents (Word draws it outside them), padding beside no line (Word leaves it out) and
+	// neighbours' borders joined.
+	| "paragraphPadding"
 
 export type TextLossyKind = OdtLossyReason | DocNotConvertedKind | RtfLossyKind | OdtToDocxLossyKind | DocxToOdtLossyKind
 

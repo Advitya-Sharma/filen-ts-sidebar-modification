@@ -30,12 +30,26 @@ function fieldEnd(text: string, from: number, separator: number): number {
 	return i
 }
 
+// How much a parse may build: past any of these it throws, before the rest is read (an empty record counts as one
+// cell).
+export interface CsvLimits {
+	readonly maxCells?: number
+	readonly maxRows?: number
+	readonly maxColumns?: number
+}
+
 // The records of `text`, separated by `delimiter` (one character).
-export function parseCsv(text: string, delimiter: string): string[][] {
+export function parseCsv(text: string, delimiter: string, limits: CsvLimits = {}): string[][] {
 	const separator = delimiter.charCodeAt(0)
+	const maxCells = limits.maxCells ?? Infinity
+	const maxRows = limits.maxRows ?? Infinity
+	const maxColumns = limits.maxColumns ?? Infinity
 	const rows: string[][] = []
 	const length = text.length
-	let row: string[] = []
+	// The record being read; each is kept as an array of its own size (a copy of these), not one grown by pushes.
+	const fields: string[] = []
+	let width = 0
+	let cellCount = 0
 	let i = 0
 
 	while (i < length) {
@@ -84,10 +98,16 @@ export function parseCsv(text: string, delimiter: string): string[][] {
 			i = end
 		}
 
-		row.push(field)
+		if (++cellCount > maxCells) throw new Error("spreadsheet: too many cells")
+
+		if (width === 0 && rows.length >= maxRows) throw new Error("spreadsheet: too many rows")
+
+		fields[width++] = field
+
+		if (width > maxColumns) throw new Error("spreadsheet: too many columns")
 
 		if (i >= length) {
-			rows.push(row)
+			rows.push(fields.slice(0, width))
 
 			return rows
 		}
@@ -97,8 +117,12 @@ export function parseCsv(text: string, delimiter: string): string[][] {
 		if (code === separator) {
 			// A separator ends the text: the record closes with an empty field.
 			if (i >= length) {
-				row.push("")
-				rows.push(row)
+				fields[width++] = ""
+
+				if (++cellCount > maxCells) throw new Error("spreadsheet: too many cells")
+				if (width > maxColumns) throw new Error("spreadsheet: too many columns")
+
+				rows.push(fields.slice(0, width))
 
 				return rows
 			}
@@ -110,8 +134,8 @@ export function parseCsv(text: string, delimiter: string): string[][] {
 			i++
 		}
 
-		rows.push(row)
-		row = []
+		rows.push(fields.slice(0, width))
+		width = 0
 	}
 
 	return rows
@@ -182,54 +206,98 @@ function countUnquoted(line: string, separator: number): number {
 	return count
 }
 
-// The separator a CSV file uses, which it does not say: of comma, semicolon, tab and bar, the one found the
-// same number of times on the most of the first ten lines (then the most often per line), a comma when none
-// is found. Excel itself takes its locale's list separator.
-export function detectDelimiter(text: string): string {
+// How each separator found in the first ten lines is spread: on how many lines it is found its most common number
+// of times (the first line's), and that number.
+function delimiterScores(text: string): { delimiter: string; lines: number; mode: number }[] {
 	const lines = sampleLines(text)
-	let best = ","
-	let bestScore = -1
+	const scores: { delimiter: string; lines: number; mode: number }[] = []
 
 	for (const delimiter of DELIMITERS) {
 		const separator = delimiter.charCodeAt(0)
 		const counts = lines.map(line => countUnquoted(line, separator)).filter(count => count > 0)
 		const mode = counts[0]
 
-		if (mode === undefined) {
-			continue
-		}
-
-		const score = counts.filter(count => count === mode).length * 1000 + mode
-
-		if (score > bestScore) {
-			bestScore = score
-			best = delimiter
-		}
+		if (mode !== undefined) scores.push({ delimiter, lines: counts.filter(count => count === mode).length, mode })
 	}
 
-	return best
+	return scores
 }
 
-// Records as text: a field is quoted only when it holds the separator, a quote or a line end, its quotes
-// doubled. Records are joined by `lineSeparator`, with none after the last.
-export function writeCsv(rows: readonly (readonly string[])[], delimiter: string, lineSeparator: string): string {
+// The separator a CSV file uses, which it does not say: of comma, semicolon, tab and bar, the one found the
+// same number of times on the most of the first ten lines, a comma when none is found. Excel itself takes its
+// locale's list separator: `preferred` (the session locale's) wins where another is found on as many lines; else
+// the one found the most often per line does.
+export function detectDelimiter(text: string, preferred?: string): string {
+	let best: { delimiter: string; lines: number; mode: number } | undefined
+
+	for (const score of delimiterScores(text)) {
+		if (
+			best === undefined ||
+			score.lines > best.lines ||
+			(score.lines === best.lines && best.delimiter !== preferred && (score.delimiter === preferred || score.mode > best.mode))
+		)
+			best = score
+	}
+
+	return best?.delimiter ?? ","
+}
+
+// Whether `text` detects as separated by `delimiter` whatever the locale prefers.
+export function detectsStably(text: string, delimiter: string): boolean {
+	const scores = delimiterScores(text)
+	const own = scores.find(score => score.delimiter === delimiter)
+
+	if (own === undefined) return scores.length === 0 && delimiter === ","
+
+	return scores.every(score => score === own || score.lines < own.lines)
+}
+
+// Records as text: a field is quoted when it holds the separator, a quote or a line end, its quotes doubled; with
+// `stable`, also when it holds any other separator detectDelimiter weighs, so the text written detects as written.
+// Records are joined by `lineSeparator`, with none after the last.
+export function writeCsv(rows: readonly (readonly string[])[], delimiter: string, lineSeparator: string, stable = false): string {
 	const lines = new Array<string>(rows.length)
 
 	for (let r = 0; r < rows.length; r++) {
 		const row = rows[r] ?? []
 		const fields = new Array<string>(row.length)
 
-		for (let c = 0; c < row.length; c++) {
-			const value = row[c] ?? ""
-
-			fields[c] =
-				value.includes(delimiter) || value.includes('"') || value.includes("\n") || value.includes("\r")
-					? `"${value.replaceAll('"', '""')}"`
-					: value
-		}
+		for (let c = 0; c < row.length; c++) fields[c] = csvField(row[c] ?? "", delimiter, stable)
 
 		lines[r] = fields.join(delimiter)
 	}
 
 	return lines.join(lineSeparator)
+}
+
+const NEEDS_QUOTES = /["\r\n]/
+const NEEDS_QUOTES_STABLE = /["\r\n,;\t|]/
+
+// One field as writeCsv writes it.
+export function csvField(value: string, delimiter: string, stable: boolean): string {
+	return (stable ? NEEDS_QUOTES_STABLE : NEEDS_QUOTES).test(value) || value.includes(delimiter)
+		? `"${value.replaceAll('"', '""')}"`
+		: value
+}
+
+// The bytes `text` takes as UTF-8, as TextEncoder writes it (a lone surrogate as U+FFFD).
+export function utf8Length(text: string): number {
+	let length = 0
+
+	for (let i = 0; i < text.length; i++) {
+		const code = text.charCodeAt(i)
+
+		if (code < 0x80) {
+			length += 1
+		} else if (code < 0x800) {
+			length += 2
+		} else if (code >= 0xd800 && code <= 0xdbff && (text.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+			length += 4
+			i++
+		} else {
+			length += 3
+		}
+	}
+
+	return length
 }

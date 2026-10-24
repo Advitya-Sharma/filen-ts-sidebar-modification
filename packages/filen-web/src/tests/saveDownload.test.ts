@@ -18,6 +18,8 @@ import {
 	type SwDownloadStatus
 } from "@/lib/sw/protocol"
 import { asErrorDTO, plainErrorDTO } from "@/lib/sdk/errors"
+import { errorLabel } from "@/lib/i18n/errorLabel"
+import { errors } from "@/locales/en/errors"
 
 // saveDownload.ts keeps its SW-client-ready state in a module-level `let` (mirrors
 // lib/sw/register.ts) — every test that touches the sw path needs its own module instance, so
@@ -875,9 +877,16 @@ describe("a download the page streams through the service worker", () => {
 
 		const { assertSwControlled } = await freshModule()
 
-		expect(() => {
+		let thrown: unknown
+
+		try {
 			assertSwControlled()
-		}).toThrow("downloads need the page reloaded")
+		} catch (error) {
+			thrown = error
+		}
+
+		// Told in the user's words, wherever a download reports it (a drive download, Download as, an archive entry).
+		expect(errorLabel(thrown)).toBe(errors.DownloadNeedsReload)
 	})
 
 	it("tells whether streams can be transferred, probing once", async () => {

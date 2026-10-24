@@ -12,6 +12,7 @@ import {
 	type DocxToolbarSlotProps
 } from "@/features/preview/components/docxEditor.logic"
 import { DocxColorGrid } from "@/features/preview/components/docxFormatControls"
+import { useCommandMenuFocus } from "@/features/preview/components/docxInsert.logic"
 import { DocxRowsColumnsDialog } from "@/features/preview/components/docxFields"
 import { Button } from "@/components/ui/button"
 import {
@@ -60,7 +61,12 @@ const V_ALIGNS: readonly { value: DocxCellVAlign; label: PreviewKey }[] = [
 
 export function DocxTableMenu(props: DocxTableMenuProps) {
 	const { t } = useTranslation("preview")
-	const { snapshot, readOnly, execute, commands, requestInput } = props
+	const { snapshot, readOnly, commands, requestInput } = props
+	const focus = useCommandMenuFocus()
+	const execute = (command: DocxEditorCommand): void => {
+		props.execute(command)
+		focus.ran()
+	}
 	const table = snapshot?.context.table ?? null
 	const has = (type: DocxEditorCommandType): DocxToolbarCommand | undefined => commands.find(command => command.info.type === type)
 	const off = (type: DocxEditorCommandType): boolean => snapshot === undefined || readOnly || !snapshot.enabled[type]
@@ -74,6 +80,7 @@ export function DocxTableMenu(props: DocxTableMenuProps) {
 				onClick={() => {
 					if (type === "table.cell.split") {
 						requestInput(type)
+						focus.kept()
 					} else {
 						execute({ type } as DocxEditorCommand)
 					}
@@ -89,7 +96,7 @@ export function DocxTableMenu(props: DocxTableMenuProps) {
 	}
 
 	return (
-		<DropdownMenu>
+		<DropdownMenu onOpenChange={focus.opened}>
 			<DropdownMenuTrigger
 				render={
 					<Button
@@ -103,7 +110,10 @@ export function DocxTableMenu(props: DocxTableMenuProps) {
 					</Button>
 				}
 			/>
-			<DropdownMenuContent data-preview-surface>
+			<DropdownMenuContent
+				finalFocus={focus.finalFocus}
+				data-preview-surface
+			>
 				{GROUPS.map((group, index) => (
 					<Fragment key={group[0]}>
 						{index > 0 ? <DropdownMenuSeparator /> : null}

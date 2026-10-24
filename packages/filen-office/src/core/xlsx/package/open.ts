@@ -3,6 +3,7 @@ import { relationshipKind } from "../../docx/package"
 import { parseTheme, SCHEME_SLOTS } from "../../docx/theme/theme"
 import { isEncryptedContainer } from "../../encryption/index"
 import { OpcError, OpcPackage, ZipError, partKey, type ByteSource, type Relationships, type ZipOpenOptions } from "../../opc/index"
+import { coreTitle } from "../../opc/coreTitle"
 import type { SheetId, SheetKind, SheetOpenFailure } from "../../sheet/protocol"
 import { sliceClock, type SliceClock, type Slicing } from "../../slicing"
 import { parseXml, parseXmlSliced, XmlError, type XmlDocument } from "../../xml/index"
@@ -272,6 +273,8 @@ async function open(source: ByteSource, options: XlsxOpenOptions): Promise<XlsxO
 		main.type.startsWith("http://purl.oclc.org/ooxml/") ||
 		workbookRelationships.all.some(relationship => relationship.type.startsWith("http://purl.oclc.org/ooxml/"))
 
+	const title = await coreTitle(opc)
+
 	return {
 		ok: true,
 		workbook: new XlsxWorkbook({
@@ -293,7 +296,8 @@ async function open(source: ByteSource, options: XlsxOpenOptions): Promise<XlsxO
 			changes: new ChangeLog(name => parts.loadedRelationships(name)),
 			limits,
 			macros,
-			signatures: await signatureCount(opc, packageRelationships)
+			signatures: await signatureCount(opc, packageRelationships),
+			...(title === undefined ? {} : { title })
 		})
 	}
 }

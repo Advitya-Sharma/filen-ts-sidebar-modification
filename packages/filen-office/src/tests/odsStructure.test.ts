@@ -294,6 +294,8 @@ describe("ODS views, protection and print areas", () => {
 		const files = unzipSync(written)
 
 		expect(Object.keys(files)).toContain("settings.xml")
+		// config:name="ooo:view-settings" is a QName LibreOffice resolves: without the prefix it ignores the views.
+		expect(strFromU8(files["settings.xml"] ?? new Uint8Array(0))).toContain('xmlns:ooo="http://openoffice.org/2004/office"')
 		expect(strFromU8(files["META-INF/manifest.xml"] ?? new Uint8Array(0))).toContain('manifest:full-path="settings.xml"')
 		expect((await readBack(written)).document.model(0)?.view.frozen?.rows).toBe(2)
 		session.close()

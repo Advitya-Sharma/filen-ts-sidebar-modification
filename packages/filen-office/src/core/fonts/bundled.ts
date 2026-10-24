@@ -13,13 +13,14 @@ export interface BundledFace {
 	readonly metrics: VerticalMetrics
 }
 
-// Vertical metrics of an original font, from a project built to reproduce them.
+// Vertical metrics of an original font: from a project built to reproduce them, or read once from the original's
+// own tables and recorded as numbers (assets/fonts/manifest.json measuredLineMetrics).
 export interface OriginalMetrics {
 	readonly source: string
 	readonly metrics: VerticalMetrics
 }
 
-// Line metrics for a document's family name. "original": the original font's are published; "calibrated":
+// Line metrics for a document's family name. "original": the original font's own; "calibrated":
 // derived from page breaks Word recorded in public documents (no font file is read); "substitute": neither,
 // so layout uses what the substitute draws with.
 export type LineMetricsEntry = ({ readonly basis: "original" | "calibrated" } & OriginalMetrics) | { readonly basis: "substitute" }

@@ -58,8 +58,9 @@ const FAUX_SHEAR = -0.21
 const MAX_HEADING = 6
 
 // Refused or approximated content, counted per kind for the export's report. shaping: text runs drawn without
-// their font's layout tables (the font asked for more work than the shaping limits allow).
-export type DocxPdfRefusal = "image" | "placeholder" | "link" | "shaping"
+// their font's layout tables (the font asked for more work than the shaping limits allow). untranslated: what the
+// source file shows that the document laid out never held (an RTF's equations, shapes, form fields...).
+export type DocxPdfRefusal = "image" | "placeholder" | "link" | "shaping" | "untranslated"
 
 export interface PagePaintContext {
 	readonly writer: PdfWriter

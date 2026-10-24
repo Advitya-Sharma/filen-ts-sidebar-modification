@@ -33,12 +33,14 @@ export function openProtectedWorkbook(source: ByteSource, signal?: SheetAbortSig
 }
 
 // What a session opened on a package unlocked in its own realm seals with; release drops the key and the package.
-export function sheetEncryption(document: DecryptedPackage): SheetEncryption {
+// `sealed`: the file as read, which an unedited save hands out.
+export function sheetEncryption(document: DecryptedPackage, sealed?: ByteSource): SheetEncryption {
 	const held = packageSealer(document.key)
 
 	return {
 		sealer: held.sealer,
 		integrity: document.integrity,
+		...(sealed !== undefined && { sealed }),
 		release() {
 			held.release()
 			document.release()

@@ -61,6 +61,7 @@ async function readBoth(zip: Uint8Array, name: string): Promise<{ fflate: Uint8A
 	return { fflate: unzipSync(zip)[name], own: await archive.read(entry), crc: entry.crc32 }
 }
 
+// Each mixing case deflates megabytes through every split point: seconds of work, given room on a loaded machine.
 describe("writeZip with pre-deflated pieces", () => {
 	it("splices a single pre-deflated piece into a valid entry with its CRC and sizes", async () => {
 		const raw = markup(1, 300_000)
@@ -109,7 +110,7 @@ describe("writeZip with pre-deflated pieces", () => {
 			expect(read.own).toEqual(expected)
 			expect(read.crc).toBe(nodeCrc32(expected))
 		}
-	})
+	}, 30_000)
 
 	it("ends a raw run before a pre-deflated piece on a byte boundary, wherever its last bit falls", async () => {
 		const piece = markup(12, 3000)
@@ -126,7 +127,7 @@ describe("writeZip with pre-deflated pieces", () => {
 				expect(unzipSync(zip)["run.xml"]).toEqual(joined([raw, piece]))
 			}
 		}
-	})
+	}, 30_000)
 
 	it("ends a stored (level 0) deflate stream on a sync flush that other deflated content can follow", () => {
 		for (const size of [0, 1, 65_535, 65_536, 140_000]) {

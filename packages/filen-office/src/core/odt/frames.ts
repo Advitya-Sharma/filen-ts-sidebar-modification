@@ -55,6 +55,8 @@ interface Placement {
 	readonly description: string
 	readonly zIndex: number
 	readonly rotation: number
+	// How far the drawn outline reaches past the extent (half a stroke), for wrapping.
+	readonly reach?: number
 }
 
 function colorOf(value: string | undefined): string | undefined {
@@ -102,6 +104,8 @@ export class Frames {
 	readonly kinds = new Map<string, ReturnType<typeof imageKind>>()
 	readonly media: MediaReference[] = []
 	private readonly mediaParts = new Map<string, string>()
+	// While an as-char group is translated: its members' placements and graphics, for one group drawing.
+	private members: { readonly placement: Placement; readonly graphic: string }[] | undefined
 
 	constructor(translator: Translator) {
 		this.translator = translator
@@ -116,9 +120,13 @@ export class Frames {
 			switch (name) {
 				case "draw:frame":
 					return this.frame(node, context)
-				case "draw:a":
-				case "draw:g": {
-					if (name === "draw:g") translator.lossy("shapeApproximated")
+				case "draw:g":
+				case "draw:a": {
+					if (name === "draw:g" && this.members === undefined) {
+						if (translator.attributes(node).get("text:anchor-type") === "as-char") return this.group(node)
+
+						translator.lossy("shapeApproximated")
+					}
 
 					let out = ""
 
@@ -202,15 +210,70 @@ export class Frames {
 		}
 	}
 
-	// The w:drawing for a graphic in its placement, as a run.
+	// An as-char group (Part 3 §10.3.15 draw:g) as one character: an inline WordprocessingML group (wpg:wgp) of its
+	// members, as large as their bounds; a nested group's members join it.
+	private group(node: number): string {
+		const translator = this.translator
+		const members: { readonly placement: Placement; readonly graphic: string }[] = []
+
+		this.members = members
+		translator.enter()
+
+		try {
+			for (
+				let child = translator.document.firstChildElement(node);
+				child >= 0;
+				child = translator.document.nextSiblingElement(child)
+			) {
+				this.translate(child, "paragraph")
+			}
+		} finally {
+			translator.leave()
+			this.members = undefined
+		}
+
+		if (members.length === 0) return ""
+
+		const left = Math.min(...members.map(member => member.placement.x))
+		const top = Math.min(...members.map(member => member.placement.y))
+		const right = Math.max(...members.map(member => member.placement.x + member.placement.width))
+		const bottom = Math.max(...members.map(member => member.placement.y + member.placement.height))
+		const x = emu(left)
+		const y = emu(top)
+		const cx = Math.max(0, emu(right - left))
+		const cy = Math.max(0, emu(bottom - top))
+		const children = members.map(member => groupMember(member.graphic, emu(member.placement.x), emu(member.placement.y))).join("")
+		const attributes = translator.attributes(node)
+		const placement = {
+			...this.placement(node, attributes, "paragraph"),
+			x: left,
+			y: top,
+			width: right - left,
+			height: bottom - top
+		}
+
+		return this.drawing(
+			placement,
+			`<a:graphic><a:graphicData uri="${WPG}"><wpg:wgp xmlns:wpg="${WPG}"><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x="${x}" y="${y}"/><a:ext cx="${cx}" cy="${cy}"/><a:chOff x="${x}" y="${y}"/><a:chExt cx="${cx}" cy="${cy}"/></a:xfrm></wpg:grpSpPr>${children}</wpg:wgp></a:graphicData></a:graphic>`
+		)
+	}
+
+	// The w:drawing for a graphic in its placement, as a run (in a group, a member of it).
 	private drawing(placement: Placement, graphic: string): string {
+		if (this.members !== undefined) {
+			this.members.push({ placement, graphic })
+
+			return ""
+		}
+
 		const translator = this.translator
 		const id = translator.id()
 		const cx = emu(placement.width)
 		const cy = emu(placement.height)
 		const docPr = `<wp:docPr id="${id}" name="${esc(placement.name || `Frame ${id}`)}"${placement.description === "" ? "" : ` descr="${esc(placement.description)}"`}/>`
 		const properties = placement.graphic.attributes
-		const margin = (side: string): number => Math.max(0, emu(parseLength(properties.get(`fo:margin-${side}`)) ?? 0))
+		const margin = (side: string): number =>
+			Math.max(0, emu((parseLength(properties.get(`fo:margin-${side}`)) ?? 0) + (placement.reach ?? 0)))
 
 		if (placement.anchorType === "as-char") {
 			return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/>${docPr}${graphic}</wp:inline></w:drawing></w:r>`
@@ -466,7 +529,18 @@ export class Frames {
 					(parseLength(properties.get("fo:padding-left")) ?? 0) -
 					(parseLength(properties.get("fo:padding-right")) ?? 0)
 			)
-			const markup = translator.story(textNode, inner)
+			// Drawings in a group member's text are that text's, not the group's.
+			const members = this.members
+
+			this.members = undefined
+
+			let markup: string
+
+			try {
+				markup = translator.story(textNode, inner)
+			} finally {
+				this.members = members
+			}
 
 			text = `<wps:txbx><w:txbxContent>${markup}</w:txbxContent></wps:txbx>`
 		}
@@ -655,8 +729,6 @@ export class Frames {
 				translator.lossy("shapeApproximated")
 		}
 
-		if (paths !== undefined) geometry = customGeometry({ ...viewBox, paths }, mirrorX, mirrorY)
-
 		// Text inside the shape (text:p, text:list children).
 		const hasText = (() => {
 			for (let child = document.firstChildElement(node); child >= 0; child = document.nextSiblingElement(child)) {
@@ -667,6 +739,27 @@ export class Frames {
 
 			return false
 		})()
+
+		if (paths !== undefined) {
+			// LibreOffice wraps text around what a shape draws, its path and stroke, not its frame (measured): an
+			// anchored shape without text or rotation is placed as its path's bounds.
+			const drawn =
+				hasText || placement.rotation !== 0 || placement.anchorType === "as-char"
+					? undefined
+					: drawnBounds(paths, viewBox, placement, mirrorX, mirrorY)
+
+			if (drawn !== undefined) {
+				placement = { ...placement, ...drawn.placement }
+				viewBox = drawn.viewBox
+			}
+
+			const stroke = placement.graphic.attributes.get("draw:stroke")
+
+			if (stroke !== undefined && stroke !== "none" && placement.anchorType !== "as-char")
+				placement = { ...placement, reach: (parseLength(placement.graphic.attributes.get("svg:stroke-width")) ?? 0) / 2 }
+
+			geometry = customGeometry({ ...viewBox, paths }, mirrorX, mirrorY)
+		}
 
 		return this.drawing(placement, this.shapeGraphic(placement, geometry, hasText ? node : -1, false, textPath ? "text" : "own"))
 	}
@@ -687,6 +780,83 @@ function cropped(clip: string | undefined): boolean {
 	if (sides?.length !== 4) return true
 
 	return sides.some(side => side !== "auto" && parseLength(side) !== 0)
+}
+
+// The bounds of what `paths` draw, as a placement within `placement` and the view box they fill; undefined when
+// they draw nothing.
+function drawnBounds(
+	paths: readonly SubPath[],
+	viewBox: { left: number; top: number; width: number; height: number },
+	placement: Placement,
+	mirrorX: boolean,
+	mirrorY: boolean
+):
+	| {
+			readonly placement: { readonly x: number; readonly y: number; readonly width: number; readonly height: number }
+			readonly viewBox: { left: number; top: number; width: number; height: number }
+	  }
+	| undefined {
+	let left = Infinity
+	let top = Infinity
+	let right = -Infinity
+	let bottom = -Infinity
+	const add = (x: number, y: number): void => {
+		left = Math.min(left, x)
+		top = Math.min(top, y)
+		right = Math.max(right, x)
+		bottom = Math.max(bottom, y)
+	}
+
+	for (const path of paths) {
+		if (!path.fill && !path.stroke) continue
+
+		for (const segment of path.segments) {
+			if (segment.kind === "Z") continue
+
+			// A curve stays inside its control points.
+			if (segment.kind === "C") {
+				add(segment.x1, segment.y1)
+				add(segment.x2, segment.y2)
+			}
+
+			add(segment.x, segment.y)
+		}
+	}
+
+	if (!Number.isFinite(left) || !Number.isFinite(top)) return undefined
+
+	const clamp = (value: number): number => Math.min(1, Math.max(0, value))
+	let x0 = clamp((left - viewBox.left) / viewBox.width)
+	let x1 = clamp((right - viewBox.left) / viewBox.width)
+	let y0 = clamp((top - viewBox.top) / viewBox.height)
+	let y1 = clamp((bottom - viewBox.top) / viewBox.height)
+
+	if (mirrorX) [x0, x1] = [1 - x1, 1 - x0]
+	if (mirrorY) [y0, y1] = [1 - y1, 1 - y0]
+
+	return {
+		placement: {
+			x: placement.x + x0 * placement.width,
+			y: placement.y + y0 * placement.height,
+			width: (x1 - x0) * placement.width,
+			height: (y1 - y0) * placement.height
+		},
+		viewBox: {
+			left: Math.max(left, viewBox.left),
+			top: Math.max(top, viewBox.top),
+			width: Math.max(Math.min(right, viewBox.left + viewBox.width) - Math.max(left, viewBox.left), 1e-6),
+			height: Math.max(Math.min(bottom, viewBox.top + viewBox.height) - Math.max(top, viewBox.top), 1e-6)
+		}
+	}
+}
+
+const WPG = "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
+
+// A member's graphic (a:graphic around one pic:pic or wps:wsp at offset 0) as a child of a group at (x, y) EMU.
+function groupMember(graphic: string, x: number, y: number): string {
+	const inner = graphic.replace(/^<a:graphic><a:graphicData uri="[^"]*">/u, "").replace(/<\/a:graphicData><\/a:graphic>$/u, "")
+
+	return inner.replace('<a:off x="0" y="0"/>', `<a:off x="${x}" y="${y}"/>`)
 }
 
 function viewBoxOf(value: string | undefined, placement: Placement): { left: number; top: number; width: number; height: number } {

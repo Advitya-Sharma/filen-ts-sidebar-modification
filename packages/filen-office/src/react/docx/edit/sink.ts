@@ -1,4 +1,4 @@
-import type { Node } from "prosemirror-model"
+import type { Mark, Node } from "prosemirror-model"
 import { Plugin, type EditorState, type Transaction } from "prosemirror-state"
 import { EditorView, type NodeView, type NodeViewConstructor } from "prosemirror-view"
 import { docxSchema } from "../../../core/docx/edit/index"
@@ -29,6 +29,7 @@ import {
 	symbolText,
 	writeClipboardEvent
 } from "./clipboard"
+import { composedFormatting, deleteBeforeComposition, deleteSelectionKey, inputTransaction, selectionFormatting } from "./input"
 import {
 	blockIndex,
 	compositionFrom,
@@ -204,6 +205,8 @@ export class EditSink {
 	private compositionStart = -1
 	// The text being composed (the last compositionupdate's).
 	private compositionText = ""
+	// What text composed over a selection takes (selectionFormatting), until the composition ends.
+	private composeFormatting: readonly Mark[] | undefined = undefined
 	private dispatching = false
 	private readOnlyOption: boolean
 	private readOnlyShown: boolean
@@ -265,8 +268,8 @@ export class EditSink {
 					return view.editable ? false : this.readOnlyKeyDown(view, event)
 				},
 				// Undo and redo from outside the keyboard (Edit menu, shake, a soft keyboard's key): the editor's,
-				// in its order across stories.
-				beforeinput: (_view, event) => this.historyInput(event),
+				// in its order across stories. Typing over a selection and word or line deletions: transactions.
+				beforeinput: (view, event) => this.historyInput(event) || this.editInput(view, event),
 				// The document's selection, not the view's (whose gaps hold no content).
 				copy: (_view, event) => this.copyEvent(event, false),
 				cut: (_view, event) => this.copyEvent(event, true),
@@ -281,6 +284,13 @@ export class EditSink {
 					return false
 				},
 				compositionstart: view => {
+					// Composed over a selection: the selection goes first, as a transaction.
+					if (!this.readOnly) {
+						this.readSelection(view)
+						this.composeFormatting = selectionFormatting(this.editor.state)
+						this.run(deleteBeforeComposition(this.editor.state))
+					}
+
 					this.compositionStart = view.state.selection.from
 					this.compositionText = ""
 
@@ -291,8 +301,9 @@ export class EditSink {
 
 					return false
 				},
-				compositionend: view => {
+				compositionend: (view, event) => {
 					readComposition(view)
+					this.formatComposed(typeof event.data === "string" ? event.data : this.compositionText)
 					this.compositionStart = -1
 					this.compositionText = ""
 					this.editor.setComposition(undefined)
@@ -373,6 +384,12 @@ export class EditSink {
 
 		this.readOnlyShown = readOnly
 		this.view.setProps({})
+	}
+
+	// Before the view is taken out of the document (a host's layout cleanup, ahead of the removal, which blurs it
+	// in some browsers): focus it holds goes on in the view shown in its place.
+	releaseFocus(): void {
+		if (this.view.hasFocus()) handFocus(this.editor)
 	}
 
 	destroy(): void {
@@ -566,6 +583,44 @@ export class EditSink {
 		return true
 	}
 
+	// A composition that started over a selection ends: its text gets the formatting it takes, wherever the
+	// browser composed it (it composes into the run its selection ended in).
+	private formatComposed(text: string): void {
+		const formatting = this.composeFormatting
+
+		this.composeFormatting = undefined
+
+		if (formatting === undefined || this.compositionStart < 0 || this.readOnly) return
+
+		const state = this.editor.state
+		const from = compositionFrom(state.doc, state.selection.head, this.compositionStart, text)
+
+		this.run(composedFormatting(state, from, text, formatting))
+	}
+
+	// beforeinput that would edit the DOM across runs (see inputTransaction): made on the session's state.
+	private editInput(view: EditorView, event: InputEvent): boolean {
+		if (this.readOnly || !event.cancelable) return false
+
+		this.readSelection(view)
+
+		const tr = inputTransaction(view, this.editor.state, event)
+
+		if (tr === undefined) return false
+
+		event.preventDefault()
+
+		return this.run(tr)
+	}
+
+	// A selection the browser made that the view has not read yet (a key's selectionchange still queued), taken
+	// into the session before an edit replaces it.
+	private readSelection(view: EditorView): void {
+		const moved = unreadSelection(view)
+
+		if (moved !== undefined) view.dispatch(moved)
+	}
+
 	// A copy or cut writes the document's selection, as ProseMirror's own would write the view's.
 	private copyEvent(event: ClipboardEvent, cut: boolean): boolean {
 		const content = event.clipboardData === null ? undefined : this.clipboardContent()
@@ -740,7 +795,9 @@ export class EditSink {
 				// After a section break: the break goes (the sections merge), as Word deletes it.
 				if (deletesBreakBefore(this.editor)) return true
 
-				return this.run(joinBackward(state))
+				this.readSelection(view)
+
+				return this.run(deleteSelectionKey(editor.state) ?? joinBackward(editor.state))
 			case "Delete":
 				// Shift+Delete cuts.
 				if (readOnly || extend) return false
@@ -751,7 +808,9 @@ export class EditSink {
 					return true
 				}
 
-				return this.run(joinForward(state))
+				this.readSelection(view)
+
+				return this.run(deleteSelectionKey(editor.state) ?? joinForward(editor.state))
 			case "Escape":
 				// The format painter goes first; then out of a header, footer or note, back to the body.
 				if (editor.painter !== undefined) {

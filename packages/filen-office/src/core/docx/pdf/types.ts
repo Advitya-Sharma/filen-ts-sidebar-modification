@@ -161,7 +161,7 @@ export interface DocxPdfDocument {
 	// Bookmarks (internal link targets) by name.
 	readonly destinations: ReadonlyMap<string, { readonly page: number; readonly y: number }>
 	readonly outline: readonly DocxPdfOutlineEntry[]
-	// BCP 47 language of the document's text, and its title.
+	// BCP 47 language of the document's text, and its title (its own, else its file name's).
 	readonly lang: string | undefined
-	readonly title: string | undefined
+	readonly title: string
 }

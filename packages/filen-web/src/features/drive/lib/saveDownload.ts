@@ -2,7 +2,7 @@ import type { AnyFile, AnyItemWithContext } from "@filen/sdk-rs"
 import { isAbortError } from "@filen/shared"
 import { sdkApi } from "@/lib/sdk/client"
 import { getAppliedTransferConfig } from "@/features/settings/lib/transferConfig"
-import { ErrorWithDTO } from "@/lib/sdk/errors"
+import { DOWNLOAD_NEEDS_RELOAD, ErrorWithDTO, plainErrorDTO } from "@/lib/sdk/errors"
 import { allowNextUnload } from "@/lib/unloadGuard"
 import { pipeWorkerToSink } from "@/lib/pipeWorkerToSink"
 import {
@@ -343,7 +343,7 @@ export function holdWorkerAlive(fallback: ServiceWorker | null): () => void {
 // answers it with the app itself in place of a file.
 export function assertSwControlled(): void {
 	if (navigator.serviceWorker.controller === null) {
-		throw new Error("downloads need the page reloaded")
+		throw new ErrorWithDTO(plainErrorDTO("downloads need the page reloaded", DOWNLOAD_NEEDS_RELOAD))
 	}
 }
 

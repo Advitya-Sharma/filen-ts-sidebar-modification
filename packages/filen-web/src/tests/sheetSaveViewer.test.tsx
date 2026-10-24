@@ -262,7 +262,27 @@ describe("saving on the spreadsheet viewer", () => {
 		expect(screen.queryByRole("menuitem", { name: preview.previewSpreadsheetSaveAsXlsx })).toBeNull()
 	})
 
-	it("offers no download (PDF or CSV) of a file that may not be downloaded", async () => {
+	it("prints the sheet on show with Mod+P and the file menu's Print… when the file may be downloaded", async () => {
+		hooks.bytes = await budget()
+
+		render(
+			<SheetViewer
+				item={file("b.xlsx")}
+				documentKey="k-print"
+				alt="b.xlsx"
+				editable
+				saveRef={{ current: null }}
+			/>
+		)
+
+		await screen.findByRole("textbox", { name: preview.previewSpreadsheetCellContents })
+		await openFileMenu()
+		await screen.findByRole("menuitem", { name: preview.previewSheetPrintMenu })
+		fireEvent.keyDown(screen.getByRole("grid"), { key: "p", code: "KeyP", ctrlKey: true })
+		await screen.findByRole("dialog", { name: preview.previewSheetPrint })
+	})
+
+	it("offers no download, export or print of a file that may not be downloaded", async () => {
 		hooks.bytes = await budget()
 
 		render(
@@ -278,9 +298,19 @@ describe("saving on the spreadsheet viewer", () => {
 		)
 
 		await screen.findByRole("textbox", { name: preview.previewSpreadsheetCellContents })
-		await openFileMenu()
-		await screen.findByRole("menuitem", { name: preview.previewSheetPrintMenu })
-		expect(screen.queryByRole("menuitem", { name: preview.previewSheetDownloadAs })).toBeNull()
+		// Nothing left to offer: no file menu at all (no Download as, PDF, CSV or Print…).
+		expect(screen.queryByRole("button", { name: preview.previewSheetFileMenu })).toBeNull()
+
+		const grid = screen.getByRole("grid")
+		const shortcut = new KeyboardEvent("keydown", { key: "p", code: "KeyP", ctrlKey: true, bubbles: true, cancelable: true })
+
+		await act(async () => {
+			grid.dispatchEvent(shortcut)
+			await new Promise(resolve => setTimeout(resolve, 50))
+		})
+		// Mod+P is taken (the browser's print of the page stays shut) and opens no print dialog.
+		expect(shortcut.defaultPrevented).toBe(true)
+		expect(screen.queryByRole("dialog", { name: preview.previewSheetPrint })).toBeNull()
 	})
 
 	it("keeps a password-protected workbook's cells sealed: no CSV is offered", async () => {

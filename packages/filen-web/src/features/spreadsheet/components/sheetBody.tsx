@@ -51,8 +51,7 @@ import { borderShortcut, setFormatCellsOpen } from "@/features/spreadsheet/toolb
 import { downloadSheetCsv } from "@/features/spreadsheet/save/sheetCsv"
 import { SheetFileMenu } from "@/features/spreadsheet/save/sheetFileMenu"
 import { useSheetPdfExport } from "@/features/spreadsheet/save/useSheetPdfExport"
-import { fileStem } from "@/features/spreadsheet/save/sheetSave.logic"
-import { formOf, pdfRequest, printRequests } from "@/features/spreadsheet/print/print.logic"
+import { formOf, pdfFile, pdfRequest, printRequests } from "@/features/spreadsheet/print/print.logic"
 import { sheetSettings } from "@/features/spreadsheet/print/printSettings"
 import { browserLanguage } from "@/features/spreadsheet/formulaBar/sheetLocale"
 import { usePreviewDownloadable } from "@/features/preview/lib/accessMode"
@@ -309,7 +308,7 @@ export function SheetBody({
 		offered: downloadable && grid.failed === null
 	})
 	const workbookOf = () => ({ kind, sheets: grid.sheets, date1904: model.date1904, showFormulas: grid.showFormulas })
-	const fileOf = () => ({ name: alt, title: fileStem(alt), lang: browserLanguage() })
+	const fileOf = () => pdfFile(alt, handle.info, browserLanguage())
 	const startPdf = pdf.start
 	const downloadPdf =
 		startPdf !== undefined
@@ -361,6 +360,7 @@ export function SheetBody({
 		model,
 		kind,
 		name: alt,
+		offered: downloadable,
 		canEdit,
 		run,
 		onSavePdf:

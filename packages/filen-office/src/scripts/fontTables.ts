@@ -11,7 +11,8 @@ import { sfntFromWoff2 } from "./woff2Tables"
 
 // Generates src/core/fonts/tables.generated.ts from assets/fonts: every bundled face is checked against its
 // recorded SHA-256 and its metrics are read from the file itself; line metrics of original fonts come only
-// from the metric sources the manifest names (downloaded and checked here, never shipped).
+// from the metric sources the manifest names (downloaded and checked here, never shipped) and the numbers it
+// records from an original's own tables.
 //
 //   pnpm run generate:fonts [--metric-source <downloaded archive>]
 
@@ -42,6 +43,20 @@ interface MetricSource {
 	originals: Record<string, string>
 }
 
+// Vertical metrics read once from the original font's own tables, recorded as numbers: the font may not be
+// redistributed, so nothing of it is read at generation time or shipped.
+interface MeasuredLineMetrics {
+	family: string
+	font: string
+	version: string
+	files: string
+	unitsPerEm: number
+	hhea: { ascender: number; descender: number; lineGap: number }
+	typo: { ascender: number; descender: number; lineGap: number }
+	win: { ascent: number; descent: number }
+	useTypoMetrics: boolean
+}
+
 // Line metrics of a family no font file describes, calibrated from Word's recorded page breaks.
 interface CalibratedLineMetrics {
 	family: string
@@ -55,6 +70,7 @@ interface CalibratedLineMetrics {
 export interface Manifest {
 	families: ManifestFamily[]
 	metricSources: MetricSource[]
+	measuredLineMetrics: MeasuredLineMetrics[]
 	calibratedLineMetrics: CalibratedLineMetrics[]
 }
 
@@ -151,6 +167,32 @@ export function lineMetricsTable(manifest: Manifest, archives: ReadonlyMap<strin
 				metrics: metricsOf(font)
 			})
 		}
+	}
+
+	for (const measured of manifest.measuredLineMetrics) {
+		const key = measured.family.toLowerCase()
+
+		if (!SUBSTITUTIONS.has(key)) throw new Error(`${measured.family} has no substitute`)
+		if (originals.has(key)) throw new Error(`${measured.family} has published metrics`)
+
+		const { hhea, typo, win } = measured
+
+		originals.set(key, {
+			basis: "original",
+			source: `${measured.font}, ${measured.version} (${measured.files}): head unitsPerEm, hhea, OS/2 typo and win values`,
+			metrics: {
+				unitsPerEm: measured.unitsPerEm,
+				hheaAscender: hhea.ascender,
+				hheaDescender: hhea.descender,
+				hheaLineGap: hhea.lineGap,
+				typoAscender: typo.ascender,
+				typoDescender: typo.descender,
+				typoLineGap: typo.lineGap,
+				winAscent: win.ascent,
+				winDescent: win.descent,
+				useTypoMetrics: measured.useTypoMetrics
+			}
+		})
 	}
 
 	for (const calibrated of manifest.calibratedLineMetrics) {

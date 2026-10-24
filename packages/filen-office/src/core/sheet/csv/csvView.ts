@@ -1,4 +1,4 @@
-import { detectDelimiter, parseCsv, writeCsv } from "./csvParse"
+import { detectDelimiter, detectsStably, parseCsv, writeCsv, type CsvLimits } from "./csvParse"
 import {
 	decodeUtf16,
 	decodeUtf8Strict,
@@ -22,8 +22,11 @@ import { MAX_COLUMNS, type CellView } from "../model/model"
 // silently reformatted.
 // `writable` is false when the source bytes hold a byte windows-1252 leaves undefined, or when they read
 // as confidently non-Western text — both cases where editing would show confusing mojibake.
+// `detected`: the separator was detected (a CSV), so a save that would detect as another one quotes every field
+// holding a separator the detection weighs, and the file reopens as it was written.
 export interface CsvFormat {
 	delimiter: string
+	detected: boolean
 	lineSeparator: "\r\n" | "\n" | "\r"
 	bom: boolean
 	trailingNewline: boolean
@@ -155,21 +158,24 @@ function detectLineSeparator(text: string): CsvFormat["lineSeparator"] {
 	return "\n"
 }
 
-export function parseCsvFile(bytes: Uint8Array, tabSeparated: boolean): { rows: string[][]; format: CsvFormat } {
+// `listSeparator`: the session locale's, which wins a tie between separators. Past `limits` (or the grid's last
+// column) it throws, as soon as the parse reaches them.
+export function parseCsvFile(
+	bytes: Uint8Array,
+	tabSeparated: boolean,
+	options: { readonly listSeparator?: string; readonly limits?: CsvLimits } = {}
+): { rows: string[][]; format: CsvFormat } {
 	const { text, bom, encoding, writable } = decodeCsv(bytes)
-	const delimiter = tabSeparated ? "\t" : text.length === 0 ? "," : detectDelimiter(text)
+	const delimiter = tabSeparated ? "\t" : text.length === 0 ? "," : detectDelimiter(text, options.listSeparator)
 	const lineSeparator = detectLineSeparator(text)
-	// Every value stays the text it was: a CSV's "007" or "1e5" is not a number until someone says so.
-	const rows = parseCsv(text, delimiter)
-
-	// Past the grid's last column, cells would take the keys of the next row's (cellKey).
-	if (rows.some(row => row.length > MAX_COLUMNS)) {
-		throw new Error("spreadsheet: too many columns")
-	}
+	const limits = options.limits ?? {}
+	// Every value stays the text it was: a CSV's "007" or "1e5" is not a number until someone says so. Past the
+	// grid's last column, cells would take the keys of the next row's (cellKey).
+	const rows = parseCsv(text, delimiter, { ...limits, maxColumns: Math.min(limits.maxColumns ?? MAX_COLUMNS, MAX_COLUMNS) })
 
 	return {
 		rows,
-		format: { delimiter, lineSeparator, bom, trailingNewline: /[\r\n]$/.test(text), encoding, writable }
+		format: { delimiter, detected: !tabSeparated, lineSeparator, bom, trailingNewline: /[\r\n]$/.test(text), encoding, writable }
 	}
 }
 
@@ -180,9 +186,12 @@ export function canEncodeWindows1252(text: string): boolean {
 }
 
 export function serializeCsv(rows: readonly (readonly string[])[], format: CsvFormat): Uint8Array {
-	// Only what the separator, a quote or a line end requires is quoted; a user's own data is never
-	// rewritten against formula injection (that is for exporting other people's data, not saving a file).
+	// Only what the separator, a quote or a line end requires is quoted; a user's own data is never rewritten against
+	// formula injection (that is for exporting other people's data, not saving a file). A CSV whose text would detect
+	// as another separator, in some locale, also quotes every field holding one (writeCsv's stable).
 	let text = writeCsv(rows, format.delimiter, format.lineSeparator)
+
+	if (format.detected && !detectsStably(text, format.delimiter)) text = writeCsv(rows, format.delimiter, format.lineSeparator, true)
 
 	if (format.trailingNewline && rows.length > 0) {
 		text += format.lineSeparator

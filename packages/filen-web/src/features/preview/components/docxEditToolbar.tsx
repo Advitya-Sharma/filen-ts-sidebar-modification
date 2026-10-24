@@ -58,6 +58,7 @@ import {
 } from "@/features/preview/components/docxEditor.logic"
 import { DocxDrawingMenu, DocxDrawingOverflow } from "@/features/preview/components/docxDrawingMenu"
 import { DocxFormatControls } from "@/features/preview/components/docxFormatControls"
+import { useCommandMenuFocus } from "@/features/preview/components/docxInsert.logic"
 import { DocxInsertMenu } from "@/features/preview/components/docxInsertMenu"
 import { DocxReflowMenuItem } from "@/features/preview/components/docxReflowSurface"
 import { reflowCommands } from "@/features/preview/components/docxReflow.logic"
@@ -263,6 +264,7 @@ function StylePicker({
 	execute: (command: DocxEditorCommand) => void
 }) {
 	const { t } = useTranslation("preview")
+	const focus = useCommandMenuFocus()
 	const value = style ?? STYLE_MIXED
 	const labelOf = (option: DocxParagraphStyle): string => {
 		const label = styleLabel(option)
@@ -283,11 +285,14 @@ function StylePicker({
 			items={items}
 			value={shown}
 			disabled={disabled}
+			onOpenChange={focus.opened}
+			onOpenChangeComplete={focus.settled}
 			onValueChange={next => {
 				const chosen = styles.find(option => option === next)
 
 				if (chosen !== undefined) {
 					execute({ type: "style.set", style: chosen })
+					focus.ran()
 				}
 			}}
 		>
@@ -424,7 +429,13 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 	const formatShown = KEPT_FORMAT_BUTTONS + fit.format
 	const lineSpacing = single(snapshot?.values.lineSpacing ?? null)
 	const percent = Math.round(props.zoom * 100)
-	const commandProps = { snapshot, readOnly, execute }
+	// The More tools menu gives focus back to the document once an item ran (see useCommandMenuFocus).
+	const moreFocus = useCommandMenuFocus()
+	const moreExecute = (command: DocxEditorCommand): void => {
+		execute(command)
+		moreFocus.ran()
+	}
+	const commandProps = { snapshot, readOnly, execute: moreExecute }
 	const commandOff = (type: DocxEditorCommandInfo["type"]): boolean => snapshot === undefined || readOnly || !snapshot.enabled[type]
 	const slotProps = (commands: readonly DocxToolbarCommand[]): DocxToolbarSlotProps => ({
 		// Mobile view shows no headers or footers: it does not offer editing them.
@@ -574,7 +585,10 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 					</>
 				)}
 			</div>
-			<DropdownMenu>
+			<DropdownMenu
+				onOpenChange={moreFocus.opened}
+				onOpenChangeComplete={moreFocus.closed}
+			>
 				<Tooltip>
 					<TooltipTrigger
 						render={
@@ -585,6 +599,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 										size="icon-sm"
 										aria-label={t("previewDocxMoreTools")}
 										className="shrink-0"
+										onMouseDown={keepFocus}
 									>
 										<MoreHorizontalIcon />
 									</Button>
@@ -596,6 +611,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 				</Tooltip>
 				<DropdownMenuContent
 					align="end"
+					finalFocus={moreFocus.finalFocus}
 					data-preview-surface
 				>
 					{!find.open && fit.picture < pictureItems.length ? (
@@ -613,7 +629,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 								<DropdownMenuRadioGroup
 									value={snapshot?.paragraph.style ?? ""}
 									onValueChange={(style: DocxParagraphStyle) => {
-										execute({ type: "style.set", style })
+										moreExecute({ type: "style.set", style })
 									}}
 								>
 									{props.styles.map(option => {
@@ -687,7 +703,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 								<DropdownMenuRadioGroup
 									value={lineSpacing?.rule === "auto" ? String(lineSpacing.value) : ""}
 									onValueChange={(value: string) => {
-										execute({ type: "paragraph.lineSpacing", rule: "auto", value: Number(value) })
+										moreExecute({ type: "paragraph.lineSpacing", rule: "auto", value: Number(value) })
 									}}
 								>
 									{LINE_SPACINGS.map(value => (
@@ -711,6 +727,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 							disabled={commandOff("paragraph.indent") && commandOff("paragraph.spacing")}
 							onClick={() => {
 								props.requestInput("paragraph.indent")
+								moreFocus.kept()
 							}}
 						>
 							{t("previewDocxParagraphAction")}
@@ -721,6 +738,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 							disabled={commandOff("page.setup")}
 							onClick={() => {
 								props.requestInput("page.setup")
+								moreFocus.kept()
 							}}
 						>
 							{t("previewDocxPageSetupAction")}
@@ -731,7 +749,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 						checked={props.fieldCodes}
 						disabled={snapshot?.enabled["view.fieldCodes"] !== true}
 						onCheckedChange={() => {
-							execute({ type: "view.fieldCodes" })
+							moreExecute({ type: "view.fieldCodes" })
 						}}
 					>
 						{t("previewDocxShowFieldCodes")}
@@ -744,6 +762,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 									value={props.markup}
 									onValueChange={(mode: DocxMarkupMode) => {
 										props.onMarkupChange(mode)
+										moreFocus.ran()
 									}}
 								>
 									{DOCX_MARKUP_MODES.map(info => (
@@ -766,6 +785,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 								closeOnClick={false}
 								onClick={() => {
 									props.onZoom("in")
+									moreFocus.kept()
 								}}
 							>
 								{t("previewDocxZoomInAction")}
@@ -774,6 +794,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 								closeOnClick={false}
 								onClick={() => {
 									props.onZoom("out")
+									moreFocus.kept()
 								}}
 							>
 								{t("previewDocxZoomOutAction")}
@@ -781,6 +802,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 							<DropdownMenuItem
 								onClick={() => {
 									props.onZoom("fit")
+									moreFocus.kept()
 								}}
 							>
 								{t("previewDocxFitWidth")}
@@ -791,7 +813,11 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 						<DocxReflowMenuItem
 							{...slotProps(VIEW_SLOT)}
 							reflow={props.reflow}
-							onReflowChange={props.onReflowChange}
+							onReflowChange={checked => {
+								moreFocus.afterClose(() => {
+									props.onReflowChange(checked)
+								})
+							}}
 						/>
 					) : null}
 					<DropdownMenuSeparator />
@@ -800,6 +826,7 @@ export function DocxEditToolbar(props: DocxEditToolbarProps) {
 						checked={props.autosave}
 						onCheckedChange={checked => {
 							props.onAutosaveChange(checked)
+							moreFocus.kept()
 						}}
 					>
 						{t("previewDocxAutosave")}

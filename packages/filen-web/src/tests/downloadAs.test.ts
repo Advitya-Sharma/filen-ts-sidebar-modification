@@ -483,13 +483,14 @@ describe("Download as ▸ PDF of documents", () => {
 
 	it("an RTF document is read into its package in the document worker first", async () => {
 		const docx = ZIP.slice()
-		const document = { take: vi.fn(() => Promise.resolve(docx)), release: vi.fn() }
+		// One equation the package leaves out: the PDF's report counts it.
+		const document = { take: vi.fn(() => Promise.resolve(docx)), release: vi.fn(), untranslated: 1 }
 
 		mocks.docxRtf.open.mockResolvedValue({ kind: "opened", document })
 		await startDownloadAs([file("letter.rtf")], "pdf", CONTEXT)
 
 		expect(document.release).toHaveBeenCalledOnce()
-		expect(mocks.makeDocxPdf.mock.calls[0]?.[0]).toEqual({ kind: "file", bytes: docx, owned: true })
+		expect(mocks.makeDocxPdf.mock.calls[0]?.[0]).toEqual({ kind: "file", bytes: docx, owned: true, untranslated: 1 })
 	})
 })
 
@@ -984,10 +985,46 @@ describe("Download as ▸ another editable format", () => {
 		await startDownloadAs([file("book.ods")], "xlsx", CONTEXT)
 
 		expect(mocks.openSheet.mock.calls[0]?.[1]).toMatchObject({ kind: "ods" })
-		expect(opened.query).toHaveBeenCalledWith("saveAs.format", { format: "xlsx" }, { signal: expect.any(AbortSignal) as AbortSignal })
+		expect(opened.query).toHaveBeenCalledWith(
+			"saveAs.format",
+			{ format: "xlsx", language: browserLanguage() },
+			{ signal: expect.any(AbortSignal) as AbortSignal }
+		)
 		expect(opened.close).toHaveBeenCalledOnce()
 		expect((await downloaded())[0]).toBe("book.xlsx")
 		expect(mocks.toast.warning).toHaveBeenCalledWith("3 formulas are kept only as their values", { description: "book.ods" })
+	})
+
+	it("says an Excel 97–2003 workbook's copy holds its values alone, as Save as .xlsx does", async () => {
+		const opened = workbook({ ok: true, bytes: new TextEncoder().encode("xlsx"), lossy: [{ kind: "valuesOnly", count: 1 }] })
+
+		mocks.openSheet.mockResolvedValue({ kind: "opened", session: opened, info: {} })
+		await startDownloadAs([file("book.xls")], "xlsx", CONTEXT)
+
+		expect((await downloaded())[0]).toBe("book.xlsx")
+		expect(mocks.toast.warning).toHaveBeenCalledWith(
+			"Only the values are in the converted copy: formulas become their results, and formatting, column widths, row heights and named ranges are not kept",
+			{ description: "book.xls" }
+		)
+		expect(mocks.toast.warning).toHaveBeenCalledOnce()
+	})
+
+	it("converts to .ods in the user's language", async () => {
+		const languages = vi.spyOn(navigator, "languages", "get").mockReturnValue(["fr-FR"])
+		const opened = workbook({ ok: true, bytes: new TextEncoder().encode("ods"), lossy: [] })
+
+		try {
+			mocks.openSheet.mockResolvedValue({ kind: "opened", session: opened, info: {} })
+			await startDownloadAs([file("book.xlsx")], "ods", CONTEXT)
+
+			expect(opened.query).toHaveBeenCalledWith(
+				"saveAs.format",
+				{ format: "ods", language: "fr-FR" },
+				{ signal: expect.any(AbortSignal) as AbortSignal }
+			)
+		} finally {
+			languages.mockRestore()
+		}
 	})
 
 	it("downloads an .xls that is really a password-protected workbook package as its .xlsx, still protected", async () => {
@@ -1027,7 +1064,11 @@ describe("Download as ▸ another editable format", () => {
 		expect(mocks.openSheet.mock.calls.map(call => (call[1] as { kind: string }).kind)).toEqual(["csv", "xlsx"])
 		expect(text.query).toHaveBeenCalledWith("saveAs.cells", {}, { signal: expect.any(AbortSignal) as AbortSignal })
 		expect(mocks.textToXlsx).toHaveBeenCalledWith(new TextEncoder().encode("cells"), "data")
-		expect(made.query).toHaveBeenCalledWith("saveAs.format", { format: "ods" }, { signal: expect.any(AbortSignal) as AbortSignal })
+		expect(made.query).toHaveBeenCalledWith(
+			"saveAs.format",
+			{ format: "ods", language: browserLanguage() },
+			{ signal: expect.any(AbortSignal) as AbortSignal }
+		)
 		expect(text.close).toHaveBeenCalledOnce()
 		expect(made.close).toHaveBeenCalledOnce()
 		expect((await downloaded())[0]).toBe("data.ods")

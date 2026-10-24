@@ -1,5 +1,6 @@
 import { OdfPackage } from "../odf/package"
 import { readStyleSheet } from "../odf/load"
+import { metaTitle } from "../odf/meta"
 import { OdfStyleResolver } from "../odf/resolve"
 import { OpcPackage } from "../opc/package"
 import type { ByteSource } from "../opc/io"
@@ -134,6 +135,7 @@ async function open(source: ByteSource, options: OdsOpenOptions): Promise<OdsOpe
 	}
 
 	const settings = await readSettings(odf, clock)
+	const title = await metaTitle(odf, clock)
 	const charts = await readOdsCharts({
 		odf,
 		prefixes,
@@ -184,7 +186,8 @@ async function open(source: ByteSource, options: OdsOpenOptions): Promise<OdsOpe
 		changes: new ChangeLog(name => parts.loadedRelationships(name)),
 		limits,
 		macros: odf.facts.macros,
-		signatures: odf.facts.signed ? 1 : 0
+		signatures: odf.facts.signed ? 1 : 0,
+		...(title === undefined ? {} : { title })
 	})
 
 	// Every model is built: the sheets read as parsed.

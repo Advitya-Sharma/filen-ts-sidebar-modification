@@ -38,7 +38,7 @@ import { SheetEventRelay } from "@/features/spreadsheet/lib/sheetEvents"
 import { withWorkbookDigit } from "@/features/spreadsheet/lib/sheetDigitWidth"
 import { isLegacySheetKind, sheetKindOf } from "@/features/spreadsheet/lib/sheetKind"
 import { browserLanguage, sheetLocaleOf } from "@/features/spreadsheet/formulaBar/sheetLocale"
-import { formOf, pdfRequest, printRequests } from "@/features/spreadsheet/print/print.logic"
+import { formOf, pdfFile, pdfRequest, printRequests } from "@/features/spreadsheet/print/print.logic"
 import { sheetSettings } from "@/features/spreadsheet/print/printSettings"
 import { makeSheetPdf, sheetPdfMessages } from "@/features/spreadsheet/save/sheetPdf"
 import { fileStem } from "@/features/spreadsheet/save/sheetSave.logic"
@@ -371,6 +371,8 @@ async function exportDocument(item: DriveItem, bytes: Uint8Array, owned: boolean
 		}
 
 		let docx: Uint8Array
+		// What the file shows that its package leaves out (an equation): the PDF's report counts it.
+		const untranslated = opened.document.untranslated
 
 		try {
 			docx = await opened.document.take()
@@ -378,7 +380,7 @@ async function exportDocument(item: DriveItem, bytes: Uint8Array, owned: boolean
 			opened.document.release()
 		}
 
-		return documentPdf({ kind: "file", bytes: docx, owned: true }, name, run)
+		return documentPdf({ kind: "file", bytes: docx, owned: true, untranslated }, name, run)
 	}
 
 	if (!isCompoundFile(bytes)) {
@@ -514,11 +516,12 @@ async function printWorkbook(
 		}
 
 		const requests = printRequests(formOf(active.setup), active, [active], []) ?? []
-		const request = pdfRequest(
-			requests,
-			{ name, title: fileStem(name), lang: browserLanguage() },
-			{ kind, sheets: info.sheets, date1904: info.date1904, showFormulas: false }
-		)
+		const request = pdfRequest(requests, pdfFile(name, info, browserLanguage()), {
+			kind,
+			sheets: info.sheets,
+			date1904: info.date1904,
+			showFormulas: false
+		})
 		const result = await makeSheetPdf(session, request, {
 			signal: run.signal,
 			password,
@@ -653,8 +656,13 @@ function convertFailed(key: DriveKey): Exported {
 	return { kind: "failed", error: { key: `drive:${key}`, values: {} } }
 }
 
-// What a converted copy lacks, told once per kind of loss: formulas by count, the rest together.
+// What a converted copy lacks, told once per kind of loss: formulas by count, the rest together. A workbook read as
+// its values alone (Excel 97–2003) says so as Save as .xlsx does, which covers the rest.
 function lossyWarnings(lossy: readonly LossyFeature[]): Message[] {
+	if (lossy.some(feature => feature.kind === "valuesOnly")) {
+		return [{ key: "drive:driveDownloadAsConvertValuesOnly", values: {} }]
+	}
+
 	const formulas = lossy.reduce((sum, feature) => sum + (feature.kind === "formula" ? feature.count : 0), 0)
 	const warnings: Message[] = []
 
@@ -850,7 +858,8 @@ async function convertSpreadsheet(
 		workbook,
 		workbookKind,
 		run,
-		session => session.query("saveAs.format", { format: target }, { signal: run.signal }),
+		// An .ods takes the user's language as its default, as a new one does.
+		session => session.query("saveAs.format", { format: target, language: browserLanguage() }, { signal: run.signal }),
 		keep ? () => convertedFile(bytes, target, []) : undefined
 	)
 

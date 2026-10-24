@@ -84,6 +84,14 @@ export function DocxReflow(props: DocxReflowProps): ReactNode {
 		}
 	}, [editor])
 
+	// Unmounted with focus: handed on before the view leaves the document (passive cleanups run after).
+	useLayoutEffect(
+		() => () => {
+			viewRef.current?.releaseFocus()
+		},
+		[]
+	)
+
 	useLayoutEffect(() => {
 		optionsRef.current = options
 		viewRef.current?.update(options)

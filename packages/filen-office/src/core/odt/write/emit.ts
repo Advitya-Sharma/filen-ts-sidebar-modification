@@ -1989,9 +1989,12 @@ export class OdfEmitter {
 			spaces = 0
 		}
 
-		for (const character of text) {
-			if (character === " ") {
+		for (let at = 0; at < text.length;) {
+			const code = text.charCodeAt(at)
+
+			if (code === 0x20) {
 				spaces++
+				at++
 
 				continue
 			}
@@ -2006,15 +2009,30 @@ export class OdfEmitter {
 				out = ""
 			}
 
-			if (character === "\t") {
+			state.trimLeading = false
+
+			if (code === 0x09) {
 				out += "<text:tab/>"
-				state.trimLeading = false
-			} else if (character === "\n" || character === "\r") {
+				at++
+			} else if (code === 0x0a || code === 0x0d) {
 				out += "<text:line-break/>"
-				state.trimLeading = false
+				at++
 			} else {
-				out += escText(character)
-				state.trimLeading = false
+				// A stretch without spaces, tabs or line ends, escaped at once (at most 64 Ki units, a surrogate pair whole).
+				let end = at + 1
+
+				while (end < text.length && end - at < 65_536) {
+					const next = text.charCodeAt(end)
+
+					if (next === 0x20 || next === 0x09 || next === 0x0a || next === 0x0d) break
+
+					end++
+				}
+
+				if (end < text.length && end - at >= 65_536 && (text.charCodeAt(end - 1) & 0xfc00) === 0xd800) end--
+
+				out += escText(text.slice(at, end))
+				at = end
 			}
 		}
 

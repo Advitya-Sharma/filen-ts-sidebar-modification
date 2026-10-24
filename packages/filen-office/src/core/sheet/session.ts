@@ -90,6 +90,8 @@ export interface SheetSessionDocument {
 	protects(sheet: SheetId, action: SheetProtectedAction): SheetRefusal | null
 	workbookProtection(): SheetWorkbookProtection | null
 	fileSharing(): SheetFileSharing | null
+	// The workbook's own title (its core properties or meta.xml), none for a text file.
+	title(): string | undefined
 	initialWritability(): SheetWritability
 	prove(
 		slicing: Slicing | undefined,
@@ -654,6 +656,7 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 				this.buildTile(active, tileRow, tileCol)
 		}
 
+		const title = document.title()
 		const info: SheetWorkbookInfo = {
 			kind: document.kind,
 			sheets: document.sheets(),
@@ -665,6 +668,7 @@ export class SheetSession<D extends SheetSessionDocument> implements SheetSessio
 			date1904: document.date1904,
 			protection: document.workbookProtection(),
 			fileSharing: document.fileSharing(),
+			...(title !== undefined && { title }),
 			...(document.encrypted !== undefined && { encrypted: document.encrypted })
 		}
 

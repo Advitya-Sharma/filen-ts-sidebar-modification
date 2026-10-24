@@ -63,6 +63,8 @@ export interface XlsxWorkbookInit {
 	readonly limits: XlsxLimits
 	readonly macros: boolean
 	readonly signatures: number
+	// The workbook's own title (docProps/core.xml, or an OpenDocument spreadsheet's meta.xml).
+	readonly title?: string
 }
 
 export class XlsxWorkbook implements XlsxWorkbookModel {
@@ -90,6 +92,8 @@ export class XlsxWorkbook implements XlsxWorkbookModel {
 	readonly macros: boolean
 	// Signatures in the package's digital signature origin: an edit breaks them.
 	readonly signatures: number
+	// The workbook's own title (docProps/core.xml, or an OpenDocument spreadsheet's meta.xml dc:title).
+	readonly title: string | undefined
 	private readonly loads = new Map<SheetId, Promise<XlsxSheetModel>>()
 	// Why a sheet could not be read: asked for again, it fails at once rather than being inflated and parsed again.
 	private readonly failures = new Map<SheetId, XlsxReadError>()
@@ -122,6 +126,7 @@ export class XlsxWorkbook implements XlsxWorkbookModel {
 		this.limits = init.limits
 		this.macros = init.macros
 		this.signatures = init.signatures
+		this.title = init.title
 		this.nextId = init.sheets.reduce((highest, sheet) => Math.max(highest, sheet.id + 1), 0)
 		this.budget = new XlsxReadBudget(init.limits, init.workbookSections.length)
 	}

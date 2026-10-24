@@ -13,7 +13,8 @@ import {
 	readContentPrologue,
 	type ContentPrologue
 } from "../odf/index"
-import { ODF_STYLE_NS } from "../docx/layout/geometry"
+import { ODF_OBJECT_LINES, ODF_PADDING, ODF_STYLE_NS } from "../docx/layout/geometry"
+import { metaTitle } from "../odf/meta"
 import {
 	Namespaces,
 	XmlError,
@@ -21,6 +22,7 @@ import {
 	assertWellFormedSliced,
 	decodeUtf8,
 	encodeUtf8,
+	escapeText,
 	parseXml,
 	transcodeUtf16,
 	type XmlDocument
@@ -34,6 +36,11 @@ import { BodyScanner, inflateChunks, OdtScanError, type BodyBatch } from "./scan
 import { Translator, type TranslatorSettings } from "./translator"
 import type { OdtOrigin, OdtTranslateResult, OdtTranslation } from "./types"
 import { PART_NAMESPACES, REL, twips, XML_DECLARATION } from "./wml"
+
+const CORE_PROPERTIES_NS = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+const CORE_PROPERTIES_REL = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties"
+const CORE_PROPERTIES_OVERRIDE =
+	'<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
 
 export interface OdtTranslateOptions {
 	readonly slicing?: Slicing
@@ -190,12 +197,11 @@ async function translate(odf: OdfPackage, options: OdtTranslateOptions): Promise
 		if (!(error instanceof XmlError || error instanceof ZipError)) throw error
 	}
 
+	const title = await metaTitle(odf, clock)
 	const settings: TranslatorSettings = {
 		tabsRelativeToIndent: configBoolean(settingsXml, "TabsRelativeToIndent") ?? true,
 		keepAtMost: KEEP_STYLES
 	}
-	// LibreOffice sums the spacing between paragraphs only under AddParaTableSpacing (absent: the larger of the two).
-	const sumSpacing = configBoolean(settingsXml, "AddParaTableSpacing") ?? false
 	// Drawing shapes stay on their anchor's page (ODF 1.3 Part 3 §20.267, style:flow-with-text false) unless the
 	// document lets LibreOffice place them past it.
 	const floatsOnPage = !(configBoolean(settingsXml, "DoNotCaptureDrawObjsOnPage") ?? false)
@@ -354,7 +360,7 @@ async function translate(odf: OdfPackage, options: OdtTranslateOptions): Promise
 	body.finish(translator.pages.finalSectPr())
 	body.writer.add("</w:body></w:document>")
 
-	return { ok: true, translation: { ...assemble(odf, translator, body, origins, originsExact, sumSpacing, floatsOnPage), endState } }
+	return { ok: true, translation: { ...assemble(odf, translator, body, origins, originsExact, floatsOnPage, title), endState } }
 }
 
 const BODY = encodeUtf8("body")
@@ -387,8 +393,8 @@ function assemble(
 	body: BodyFlow,
 	origins: OdtOrigin[],
 	originsExact: boolean,
-	sumSpacing: boolean,
-	floatsOnPage: boolean
+	floatsOnPage: boolean,
+	title: string | undefined
 ): OdtTranslation {
 	const parts = new Map<string, Uint8Array | LinkedPart>()
 	const overrides: string[] = []
@@ -424,10 +430,15 @@ function assemble(
 	// What the common styles, defaults and note settings approximate, past the last block's bookkeeping.
 	translator.takeDocumentLossy()
 
+	// A line of only as-char objects is as tall as they are (ODF_OBJECT_LINES, measured); paragraph borders and padding
+	// join as LibreOffice joins them (ODF_PADDING).
+	// LibreOffice adds one paragraph's space after to the next one's space before whatever AddParaTableSpacing says
+	// (measured: that setting is about tables); the layout adds them only under w:doNotUseHTMLParagraphAutoSpacing,
+	// which otherwise changes only auto spacing, which a translation never writes.
 	parts.set(
 		"word/settings.xml",
 		encodeUtf8(
-			`${XML_DECLARATION}<w:settings ${PART_NAMESPACES}><w:defaultTabStop w:val="${Math.max(1, twips(tabStop))}"/>${translator.pages.evenAndOdd ? "<w:evenAndOddHeaders/>" : ""}${footnotePr}${endnotePr}<w:compat>${sumSpacing ? "<w:doNotUseHTMLParagraphAutoSpacing/>" : ""}<w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/>${floatsOnPage ? `<w:compatSetting w:name="flow-with-text" w:uri="${ODF_STYLE_NS}" w:val="false"/>` : ""}</w:compat></w:settings>`
+			`${XML_DECLARATION}<w:settings ${PART_NAMESPACES}><w:defaultTabStop w:val="${Math.max(1, twips(tabStop))}"/>${translator.pages.evenAndOdd ? "<w:evenAndOddHeaders/>" : ""}${footnotePr}${endnotePr}<w:compat><w:doNotUseHTMLParagraphAutoSpacing/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/>${floatsOnPage ? `<w:compatSetting w:name="flow-with-text" w:uri="${ODF_STYLE_NS}" w:val="false"/>` : ""}<w:compatSetting w:name="${ODF_OBJECT_LINES}" w:uri="${ODF_STYLE_NS}" w:val="objects"/><w:compatSetting w:name="${ODF_PADDING}" w:uri="${ODF_STYLE_NS}" w:val="borders"/></w:compat></w:settings>`
 		)
 	)
 	override("word/settings.xml", "settings")
@@ -490,10 +501,22 @@ function assemble(
 			`${XML_DECLARATION}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relationships.join("")}${translator.relationships.join("")}</Relationships>`
 		)
 	)
+	// The title as the package's core properties (ECMA-376 Part 2 §11): what the PDF export and a .docx copy show.
+	if (title !== undefined) {
+		parts.set(
+			"docProps/core.xml",
+			encodeUtf8(
+				`${XML_DECLARATION}<cp:coreProperties xmlns:cp="${CORE_PROPERTIES_NS}" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${escapeText(title)}</dc:title></cp:coreProperties>`
+			)
+		)
+	}
+
+	const coreRelationship = title === undefined ? "" : `<Relationship Id="rId2" Type="${CORE_PROPERTIES_REL}" Target="docProps/core.xml"/>`
+
 	parts.set(
 		"_rels/.rels",
 		encodeUtf8(
-			`${XML_DECLARATION}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}officeDocument" Target="word/document.xml"/></Relationships>`
+			`${XML_DECLARATION}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}officeDocument" Target="word/document.xml"/>${coreRelationship}</Relationships>`
 		)
 	)
 
@@ -504,7 +527,7 @@ function assemble(
 	parts.set(
 		"[Content_Types].xml",
 		encodeUtf8(
-			`${XML_DECLARATION}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>${defaultsXml}<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>${overrides.join("")}</Types>`
+			`${XML_DECLARATION}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>${defaultsXml}<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>${title === undefined ? "" : CORE_PROPERTIES_OVERRIDE}${overrides.join("")}</Types>`
 		)
 	)
 

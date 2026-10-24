@@ -160,10 +160,24 @@ function escaped(text: string): string {
 	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
+const ARABIC_DECIMAL = "\u066b"
+
+// The locale's decimal point as a pattern: where it is U+066B (Intl's ar-EG, ar-SA, fa-IR, ps-AF), "." too, as a
+// keyboard there types it and LibreOffice 7.5 reads it in ar-EG and fa-IR.
+function decimalPattern(decimal: string): string {
+	return decimal === ARABIC_DECIMAL ? "[.\u066b]" : escaped(decimal)
+}
+
+// Digits with the locale's decimal point as JavaScript reads them.
+function withPoint(text: string, decimal: string): string {
+	return decimal === ARABIC_DECIMAL ? text.replace(ARABIC_DECIMAL, ".") : decimal === "." ? text : text.replace(decimal, ".")
+}
+
 interface NumberReader {
 	readonly plain: RegExp
 	readonly grouped: RegExp
 	readonly percent: RegExp
+	readonly point: RegExp
 	readonly decimal: string
 	readonly group: string
 }
@@ -175,7 +189,7 @@ function numberReader(locale: SheetLocale): NumberReader {
 	let reader = readers.get(key)
 
 	if (reader === undefined) {
-		const point = escaped(locale.decimal)
+		const point = decimalPattern(locale.decimal)
 		// A space group separator (fr-FR's narrow no-break space too) also accepts a plain space as typed.
 		const group = /\s/u.test(locale.group) ? "[\\s\\u00a0\\u202f]" : escaped(locale.group)
 
@@ -183,6 +197,7 @@ function numberReader(locale: SheetLocale): NumberReader {
 			plain: new RegExp(`^[-+]?(\\d+${point}?\\d*|${point}\\d+)(e[-+]?\\d+)?$`, "i"),
 			grouped: new RegExp(`^[-+]?\\d{1,3}(${group}\\d{3})+(${point}\\d+)?$`),
 			percent: new RegExp(`^[-+]?(\\d+${point}?\\d*|${point}\\d+)%$`),
+			point: new RegExp(point),
 			decimal: locale.decimal,
 			group: locale.group
 		}
@@ -198,23 +213,25 @@ export function localizedNumber(text: string, locale: SheetLocale): { value: num
 	const reader = numberReader(locale)
 	const canonical = (digits: string): number =>
 		Number(
-			digits
-				.replace(/[\s\u00a0\u202f]/gu, "")
-				.split(reader.group)
-				.join("")
-				.replace(reader.decimal, ".")
+			withPoint(
+				digits
+					.replace(/[\s\u00a0\u202f]/gu, "")
+					.split(reader.group)
+					.join(""),
+				reader.decimal
+			)
 		)
 
-	if (reader.plain.test(text)) return { value: Number(text.replace(reader.decimal, ".")) }
+	if (reader.plain.test(text)) return { value: Number(withPoint(text, reader.decimal)) }
 
 	if (reader.grouped.test(text)) {
-		return { value: canonical(text), impliedFormat: text.includes(reader.decimal) ? "#,##0.00" : "#,##0" }
+		return { value: canonical(text), impliedFormat: reader.point.test(text) ? "#,##0.00" : "#,##0" }
 	}
 
 	if (reader.percent.test(text)) {
 		return {
-			value: Number(text.slice(0, -1).replace(reader.decimal, ".")) / 100,
-			impliedFormat: text.includes(reader.decimal) ? "0.00%" : "0%"
+			value: Number(withPoint(text.slice(0, -1), reader.decimal)) / 100,
+			impliedFormat: reader.point.test(text) ? "0.00%" : "0%"
 		}
 	}
 
@@ -238,6 +255,7 @@ const SPACE = 32
 const PLUS = 43
 const MINUS = 45
 const PAREN = 40
+const POINT = 46
 
 function isSpace(code: number): boolean {
 	return code === SPACE || code === 0xa0 || code === 0x202f || (code >= 9 && code <= 13)
@@ -251,7 +269,7 @@ function textNumberReader(locale: SheetLocale): TextNumberReader {
 	let reader = textReaders.get(key)
 
 	if (reader === undefined) {
-		const point = escaped(locale.decimal)
+		const point = decimalPattern(locale.decimal)
 		const group = /\s/u.test(locale.group) ? "[\\s\\u00a0\\u202f]" : escaped(locale.group)
 
 		reader = {
@@ -272,8 +290,8 @@ function textNumberReader(locale: SheetLocale): TextNumberReader {
 // The digits of a number as the locale writes them (no sign): plain, with an exponent, grouped, or a whole number
 // and a fraction ("1 1/2"). Undefined for anything else.
 function unsignedNumber(text: string, reader: TextNumberReader): number | undefined {
-	if (reader.number.test(text)) return Number(reader.decimal === "." ? text : text.replace(reader.decimal, "."))
-	if (reader.grouped.test(text)) return Number(text.replace(reader.group, "").replace(reader.decimal, "."))
+	if (reader.number.test(text)) return Number(withPoint(text, reader.decimal))
+	if (reader.grouped.test(text)) return Number(withPoint(text.replace(reader.group, ""), reader.decimal))
 
 	const space = text.indexOf(" ")
 	const slash = text.indexOf("/")
@@ -338,6 +356,7 @@ function readTextNumber(text: string, reader: TextNumberReader): number | undefi
 		first !== MINUS &&
 		first !== PAREN &&
 		first !== reader.decimalCode &&
+		!(first === POINT && reader.decimal === ARABIC_DECIMAL) &&
 		!reader.currencyCodes.includes(first)
 	) {
 		return undefined

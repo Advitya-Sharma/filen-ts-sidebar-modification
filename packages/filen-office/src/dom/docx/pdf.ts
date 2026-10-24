@@ -78,7 +78,7 @@ async function laidOut(
 		const document = await docxPdfSnapshot(live, {
 			signal: run.signal,
 			slicing: { pause: services.yield, sliceMs: services.sliceMs ?? 16, now: services.now ?? Date.now },
-			...(run.options.title === undefined ? {} : { title: run.options.title })
+			title: run.options.title
 		})
 
 		return { engine, document }
@@ -117,7 +117,15 @@ export async function paintDocxPdf(
 		type: "application/pdf"
 	})
 
-	return { blob, report: result.report }
+	const untranslated = run.options.untranslated ?? 0
+
+	if (untranslated <= 0) return { blob, report: result.report }
+
+	const refused = new Map(result.report.refused)
+
+	refused.set("untranslated", (refused.get("untranslated") ?? 0) + untranslated)
+
+	return { blob, report: { missing: result.report.missing, refused } }
 }
 
 // A document given as its bytes, laid out here and painted.

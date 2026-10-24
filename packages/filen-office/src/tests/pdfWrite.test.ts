@@ -424,6 +424,43 @@ describe("PDF writer", () => {
 		expect(() => writer.open("Heading9")).toThrow(PdfWriteError)
 	})
 
+	it("claims PDF/UA only with a title to show (dc:title, Info /Title, DisplayDocTitle; ISO 14289-1 §7.1)", async () => {
+		const written = async (title: string | undefined): Promise<string> => {
+			const writer = await PdfWriter.create({
+				tagged: true,
+				deterministic: true,
+				deflate: null,
+				...(title === undefined ? {} : { title })
+			})
+			const page = writer.beginPage(100, 100)
+			const node = writer.open("P")
+
+			page.beginContent(node)
+			page.rect(0, 0, 1, 1).fill()
+			page.endContent()
+			writer.close(node)
+			await writer.endPage(page)
+
+			return new TextDecoder("latin1").decode(await bytesOf(writer))
+		}
+		const titled = await written("Report")
+
+		expect(titled).toContain("<pdfuaid:part>1</pdfuaid:part>")
+		expect(titled).toContain('<dc:title><rdf:Alt><rdf:li xml:lang="x-default">Report</rdf:li></rdf:Alt></dc:title>')
+		expect(titled).toContain("/Title (Report)")
+		expect(titled).toContain("/DisplayDocTitle true")
+
+		// No title, or a blank one: still tagged, but no claim a reader would find false.
+		for (const title of [undefined, " \t"]) {
+			const untitled = await written(title)
+
+			expect(untitled).toContain("/StructTreeRoot")
+			expect(untitled).not.toContain("pdfuaid:part")
+			expect(untitled).not.toContain("dc:title")
+			expect(untitled).not.toContain("/DisplayDocTitle")
+		}
+	})
+
 	it("maps a non-standard structure type through the role map", async () => {
 		const writer = await PdfWriter.create({ tagged: true, deterministic: true, deflate: null })
 		const page = writer.beginPage(100, 100)

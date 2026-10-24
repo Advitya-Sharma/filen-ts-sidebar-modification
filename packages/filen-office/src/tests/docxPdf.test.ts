@@ -82,6 +82,49 @@ describe("DOCX to PDF", () => {
 		expect(await snapshotOf(structuredDocx()).then(document => document.lang)).toBe("en-GB")
 	})
 
+	it("writes the language as a well-formed BCP 47 tag, else the next candidate's, else the app's", async () => {
+		const lang = async (defaults: string | undefined, settings: string | undefined, appLang?: string): Promise<string | null> => {
+			const styles =
+				defaults === undefined
+					? undefined
+					: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="${defaults}"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>`
+			const docx = buildDocx({
+				body: paragraph("Hello"),
+				...(settings === undefined ? {} : { settings }),
+				...(styles === undefined
+					? {}
+					: {
+							relationships: [{ id: "rIdS", type: "styles", target: "styles.xml" }],
+							parts: [
+								{
+									name: "word/styles.xml",
+									contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
+									data: styles
+								}
+							]
+						})
+			})
+			const { bytes } = await pdfOf(await snapshotOf(docx), { deflate: null, ...(appLang === undefined ? {} : { lang: appLang }) })
+			const text = Buffer.from(bytes).toString("latin1")
+			const catalog = /\/Lang \(([^)]*)\)/.exec(text)?.[1] ?? null
+
+			// The XMP's dc:language says the same.
+			expect(/<dc:language><rdf:Bag><rdf:li>([^<]*)</.exec(text)?.[1] ?? null).toBe(catalog)
+
+			return catalog
+		}
+
+		// A Windows language identifier (ST_Lang's hex form) is its tag.
+		expect(await lang("0409", undefined, "fr")).toBe("en-US")
+		// Word's sort-order suffix goes; an underscore separates subtags as a hyphen.
+		expect(await lang("es-ES_tradnl", undefined, "fr")).toBe("es-ES")
+		expect(await lang("en_US", undefined, "fr")).toBe("en-US")
+		// An identifier no table knows (RTF's \lang255 written as 00FF) is no language: the theme's next, else the app's.
+		expect(await lang("00FF", '<w:themeFontLang w:val="x-bad tag" w:eastAsia="ja-JP"/>', "fr")).toBe("ja-JP")
+		expect(await lang("00FF", undefined, "fr")).toBe("fr")
+		expect(await lang("00FF", undefined)).toBeNull()
+	})
+
 	it("tags a row's cells in order when a cell's later paragraph is laid out after the next cells", () => {
 		const columns = [0, 1, 2].map(() => ({ span: 1, top: 0, end: 0 }))
 		const cell = (table: number, row: number, index: number): DocxPdfCell => ({ table, row, cell: index, header: false, columns })

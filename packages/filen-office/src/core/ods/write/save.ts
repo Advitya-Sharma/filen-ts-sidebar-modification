@@ -122,8 +122,9 @@ async function settingsChange(document: XlsxDocument, source: OdsSource): Promis
 }
 
 // Of the package's own ODF version (content.xml's, else its manifest's), as each of its parts must be (Part 2 §4.3).
+// xmlns:ooo declares the prefix of the "ooo:view-settings" name LibreOffice looks the views up by.
 const emptySettings = (version: string | undefined): string =>
-	`<?xml version="1.0" encoding="UTF-8"?><office:document-settings xmlns:office="${OdfNs.office}" xmlns:config="${OdfNs.config}"${version === undefined ? "" : ` office:version="${escapeAttribute(version)}"`}><office:settings><config:config-item-set config:name="ooo:view-settings"><config:config-item-map-indexed config:name="Views"><config:config-item-map-entry><config:config-item config:name="ViewId" config:type="string">view1</config:config-item></config:config-item-map-entry></config:config-item-map-indexed></config:config-item-set></office:settings></office:document-settings>`
+	`<?xml version="1.0" encoding="UTF-8"?><office:document-settings xmlns:office="${OdfNs.office}" xmlns:config="${OdfNs.config}" xmlns:ooo="${OdfNs.ooo}"${version === undefined ? "" : ` office:version="${escapeAttribute(version)}"`}><office:settings><config:config-item-set config:name="ooo:view-settings"><config:config-item-map-indexed config:name="Views"><config:config-item-map-entry><config:config-item config:name="ViewId" config:type="string">view1</config:config-item></config:config-item-map-entry></config:config-item-map-indexed></config:config-item-set></office:settings></office:document-settings>`
 
 // META-INF/manifest.xml with an entry for a part added (ODF 1.3 Part 2 §4.3).
 async function withManifestEntry(source: OdsSource, path: string, mediaType: string): Promise<PartChange | null> {

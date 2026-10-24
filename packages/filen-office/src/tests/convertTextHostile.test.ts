@@ -8,7 +8,8 @@ import { buildDocx, p, type SyntheticDocx } from "./docxSynthetic"
 
 // Hostile and very large .docx converted to .odt: each refuses with a typed reason or converts, in bounded time and
 // memory (a browser worker past its memory is a crash, not a refusal). Each converts in a process of its own, whose
-// peak resident size, and the array buffers it still holds once collected, are measured.
+// peak resident size, the array buffers it still holds once collected, and the CPU time of its thread (not the wall
+// clock, which counts whatever else shares the machine) are measured.
 
 const PEAK = 1024 * 1024 * 1024
 const cell = (text: string): string => `<w:tc>${p(text)}</w:tc>`
@@ -18,9 +19,10 @@ const convert = fileURLToPath(new URL("../core/convert/text/index.ts", import.me
 const RUN = `
 import { readFileSync } from "node:fs"
 import { convertText } from ${JSON.stringify(convert)}
-const started = performance.now()
+const cpu = () => { const u = process.threadCpuUsage?.() ?? process.cpuUsage(); return (u.user + u.system) / 1000 }
+const started = cpu()
 const converted = await convertText(new Uint8Array(readFileSync(process.argv[1])), "docx", "odt")
-const ms = performance.now() - started
+const ms = cpu() - started
 globalThis.gc?.()
 console.log(JSON.stringify({ result: converted.ok ? "ok" : converted.refusal.reason, ms, peak: process.resourceUsage().maxRSS * 1024, buffers: process.memoryUsage().arrayBuffers }))
 `
@@ -105,6 +107,19 @@ const CASES: Readonly<Record<string, readonly [() => SyntheticDocx, string, numb
 	],
 	// One paragraph of 20 million "a" and doubled spaces (60 MB): a text:s for each pair, refused as it grows.
 	doubledSpaces: [() => ({ body: `<w:p><w:r><w:t xml:space="preserve">${"a  ".repeat(20_000_000)}</w:t></w:r></w:p>` }), "tooLarge"],
+	// 150 000 paragraphs of tracked deletions of 400 characters (728 KB zipped, 77 MB of XML: more time than a hostile
+	// file's 2 s, as a long document): each change region held as bytes once written, and charged.
+	trackedDeletions: [
+		() => ({
+			body: Array.from(
+				{ length: 150_000 },
+				(_, k) =>
+					`<w:p><w:del w:id="${String(k)}" w:author="A" w:date="2020-01-01T00:00:00Z"><w:r><w:delText>${"x".repeat(400)}</w:delText></w:r></w:del></w:p>`
+			).join("")
+		}),
+		"ok",
+		3000
+	],
 	// A grid of 10 000 columns no row reaches, in eight tables.
 	gridMany: [
 		() => ({ body: `<w:tbl>${grid(5000)}${`<w:tr>${cell("")}</w:tr>`.repeat(3000)}</w:tbl>${p("between").repeat(70)}`.repeat(8) }),

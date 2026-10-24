@@ -35,6 +35,7 @@ import {
 	type DocxFindControls,
 	type DocxViewOnlyReason
 } from "@/features/preview/components/docxViewer.logic"
+import { useCommandMenuFocus } from "@/features/preview/components/docxInsert.logic"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -234,9 +235,10 @@ export function MarkupMenu({
 	disabled?: (mode: DocxMarkupMode) => boolean
 }) {
 	const { t } = useTranslation("preview")
+	const focus = useCommandMenuFocus()
 
 	return (
-		<DropdownMenu>
+		<DropdownMenu onOpenChange={focus.opened}>
 			<Tooltip>
 				<TooltipTrigger
 					render={
@@ -259,12 +261,14 @@ export function MarkupMenu({
 			</Tooltip>
 			<DropdownMenuContent
 				align="end"
+				finalFocus={focus.finalFocus}
 				className="w-auto min-w-40"
 			>
 				<DropdownMenuRadioGroup
 					value={mode}
 					onValueChange={(next: DocxMarkupMode) => {
 						onChange(next)
+						focus.ran()
 					}}
 				>
 					<DropdownMenuLabel>{t("previewDocxMarkup")}</DropdownMenuLabel>

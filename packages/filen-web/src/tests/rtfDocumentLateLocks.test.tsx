@@ -25,6 +25,7 @@ vi.mock("@/features/preview/lib/docxEngine", () => ({
 						throw new Error("no engine in this test")
 					},
 					bytes: bytesSource(new Uint8Array(0)),
+					untranslated: 0,
 					take: () => Promise.resolve(new Uint8Array([1, 2, 3])),
 					prove: () => state.prove(),
 					write: () => Promise.reject(new Error("no writes in this test")),

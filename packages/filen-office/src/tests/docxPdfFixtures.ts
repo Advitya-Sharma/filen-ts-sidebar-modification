@@ -121,7 +121,8 @@ export async function snapshotOf(
 			objects: ids => Promise.resolve(ids.map(id => ({ kind: "placeholder", id, reason: "test" }) as const)),
 			media: () => Promise.resolve(null)
 		},
-		options
+		// A document naming no title of its own is titled from its file name, as the export does.
+		{ title: options.title ?? "Test document", ...(options.copy === undefined ? {} : { copy: options.copy }) }
 	)
 }
 

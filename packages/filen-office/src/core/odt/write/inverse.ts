@@ -260,7 +260,14 @@ function border(value: PropertyValue | undefined): { border: string; padding: st
 
 	const kind = value.attributes.get("val") ?? "single"
 
-	if (kind === "nil" || kind === "none") return { border: "none", padding: undefined }
+	if (kind === "nil") return { border: "none", padding: undefined }
+
+	// The translation's padding beside no line (a border that draws nothing, with its spacing).
+	if (kind === "none") {
+		const space = value.attributes.get("space")
+
+		return { border: "none", padding: space === undefined || space === "0" ? undefined : `${space}pt` }
+	}
 
 	const style = BORDER_STYLES[kind]
 	const size = Number(value.attributes.get("sz") ?? "4")

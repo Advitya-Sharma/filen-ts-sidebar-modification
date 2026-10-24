@@ -70,7 +70,7 @@ describe("PDF export of a document", () => {
 	it("opens, lays out and paints a document given as bytes, laying out before the pages are counted", async () => {
 		const phases: string[] = []
 		const exported = await exportDocxPdf(structuredDocx(), services(), pdfAssets, {
-			options: { deterministic: true },
+			options: { title: "Report", deterministic: true },
 			signal: { aborted: false },
 			onProgress: phase => {
 				if (phases.at(-1) !== phase) phases.push(phase)
@@ -81,6 +81,21 @@ describe("PDF export of a document", () => {
 		expect(phases).toEqual(["layout", "pages"])
 		expect(await pageText(pdf, 1)).toContain("Introduction")
 		expect(exported.blob.type).toBe("application/pdf")
+	})
+
+	it("titles the PDF of a document naming no title with its file name, so it may claim PDF/UA", async () => {
+		const docx = buildDocx({ body: "<w:p><w:r><w:t>Untitled</w:t></w:r></w:p>" })
+		const exported = await exportDocxPdf(docx, services(), pdfAssets, {
+			options: { title: "Letter to Ann", deterministic: true },
+			signal: { aborted: false }
+		})
+		const pdf = await openPdf(await bytesOf(exported.blob))
+		const metadata = await pdf.getMetadata()
+
+		expect((metadata.info as { Title?: string }).Title).toBe("Letter to Ann")
+		expect(metadata.metadata?.get("dc:title")).toBe("Letter to Ann")
+		expect((await pdf.getViewerPreferences())?.get("DisplayDocTitle")).toBe(true)
+		expect(metadata.metadata?.get("pdfuaid:part")).toBe("1")
 	})
 
 	it("runs in the PDF worker and hands back the Blob", async () => {
@@ -108,11 +123,11 @@ describe("PDF export of a document", () => {
 
 		if (live === undefined) return
 
-		const document = await docxPdfSnapshot(live, { copy: true })
+		const document = await docxPdfSnapshot(live, { title: "Report", copy: true })
 
 		engine.close()
 
-		const result = await exportDocxPdfInWorker(channel(), { input: { kind: "snapshot", document } })
+		const result = await exportDocxPdfInWorker(channel(), { input: { kind: "snapshot", document }, options: { title: "Report" } })
 
 		expect(await pageText(await openPdf(await bytesOf(result.blob)), 1)).toContain("Alpha")
 	})
@@ -139,6 +154,7 @@ describe("PDF export of a document", () => {
 			let clock = 0
 
 			await docxPdfSnapshot(live, {
+				title: "Report",
 				slicing: {
 					pause: () => {
 						count++
@@ -153,7 +169,7 @@ describe("PDF export of a document", () => {
 			return count
 		}
 
-		const pages = (await docxPdfSnapshot(live)).pages.length
+		const pages = (await docxPdfSnapshot(live, { title: "Report" })).pages.length
 
 		expect(pages).toBeGreaterThan(4)
 		expect(await pauses(1_000_000)).toBe(0)
@@ -163,7 +179,11 @@ describe("PDF export of a document", () => {
 
 	it("stops a cancelled export with an abort", async () => {
 		const controller = new AbortController()
-		const running = exportDocxPdfInWorker(channel(), { input: { kind: "bytes", bytes: structuredDocx() }, signal: controller.signal })
+		const running = exportDocxPdfInWorker(channel(), {
+			input: { kind: "bytes", bytes: structuredDocx() },
+			options: { title: "Report" },
+			signal: controller.signal
+		})
 
 		controller.abort()
 
@@ -175,7 +195,10 @@ describe("PDF export of a document", () => {
 		const docx = buildDocx({
 			body: `<w:p><w:r><w:t xml:space="preserve">Ratio </w:t></w:r><m:oMath xmlns:m="${M}"><m:f><m:num><m:r><m:t>a</m:t></m:r></m:num><m:den><m:r><m:t>b</m:t></m:r></m:den></m:f></m:oMath></w:p>`
 		})
-		const exported = await exportDocxPdf(docx, services(), pdfAssets, { options: { deterministic: true }, signal: { aborted: false } })
+		const exported = await exportDocxPdf(docx, services(), pdfAssets, {
+			options: { title: "Report", deterministic: true },
+			signal: { aborted: false }
+		})
 		const bytes = await bytesOf(exported.blob)
 		const pdf = await openPdf(bytes)
 		const roles: string[] = []
@@ -217,7 +240,8 @@ describe("PDF export of a document", () => {
 		if (live === undefined) return
 
 		const result = await exportDocxPdfInWorker(channel(), {
-			input: { kind: "snapshot", document: await docxPdfSnapshot(live, { copy: true }) }
+			input: { kind: "snapshot", document: await docxPdfSnapshot(live, { title: "Report", copy: true }) },
+			options: { title: "Report" }
 		})
 
 		engine.close()
@@ -230,14 +254,17 @@ describe("PDF export of a document", () => {
 
 	it("refuses a document that cannot be opened with its reason", async () => {
 		await expect(
-			exportDocxPdfInWorker(channel(), { input: { kind: "bytes", bytes: new Uint8Array([1, 2, 3, 4]) } })
+			exportDocxPdfInWorker(channel(), {
+				input: { kind: "bytes", bytes: new Uint8Array([1, 2, 3, 4]) },
+				options: { title: "Report" }
+			})
 		).rejects.toBeInstanceOf(DocxPdfExportError)
 	})
 
 	it("encrypts with the password it is given", async () => {
 		const result = await exportDocxPdfInWorker(channel(), {
 			input: { kind: "bytes", bytes: structuredDocx() },
-			options: { password: "pw 1" }
+			options: { title: "Report", password: "pw 1" }
 		})
 		const bytes = await bytesOf(result.blob)
 
@@ -247,7 +274,7 @@ describe("PDF export of a document", () => {
 
 	it("refuses a password SASLprep prohibits with its own reason, for a file and for a snapshot", async () => {
 		// Hebrew and Latin letters together: SASLprep's bidi rule (RFC 3454 §6) refuses it.
-		const options = { password: "שלוםabc" }
+		const options = { title: "Report", password: "שלוםabc" }
 		const reason = (running: Promise<unknown>): Promise<unknown> =>
 			running.then(
 				() => "exported",

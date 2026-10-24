@@ -9,7 +9,8 @@ import {
 	type TabStop
 } from "../../text/index"
 import type { DocxSettings } from "../model/settings"
-import type { ResolvedParagraphProps, ResolvedSectionProps } from "../props/types"
+import type { ResolvedBorder, ResolvedParagraphProps, ResolvedSectionProps } from "../props/types"
+import { borderWidth } from "./styles"
 import { points, twips } from "./units"
 
 // Paragraph and page geometry in px from resolved properties.
@@ -31,6 +32,7 @@ export class Geometry implements ParagraphGeometry {
 	hangingIndentTab = true
 	exclusions: Exclusions | null = null
 	decimalSeparator = 0x2e
+	markSizesObjectLines = true
 }
 
 export interface LayoutCompat {
@@ -51,10 +53,21 @@ export interface LayoutCompat {
 	// Floats stay on the page their anchor is on (ODF 1.3 Part 3 §20.267 style:flow-with-text false), asked for by
 	// a document translated from OpenDocument: WordprocessingML lets them run off it.
 	readonly floatsOnAnchorPage: boolean
+	// The paragraph mark's font sizes a last line holding only inline objects (Word); false, asked for by a document
+	// translated from OpenDocument: such a line is as tall as its objects (LibreOffice, measured).
+	readonly markSizesObjectLines: boolean
+	// Paragraph borders as LibreOffice lays them out, asked for by a document translated from OpenDocument
+	// (ODF_PADDING): inside the indents, and joined: neighbours whose lines (not the spacing above and below them) and
+	// text edges agree share one box, and so do paragraphs without borders (measured).
+	readonly joinsBoxes: boolean
 }
 
-// The compatibility setting an OpenDocument translation writes for style:flow-with-text.
+// The compatibility settings an OpenDocument translation writes: style:flow-with-text, how tall a line of only
+// as-char objects is (ODF_OBJECT_LINES), and padding beside no line as borders that draw nothing (ODF_PADDING, see
+// StyleSettings.paddingBorders) joined as LibreOffice joins borders.
 export const ODF_STYLE_NS = "urn:oasis:names:tc:opendocument:xmlns:style:1.0"
+export const ODF_OBJECT_LINES = "object-line-height"
+export const ODF_PADDING = "paragraph-padding"
 
 export function layoutCompat(settings: DocxSettings): LayoutCompat {
 	const legacy = new Set(settings.legacyCompat)
@@ -73,8 +86,25 @@ export function layoutCompat(settings: DocxSettings): LayoutCompat {
 		evenAndOddHeaders: settings.evenAndOddHeaders,
 		floatsOnAnchorPage: settings.compatSettings.some(
 			setting => setting.name === "flow-with-text" && setting.uri === ODF_STYLE_NS && setting.value === "false"
-		)
+		),
+		markSizesObjectLines: !settings.compatSettings.some(
+			setting => setting.name === ODF_OBJECT_LINES && setting.uri === ODF_STYLE_NS && setting.value === "objects"
+		),
+		joinsBoxes: odfPadding(settings)
 	}
+}
+
+// How far a start or end border sets the text in from the indent under LayoutCompat.joinsBoxes, which draws it inside
+// the indents (LibreOffice) where Word draws it outside: its width and spacing, in px.
+export function borderInset(border: ResolvedBorder | undefined): number {
+	return border === undefined ? 0 : borderWidth(border) + points(border.space)
+}
+
+// Whether a translation from OpenDocument asks for its padding borders (ODF_PADDING).
+export function odfPadding(settings: DocxSettings): boolean {
+	return settings.compatSettings.some(
+		setting => setting.name === ODF_PADDING && setting.uri === ODF_STYLE_NS && setting.value === "borders"
+	)
 }
 
 const TAB_ALIGNMENTS: Readonly<Record<string, TabAlignment>> = {
@@ -160,8 +190,8 @@ export function paragraphGeometry(
 
 	g.left = left
 	g.width = width
-	g.startIndent = twips(indent.start)
-	g.endIndent = twips(indent.end)
+	g.startIndent = twips(indent.start) + (compat.joinsBoxes ? borderInset(props.borders?.start) : 0)
+	g.endIndent = twips(indent.end) + (compat.joinsBoxes ? borderInset(props.borders?.end) : 0)
 	g.firstLineIndent = twips(indent.firstLine)
 	g.rtl = props.bidi
 	g.alignment = alignmentOf(props)
@@ -170,6 +200,7 @@ export function paragraphGeometry(
 	g.expandLineBreaks = compat.expandLineBreaks
 	g.hangingIndentTab = compat.hangingIndentTab
 	g.decimalSeparator = compat.decimalSeparator
+	g.markSizesObjectLines = compat.markSizesObjectLines
 	g.exclusions = null
 
 	if (spacing.lineRule === "exact") {

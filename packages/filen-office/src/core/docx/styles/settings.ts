@@ -1,4 +1,5 @@
 import type { XmlDocument } from "../../xml/index"
+import { odfPadding } from "../layout/geometry"
 import { readSettings, type DocxSettings } from "../model/settings"
 import type { LanguageProps } from "../props/types"
 import { DEFAULT_COLOR_SCHEME_MAPPING, type ColorSchemeMapping } from "../theme/theme"
@@ -16,6 +17,9 @@ export interface StyleSettings {
 	// MS-DOCX §2.3.1: when off, the default paragraph style's 11/12pt size and left justification do not
 	// override a table style.
 	readonly overrideTableStyleFontSizeAndJustification: boolean
+	// A border that draws nothing ("none") keeps its spacing: padding beside no line in a document translated from
+	// OpenDocument (layout/geometry.ts ODF_PADDING).
+	readonly paddingBorders?: boolean
 }
 
 export const DEFAULT_STYLE_SETTINGS: StyleSettings = {
@@ -44,7 +48,8 @@ export function styleSettings(settings: DocxSettings): StyleSettings {
 		themeFontLanguage,
 		defaultTabStop: settings.defaultTabStop ?? 720,
 		compatibilityMode: settings.compatibilityMode,
-		overrideTableStyleFontSizeAndJustification: settings.overrideTableStyleFontSizeAndJustification
+		overrideTableStyleFontSizeAndJustification: settings.overrideTableStyleFontSizeAndJustification,
+		paddingBorders: odfPadding(settings)
 	}
 }
 

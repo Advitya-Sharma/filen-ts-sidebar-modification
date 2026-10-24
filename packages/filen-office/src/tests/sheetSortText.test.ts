@@ -99,3 +99,26 @@ describe("sorting a text file", () => {
 		opened.session.close()
 	})
 })
+
+describe("sorting a text file in the session's locale", () => {
+	const source = "Artikel;Preis\na;1,5\nb;1,25\nc;1,75\nd;1.234,56\ne;2\n"
+	const range = { startRow: 0, startCol: 0, endRow: 5, endCol: 1 }
+
+	it("reads decimal-comma numbers by their value where the locale writes them", async () => {
+		const opened = await open(source)
+
+		opened.session.configure({ locale: { decimal: ",", group: ".", argument: ";", dateOrder: "dmy" } })
+
+		expect((await opened.session.command(sort(range))).ok).toBe(true)
+		expect(await saved(opened)).toBe("Artikel;Preis\nb;1,25\na;1,5\nc;1,75\ne;2\nd;1.234,56\n")
+		opened.session.close()
+	})
+
+	it("sorts what the locale reads as no number as text, after the numbers", async () => {
+		const opened = await open(source)
+
+		expect((await opened.session.command(sort(range))).ok).toBe(true)
+		expect(await saved(opened)).toBe("Artikel;Preis\ne;2\nb;1,25\na;1,5\nc;1,75\nd;1.234,56\n")
+		opened.session.close()
+	})
+})

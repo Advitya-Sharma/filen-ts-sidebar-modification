@@ -40,6 +40,7 @@ export interface PdfAbortSignal {
 }
 
 export interface PdfWriterOptions {
+	// The title viewers show (Info /Title, XMP dc:title, DisplayDocTitle); a tagged document claims PDF/UA only with one.
 	readonly title?: string
 	// BCP 47 language of the document (/Lang).
 	readonly lang?: string
@@ -720,13 +721,15 @@ export class PdfWriter implements PdfObjectSink {
 			names = { Dests: tree }
 		}
 
-		const title = this.options.title
+		// A blank title is none. PDF/UA wants the title shown (ISO 14289-1 §7.1: dc:title, DisplayDocTitle): a tagged
+		// document without one is still tagged but makes no claim a reader would find false.
+		const title = this.options.title !== undefined && this.options.title.trim().length > 0 ? this.options.title : undefined
 		const metadata = this.allocate()
 
 		await this.stream(
 			metadata,
 			{ Type: pdfName("Metadata"), Subtype: pdfName("XML") },
-			xmpMetadata({ title, lang: this.options.lang, pdfua: this.tagged })
+			xmpMetadata({ title, lang: this.options.lang, pdfua: this.tagged && title !== undefined })
 		)
 
 		const catalog = this.allocate()

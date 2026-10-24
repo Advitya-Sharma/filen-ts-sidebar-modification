@@ -247,6 +247,11 @@ export class TextSheetDocument implements SheetSessionDocument {
 		return null
 	}
 
+	// A text file has no properties.
+	title(): undefined {
+		return undefined
+	}
+
 	// A text file is never proven: it saves as its encoding allows.
 	initialWritability(): SheetWritability {
 		return this.format.writable ? { state: "writable" } : { state: "viewOnly", reason: "unsafe" }
@@ -277,7 +282,7 @@ export class TextSheetDocument implements SheetSessionDocument {
 
 	// "CSV UTF-8": the cells comma-separated, with a BOM.
 	csv(): Uint8Array {
-		const body = new TextEncoder().encode(writeCsv(this.rows, ",", "\r\n"))
+		const body = new TextEncoder().encode(writeCsv(this.rows, ",", "\r\n", true))
 		const bytes = new Uint8Array(body.length + 3)
 
 		bytes.set([0xef, 0xbb, 0xbf], 0)
@@ -726,16 +731,14 @@ export async function openTextSession(
 	let parsed: ReturnType<typeof parseCsvFile>
 
 	try {
-		parsed = parseCsvFile(bytes, options.kind === "tsv" || options.kind === "tab")
+		// Refused as the parse passes a limit, before the rows of a hostile file fill memory.
+		parsed = parseCsvFile(bytes, options.kind === "tsv" || options.kind === "tab", {
+			...(options.settings?.locale !== undefined && { listSeparator: options.settings.locale.argument }),
+			limits: { maxCells: MAX_TEXT_CELLS, maxRows: SHEET_MAX_ROWS }
+		})
 	} catch (error) {
 		return { kind: "failed", reason: "tooLarge", message: error instanceof Error ? error.message : String(error) }
 	}
-
-	let cells = 0
-
-	for (const row of parsed.rows) cells += row.length
-
-	if (cells > MAX_TEXT_CELLS) return { kind: "failed", reason: "tooLarge", message: "The file has more cells than a sheet opens with" }
 
 	const styles = new RenderStyleTable()
 	const document = new TextSheetDocument(bytes, parsed.rows, parsed.format, options.kind, options.settings)

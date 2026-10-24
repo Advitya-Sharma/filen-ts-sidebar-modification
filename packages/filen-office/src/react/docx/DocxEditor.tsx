@@ -530,6 +530,14 @@ export function DocxEditor(props: DocxEditorProps) {
 		// The input view lives as long as the editor; what it calls back reads the current render through refs.
 	}, [editor])
 
+	// Unmounted with focus: handed on before the view leaves the document (passive cleanups run after).
+	useLayoutEffect(
+		() => () => {
+			sinkRef.current?.releaseFocus()
+		},
+		[]
+	)
+
 	useLayoutEffect(() => {
 		readOnlyRef.current = props.readOnly === true
 		sinkRef.current?.setReadOnly(props.readOnly === true)

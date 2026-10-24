@@ -981,6 +981,20 @@
 			}
 		}
 	],
+	"measuredLineMetrics": [
+		{
+			"family": "Georgia",
+			"font": "Georgia Regular, Bold, Italic and Bold Italic",
+			"version": "Version 5.00x-4",
+			"files": "macOS /System/Library/Fonts/Supplemental/Georgia*.ttf",
+			"use": "Vertical metrics only, read once from the tables named here and identical in all four styles; no font data is read at generation time or shipped",
+			"unitsPerEm": 2048,
+			"hhea": { "ascender": 1878, "descender": -449, "lineGap": 0 },
+			"typo": { "ascender": 1549, "descender": -444, "lineGap": 198 },
+			"win": { "ascent": 1878, "descent": 449 },
+			"useTypoMetrics": false
+		}
+	],
 	"calibratedLineMetrics": [
 		{
 			"family": "Cambria",

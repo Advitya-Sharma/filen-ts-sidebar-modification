@@ -40,6 +40,8 @@ export interface Fixture {
 	readonly calcChain?: boolean
 	// More parts, by name, with their content type.
 	readonly parts?: Readonly<Record<string, { readonly text: string; readonly type: string }>>
+	// More package relationships (_rels/.rels), as markup.
+	readonly packageRelationships?: string
 }
 
 export function buildFixture(fixture: Fixture): Uint8Array {
@@ -97,7 +99,7 @@ export function buildFixture(fixture: Fixture): Uint8Array {
 		'<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' +
 		`${overrides.join("")}</Types>`
 	files["_rels/.rels"] =
-		`${DECLARATION}<Relationships xmlns="${PACKAGE_RELS}"><Relationship Id="rId1" Type="${R}/officeDocument" Target="xl/workbook.xml"/></Relationships>`
+		`${DECLARATION}<Relationships xmlns="${PACKAGE_RELS}"><Relationship Id="rId1" Type="${R}/officeDocument" Target="xl/workbook.xml"/>${fixture.packageRelationships ?? ""}</Relationships>`
 	files["xl/workbook.xml"] =
 		`${DECLARATION}<workbook xmlns="${SML}" xmlns:r="${R}"><bookViews><workbookView xWindow="0" yWindow="0" windowWidth="100" windowHeight="100"/></bookViews><sheets>` +
 		fixture.sheets.map((sheet, index) => `<sheet name="${sheet.name}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join("") +

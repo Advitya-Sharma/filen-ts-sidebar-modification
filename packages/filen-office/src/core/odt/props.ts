@@ -355,10 +355,15 @@ function untranslated(attributes: Attributes, position: string | undefined): boo
 	return false
 }
 
-// A border value "width style color" (§20.183 fo:border, XSL) as a WordprocessingML border.
-export function border(tag: string, value: string | undefined, padding: string | undefined, lineWidths?: string): string {
-	if (value === undefined) return ""
+interface BorderLine {
+	readonly style: string
+	// Eighths of a point, as w:sz holds it.
+	readonly size: number
+	readonly color: string
+}
 
+// A border value "width style color" (§20.183 fo:border, XSL) as a WordprocessingML line; undefined for none.
+function borderLine(value: string, lineWidths: string | undefined): BorderLine | undefined {
 	const parts = value.trim().split(/\s+/)
 	let width: number | undefined
 	let style = "solid"
@@ -375,7 +380,7 @@ export function border(tag: string, value: string | undefined, padding: string |
 		else style = part
 	}
 
-	if (style === "none" || style === "hidden" || width === 0) return `<w:${tag} w:val="nil"/>`
+	if (style === "none" || style === "hidden" || width === 0) return undefined
 
 	let value_ = "single"
 
@@ -425,9 +430,46 @@ export function border(tag: string, value: string | undefined, padding: string |
 		total = Math.max(total, 2.25)
 	}
 
-	const space = Math.max(0, Math.min(31, Math.round(parseLength(padding) ?? 0)))
+	return { style: value_, size: Math.max(2, Math.min(96, eighths(total))), color: hex }
+}
 
-	return `<w:${tag} w:val="${value_}" w:sz="${Math.max(2, Math.min(96, eighths(total)))}" w:space="${space}" w:color="${hex}"/>`
+function borderXml(tag: string, line: BorderLine | undefined, space: number): string {
+	return line === undefined
+		? `<w:${tag} w:val="nil"/>`
+		: `<w:${tag} w:val="${line.style}" w:sz="${line.size}" w:space="${space}" w:color="${line.color}"/>`
+}
+
+// A border value as a WordprocessingML border, `padding` between it and what it surrounds (w:space holds whole
+// points, with no upper bound: ECMA-376 Part 1 §17.18.68).
+export function border(tag: string, value: string | undefined, padding: string | undefined, lineWidths?: string): string {
+	if (value === undefined) return ""
+
+	return borderXml(tag, borderLine(value, lineWidths), Math.max(0, Math.round(parseLength(padding) ?? 0)))
+}
+
+const SIDES = ["top", "left", "bottom", "right"] as const
+
+type Side = (typeof SIDES)[number]
+
+// One side of a paragraph's border and padding (Part 3 §20.183, §20.218) as a w:pBdr child, "" for a side with neither
+// a line nor padding. LibreOffice puts the line and the padding between the margin and the text, a line or not
+// (measured); padding beside no line is a border that draws nothing ("none") with its spacing. The layout keeps such
+// borders, sets the text inside the borders and joins neighbours' borders as LibreOffice does when the translation
+// asks (ODF_PADDING). A "none" border also carries what keeps neighbours apart: a shadow (w:shadow) and, below,
+// style:join-border false (w:frame). w:space holds whole points.
+function paragraphSide(side: Side, resolved: Attributes): string {
+	const padding = Math.max(0, parseLength(resolved.get(`fo:padding-${side}`)) ?? 0)
+	const value = resolved.get(`fo:border-${side}`)
+	const line = value === undefined ? undefined : borderLine(value, resolved.get(`style:border-line-width-${side}`))
+
+	if (line !== undefined) return borderXml(side, line, Math.round(padding))
+
+	const shadow = (resolved.get("style:shadow") ?? "none") !== "none"
+	const apart = side === "bottom" && resolved.get("style:join-border") === "false"
+
+	if (padding <= 0 && !shadow && !apart) return value === undefined ? "" : borderXml(side, undefined, 0)
+
+	return `<w:${side} w:val="none" w:sz="0" w:space="${Math.round(padding)}"${shadow ? ' w:shadow="1"' : ""}${apart ? ' w:frame="1"' : ""}/>`
 }
 
 export interface ParagraphOptions {
@@ -521,19 +563,12 @@ export function paragraphProperties(
 	}
 
 	let tail = ""
-	const sides = ["top", "left", "bottom", "right"] as const
-
-	if (sides.some(side => own.has(`fo:border-${side}`))) {
-		const borders = sides
-			.map(side =>
-				border(
-					side,
-					resolved.get(`fo:border-${side}`),
-					resolved.get(`fo:padding-${side}`),
-					resolved.get(`style:border-line-width-${side}`)
-				)
-			)
-			.join("")
+	if (
+		SIDES.some(side => own.has(`fo:border-${side}`) || own.has(`fo:padding-${side}`)) ||
+		own.has("style:shadow") ||
+		own.has("style:join-border")
+	) {
+		const borders = SIDES.map(side => paragraphSide(side, resolved)).join("")
 
 		if (borders !== "") tail += `<w:pBdr>${borders}</w:pBdr>`
 	}

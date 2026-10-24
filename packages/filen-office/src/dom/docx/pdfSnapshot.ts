@@ -26,6 +26,8 @@ import type {
 import { symbolTable, type FontManager, type FontRequest, type FontSlot } from "../../core/fonts/index"
 import { FRAGMENT_FLOATS, FRAGMENT_INTS, FRAGMENT_KIND_MASK, FragmentKind, LINE_FLOATS, LINE_INTS, LineInt } from "../../core/text/index"
 import { sliceClock, type Slicing } from "../../core/slicing"
+import { languageTag } from "../../core/docx/forms/dates"
+import { coreTitle } from "../../core/opc/coreTitle"
 import { bookmarkIndex, paragraphLinks, paragraphOf } from "./links"
 import type { DocxMedia, DocxObjectData } from "./protocol"
 
@@ -49,8 +51,8 @@ export interface DocxPdfLive {
 export interface DocxPdfSnapshotOptions {
 	// Copies the layout's arrays (the snapshot is transferred; the layout keeps its own).
 	readonly copy?: boolean
-	// The title when the document names none (its file name).
-	readonly title?: string
+	// The title when the document names none: its file name without the extension.
+	readonly title: string
 	readonly signal?: { readonly aborted: boolean }
 	// Gives the host a turn between pages once a slice is up (none: never).
 	readonly slicing?: Slicing
@@ -68,8 +70,6 @@ const MAX_EMBEDDED_FACE = 32 * 1024 * 1024
 const SLOTS: readonly FontSlot[] = ["ascii", "hAnsi", "eastAsia", "cs"]
 const BLACK = 0x000000ff
 const HEX = /^[0-9A-Fa-f]{6}$/
-const CORE_PROPERTIES = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties"
-const STRICT_CORE_PROPERTIES = "http://purl.oclc.org/ooxml/officeDocument/relationships/metadata/core-properties"
 const IMAGE_FORMATS = new Set(["png", "jpeg", "gif", "bmp", "webp", "tiff"])
 
 function checkAbort(signal: { readonly aborted: boolean } | undefined): void {
@@ -465,36 +465,6 @@ function objectsOf(layout: DocumentLayout, page: PageDisplayList): { count: numb
 	return { count: ints.length / 3, floats: Float32Array.from(floats), ints: Int32Array.from(ints) }
 }
 
-async function documentTitle(model: DocxModel): Promise<string | undefined> {
-	try {
-		const opc = model.package.opc
-		const relationships = await opc.relationships("")
-		const core = relationships.all.find(
-			relationship =>
-				!relationship.external &&
-				(relationship.type === CORE_PROPERTIES || relationship.type === STRICT_CORE_PROPERTIES) &&
-				relationship.partName !== undefined
-		)
-
-		if (core?.partName === undefined || !opc.has(core.partName)) return undefined
-
-		const xml = await opc.xml(core.partName)
-		const root = xml.documentElement()
-
-		for (let child = xml.firstChildElement(root); child >= 0; child = xml.nextSiblingElement(child)) {
-			if (xml.localName(child) === "title") {
-				const title = xml.textContent(child).replace(/\s+/g, " ").trim()
-
-				return title.length > 0 ? title : undefined
-			}
-		}
-	} catch {
-		// A missing or malformed core part names no title.
-	}
-
-	return undefined
-}
-
 // The renderer's object data as the painter takes it (core/drawingml/pdf.ts reads its lists as arrays).
 function pdfObject(object: DocxObjectData): DocxPdfObject {
 	if (object.kind !== "drawing") return object
@@ -524,7 +494,7 @@ function drawingImages(object: DocxPdfObject): string[] {
 	)
 }
 
-export async function docxPdfSnapshot(live: DocxPdfLive, options: DocxPdfSnapshotOptions = {}): Promise<DocxPdfDocument> {
+export async function docxPdfSnapshot(live: DocxPdfLive, options: DocxPdfSnapshotOptions): Promise<DocxPdfDocument> {
 	const { model, layout, fonts, resolver, store, view } = live
 	const signal = options.signal
 	const copy = options.copy === true
@@ -686,9 +656,9 @@ export async function docxPdfSnapshot(live: DocxPdfLive, options: DocxPdfSnapsho
 	// The document defaults' language, else the one its theme fonts are picked for (w:themeFontLang, §17.15.1.88).
 	const defaults = resolver.run(resolver.paragraph({}), {}).lang
 	const theme = model.settings.themeFontLanguages
-	const lang = [defaults.latin, defaults.eastAsia, defaults.bidi, theme?.latin, theme?.eastAsia, theme?.bidi].find(
-		value => value !== undefined && value.length > 0
-	)
+	const lang = [defaults.latin, defaults.eastAsia, defaults.bidi, theme?.latin, theme?.eastAsia, theme?.bidi]
+		.map(pdfLanguage)
+		.find(value => value !== undefined)
 
 	return {
 		pages,
@@ -701,7 +671,26 @@ export async function docxPdfSnapshot(live: DocxPdfLive, options: DocxPdfSnapsho
 		destinations,
 		outline,
 		lang,
-		title: (await documentTitle(model)) ?? options.title
+		title: (await coreTitle(model.package.opc)) ?? options.title
+	}
+}
+
+// A w:lang value as the well-formed BCP 47 tag (RFC 5646) /Lang must be (ISO 32000-1 §14.9.2, ISO 14289-1 §7.2):
+// a Windows language identifier (ST_Lang's hex form) through its table, Word's sort-order suffix ("es-ES_tradnl")
+// cut, an underscore read as the separator ("en_US"); undefined for anything else, so the next candidate is taken.
+function pdfLanguage(value: string | undefined): string | undefined {
+	if (value === undefined || value.length === 0) return undefined
+
+	const tag = languageTag(value)
+
+	if (tag === undefined) return undefined
+
+	const sorted = /^([A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})+)_[A-Za-z]+$/.exec(tag)
+
+	try {
+		return Intl.getCanonicalLocales((sorted?.[1] ?? tag).replaceAll("_", "-"))[0]
+	} catch {
+		return undefined
 	}
 }
 

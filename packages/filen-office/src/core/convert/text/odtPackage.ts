@@ -8,6 +8,9 @@ import type { LossyCounts } from "./report"
 //   revision session ids;
 // - its flow-with-text compatibility setting (ODF 1.3 Part 3 §20.267, for this engine's layout) is left out:
 //   w:compatSetting's w:name is an enumeration (§17.15.3.4) without it; documents with anchored drawings report it;
+// - so are its object-line-height setting (lines of only as-char objects as tall as they are), which documents with
+//   inline drawings report, and its paragraph-padding setting (borders inside the indents and joined, padding beside
+//   no line as a border that draws nothing), which documents with start or end borders or such padding report;
 // - property children in schema order (CT_RPr, CT_PPr, CT_ParaRPr: Part 4 wml.xsd);
 // - font family lists (ODF svg:font-family) as their first family: ST_String of w:rFonts is at most 31 characters;
 // - revision ids unique (one id per annotation; the translator gives one change region's id to each of its
@@ -403,6 +406,9 @@ function relsName(part: string): string {
 
 const FLOW_WITH_TEXT = /<w:compatSetting w:name="flow-with-text" w:uri="[^"]*" w:val="false"\/>/u
 const ANCHOR = encodeUtf8("<wp:anchor")
+const OBJECT_LINES = /<w:compatSetting w:name="object-line-height" w:uri="[^"]*" w:val="objects"\/>/u
+const INLINE = encodeUtf8("<wp:inline")
+const PADDING = /<w:compatSetting w:name="paragraph-padding" w:uri="[^"]*" w:val="borders"\/>/u
 
 function includes(bytes: Uint8Array, needle: Uint8Array): boolean {
 	for (let at = bytes.indexOf(needle[0] ?? 0); at >= 0; at = bytes.indexOf(needle[0] ?? 0, at + 1)) {
@@ -411,6 +417,19 @@ function includes(bytes: Uint8Array, needle: Uint8Array): boolean {
 		while (k < needle.length && bytes[at + k] === needle[k]) k++
 
 		if (k === needle.length) return true
+	}
+
+	return false
+}
+
+// Whether a part holds paragraph borders laid out as LibreOffice does under the translation's paragraph-padding
+// setting where Word lays them out otherwise: one at the start or end (inside the indents, not outside), or one that
+// draws nothing with spacing (padding beside no line).
+function padded(bytes: Uint8Array): boolean {
+	for (const match of decodeUtf8(bytes).matchAll(/<w:pBdr>(.*?)<\/w:pBdr>/gsu)) {
+		const borders = match[1] ?? ""
+
+		if (/<w:(?:left|right) w:val="(?!nil")/u.test(borders) || /w:val="none" w:sz="0" w:space="[1-9]/u.test(borders)) return true
 	}
 
 	return false
@@ -484,12 +503,28 @@ export function standaloneParts(parts: Map<string, Uint8Array>, lossy: LossyCoun
 	const settings = parts.get(SETTINGS)
 
 	if (settings !== undefined) {
-		const text = decodeUtf8(settings)
+		const read = decodeUtf8(settings)
+		let text = read
 
 		if (FLOW_WITH_TEXT.test(text)) {
-			parts.set(SETTINGS, encodeUtf8(text.replace(FLOW_WITH_TEXT, "")))
+			text = text.replace(FLOW_WITH_TEXT, "")
 
 			if ([...parts].some(([name, bytes]) => STORY.test(name) && includes(bytes, ANCHOR))) lossy.add("floatsOnAnchorPage")
 		}
+
+		if (OBJECT_LINES.test(text)) {
+			text = text.replace(OBJECT_LINES, "")
+
+			if ([...parts].some(([name, bytes]) => STORY.test(name) && includes(bytes, INLINE))) lossy.add("objectLineHeight")
+		}
+
+		if (PADDING.test(text)) {
+			text = text.replace(PADDING, "")
+
+			if ([...parts].some(([name, bytes]) => (STORY.test(name) || name === "word/styles.xml") && padded(bytes)))
+				lossy.add("paragraphPadding")
+		}
+
+		if (text !== read) parts.set(SETTINGS, encodeUtf8(text))
 	}
 }

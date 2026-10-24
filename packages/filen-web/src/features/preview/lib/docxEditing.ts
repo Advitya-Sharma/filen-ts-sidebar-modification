@@ -56,6 +56,8 @@ export interface DocxEditingBackend {
 	readonly writer: DocxEditingWriter
 	// The document's edits converted to .docx where it is held, without its own writer (an ODT document, for Download as).
 	readonly convertEdited?: ConvertEdited
+	// What the file shows that the package edited leaves out (an RTF's equations), for the PDF's report.
+	readonly untranslated?: number
 }
 
 // `writeUnlocked`: the document's password to modify was given (docxWriteProtection.tsx). `encryption`: it was

@@ -48,13 +48,17 @@ export class DocxPdfExportError extends Error {
 export interface DocxPdfExportOptions {
 	// The PDF is encrypted with it (AES-256): a password-protected source's own password.
 	readonly password?: string
-	// The title when the document names none (its file name without the extension).
-	readonly title?: string
+	// The title when the document names none: its file name without the extension (a tagged PDF shows one, ISO
+	// 14289-1 §7.1).
+	readonly title: string
 	// BCP 47 language of a document that declares none: the app's locale.
 	readonly lang?: string
 	readonly deterministic?: boolean
 	// A document given as bytes: its format (default docx).
 	readonly format?: "docx" | "odt"
+	// What the source file shows that the document exported leaves out (DocxRtfDocument.untranslated): reported as
+	// content left out ("untranslated").
+	readonly untranslated?: number
 }
 
 // What is exported: the file's bytes (a copy of the caller's own: a buffer the bytes fill is transferred) (laid out in the worker, as every page shows them in the Final view), or a
@@ -130,7 +134,7 @@ export interface DocxPdfProgress {
 
 export interface DocxPdfExportRequest {
 	readonly input: DocxPdfInput
-	readonly options?: DocxPdfExportOptions
+	readonly options: DocxPdfExportOptions
 	readonly signal?: DocxPdfAbortSignal
 	readonly onProgress?: (progress: DocxPdfProgress) => void
 }
@@ -197,6 +201,6 @@ export function exportDocxPdfInWorker(factory: () => DocxWorkerLike, request: Do
 					? [input.bytes.buffer]
 					: []
 
-		worker.post({ type: "export", id, input, options: request.options ?? {} } satisfies DocxPdfToWorker, transfer)
+		worker.post({ type: "export", id, input, options: request.options } satisfies DocxPdfToWorker, transfer)
 	})
 }

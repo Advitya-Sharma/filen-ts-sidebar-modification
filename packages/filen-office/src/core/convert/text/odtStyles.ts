@@ -425,6 +425,15 @@ export function convertLists(document: XmlDocument | undefined, fonts: FontFaces
 				else written = written.replace(/ style:num-format="[^"]*"/u, ' style:num-format=""')
 			}
 
+			// A level numbered from 0 or less: ODF's level styles start at 1 at least (positiveInteger, Part 3 §19.874.4).
+			// A list's first item starts where Word does (ConvertedLists.start); a level past the first restarts at 1, counted.
+			written = written.replace(/ text:start-value="(-?\d+)"/u, (attribute, value: string) => {
+				if (Number(value) >= 1) return attribute
+
+				if (ilvl > 0 || Number(value) < 0) lossy.add("listFormat")
+
+				return ""
+			})
 			markup += symbolBullet(letterSync(written))
 		}
 
@@ -511,7 +520,10 @@ export function convertLists(document: XmlDocument | undefined, fonts: FontFaces
 				if (start !== undefined) return Number(start)
 			}
 
-			return undefined
+			// A level numbered from 0, which its level style cannot say.
+			const own = Number(document.attribute(child(document, levelNode(numId, ilvl), "start"), "w:val") ?? "1")
+
+			return own < 1 ? 0 : undefined
 		}
 	}
 }

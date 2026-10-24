@@ -58,3 +58,52 @@ describe("Download as CSV", () => {
 		expect(csv).toBe("﻿,\r\n,\r\n")
 	})
 })
+
+describe("Download as CSV of a sparse sheet", () => {
+	it("writes the whole data area row by row, a far column and a far row included", async () => {
+		const rows = 20_000
+		const { session, info, bytes } = await openFixture({
+			sheets: [
+				{
+					name: "One",
+					body: `<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="XFD1"><v>2</v></c></row><row r="${String(rows)}"><c r="A${String(rows)}"><v>3</v></c></row></sheetData>`
+				}
+			]
+		})
+
+		expect(bytes.length).toBeLessThan(4096)
+
+		const peak = process.resourceUsage().maxRSS * 1024
+		const cpu = process.cpuUsage()
+		const csv = await session.export("csv", { sheet: info.activeSheet })
+		const used = process.cpuUsage(cpu)
+
+		session.close()
+
+		if (!csv.ok) throw new Error(csv.refusal.reason)
+
+		// Memory near the output's own size (328 MB here), never a row × column array of it.
+		expect(process.resourceUsage().maxRSS * 1024 - peak).toBeLessThan(2 * csv.bytes.length)
+		expect((used.user + used.system) / 1000).toBeLessThan(3_000)
+
+		const width = 16_384
+		const line = width - 1 + 2
+
+		// Every row as wide as the data area, and the three values' digits.
+		expect(csv.bytes.length).toBe(3 + rows * line + 3)
+
+		const decoder = new TextDecoder("utf-8", { ignoreBOM: true })
+
+		expect(decoder.decode(csv.bytes.subarray(0, 3 + line + 2))).toBe(`\ufeff1${",".repeat(width - 1)}2\r\n`)
+		expect(decoder.decode(csv.bytes.subarray(3 + line + 2, 3 + 2 * line + 2))).toBe(`${",".repeat(width - 1)}\r\n`)
+		expect(decoder.decode(csv.bytes.subarray(csv.bytes.length - line - 1))).toBe(`3${",".repeat(width - 1)}\r\n`)
+	})
+
+	it("quotes a value holding a separator the next open would weigh", async () => {
+		const csv = await csvOf(
+			'<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a;b</t></is></c><c r="B1" t="inlineStr"><is><t>"q", r</t></is></c><c r="C1" t="inlineStr"><is><t>ü😀</t></is></c></row></sheetData>'
+		)
+
+		expect(csv).toBe('﻿"a;b","""q"", r",ü😀\r\n')
+	})
+})

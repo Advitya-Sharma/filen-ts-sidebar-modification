@@ -75,6 +75,9 @@ export interface ParagraphGeometry {
 	readonly exclusions?: Exclusions | null
 	// Character a decimal tab aligns on. Default ".".
 	readonly decimalSeparator?: number
+	// The paragraph mark's font counts on a last line that holds only inline objects (Word). Default true; false:
+	// only an empty line takes its height.
+	readonly markSizesObjectLines?: boolean
 }
 
 // Marks hyphenation opportunities: sets breaks[i] = BREAK_HYPHEN for positions i inside words of
@@ -1310,6 +1313,7 @@ export class ParagraphLayouter {
 		let ascent = 0
 		let descent = 0
 		let any = false
+		let objectsOnly = true
 
 		for (let k = 0; k < this.pieceCount; k++) {
 			const item = this.pItem[k] ?? 0
@@ -1326,6 +1330,7 @@ export class ParagraphLayouter {
 			} else {
 				a = (styles.ascent[style] ?? 0) + shift
 				d = (styles.descent[style] ?? 0) - shift
+				objectsOnly = false
 			}
 
 			ascent = Math.max(ascent, a)
@@ -1337,7 +1342,7 @@ export class ParagraphLayouter {
 
 		this.rowLast = last
 
-		if (last || !any) {
+		if (!any || (last && !(objectsOnly && g.markSizesObjectLines === false))) {
 			ascent = Math.max(ascent, styles.ascent[p.markStyle] ?? 0)
 			descent = Math.max(descent, styles.descent[p.markStyle] ?? 0)
 		}

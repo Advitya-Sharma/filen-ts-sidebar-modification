@@ -11,6 +11,7 @@ import type {
 } from "@filen/office/core/sheet"
 import WorkbookWorker from "@/features/spreadsheet/workers/sheetWorkbook.worker.ts?worker"
 import TextWorker from "@/features/spreadsheet/workers/sheetText.worker.ts?worker"
+import { browserLanguage, sheetLocaleOf } from "@/features/spreadsheet/formulaBar/sheetLocale"
 import { recoverIfNewerBuild } from "@/lib/appUpdate"
 
 // A worker keeps its code and the heap its largest file grew, so it is terminated once nothing is open in it for
@@ -178,9 +179,20 @@ export function isTextSheetKind(kind: SheetFileKind): boolean {
 }
 
 // Opens a file in the worker for its kind: a text file never loads the workbook worker's code. The bytes are
-// transferred: pass a copy of anything still held elsewhere.
+// transferred: pass a copy of anything still held elsewhere. A text file opens in the browser's locale, whose list
+// separator settles a CSV's separator where the file leaves it open, as the grid then shows it.
 export function openSheet(bytes: Uint8Array, options: SheetOpenOptions, onEvent: (event: SheetEvent) => void): Promise<SheetOpenResult> {
-	return (isTextSheetKind(options.kind) ? openText : openWorkbook)(bytes, options, onEvent)
+	if (!isTextSheetKind(options.kind)) {
+		return openWorkbook(bytes, options, onEvent)
+	}
+
+	return openText(
+		bytes,
+		options.settings?.locale === undefined
+			? { ...options, settings: { ...options.settings, locale: sheetLocaleOf(browserLanguage()) } }
+			: options,
+		onEvent
+	)
 }
 
 // Save as .xlsx of a text file: its cells as the text session handed them out (the saveAs.cells query, a UTF-8

@@ -61,6 +61,19 @@ async function body(rtf: Uint8Array): Promise<string> {
 }
 
 describe("RTF editing backend", () => {
+	it("carries what the file shows that its package leaves out (an equation), for the editor's PDF to report", async () => {
+		const plain = await editing(RTF)
+		const math = await editing(
+			latin1(
+				"{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Times New Roman;}}\\pard\\plain Before\\par\n" +
+					"\\pard\\plain {\\mmath{\\*\\moMath{\\*\\mr a}}}\\par\n}"
+			)
+		)
+
+		expect(rtfEditingBackend(plain.document, plain.document.prove()).untranslated).toBe(0)
+		expect(rtfEditingBackend(math.document, math.document.prove()).untranslated).toBe(1)
+	})
+
 	it("saves an untouched document as its own bytes", async () => {
 		const { save } = await editing(RTF)
 

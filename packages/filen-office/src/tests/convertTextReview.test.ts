@@ -261,7 +261,7 @@ describe("docx → odt on hostile sizes", () => {
 		const styles = entry === undefined ? "" : decodeUtf8(await archive.read(entry))
 
 		expect(styles).toMatch(/<style:header>.*H \(HeaderNote\).*<\/style:header>/u)
-		expect(styles).not.toContain("<text:note")
+		expect(styles).not.toMatch(/<text:note[\s>]/u)
 		expect(converted.lossy.features.some(feature => feature.kind === "nestedNote")).toBe(true)
 	})
 

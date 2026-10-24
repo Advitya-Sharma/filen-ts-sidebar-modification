@@ -1317,6 +1317,7 @@ function openRtf(
 					document: {
 						host: (held, listener, openOptions = {}) => openSession(held, listener, openOptions, id),
 						bytes: heldSource(answer.size),
+						untranslated: answer.untranslated,
 						async take() {
 							const reply = await call(callId => ({ t: "take", s: id, id: callId }))
 

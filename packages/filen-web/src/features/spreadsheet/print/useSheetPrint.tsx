@@ -12,17 +12,19 @@ import { log } from "@/lib/log"
 
 export interface SheetPrint {
 	readonly extension: SheetBodyExtension
-	// Opens the print dialog (the file menu's Print…); undefined while the session cannot print.
+	// Opens the print dialog (the file menu's Print…); undefined while the session cannot print or the file may not be downloaded.
 	readonly open: (() => void) | undefined
 }
 
 // Printing: Mod+P and the file menu open the print dialog over the sheet on show, its settings read first (an open
-// entry committed before), so the dialog opens with the pages as they print.
+// entry committed before), so the dialog opens with the pages as they print. A print is an export: never of a file
+// that may not be downloaded, where Mod+P is taken and does nothing.
 export function useSheetPrint({
 	grid,
 	model,
 	kind,
 	name,
+	offered,
 	canEdit,
 	run,
 	onSavePdf
@@ -31,6 +33,8 @@ export function useSheetPrint({
 	model: SheetGridModel
 	kind: SheetFileKind
 	name: string
+	// The file may be downloaded.
+	offered: boolean
 	canEdit: boolean
 	run: (command: SheetCommand) => void
 	// Saves the dialog's pages as a PDF instead (undefined: not offered, nothing may be downloaded).
@@ -41,7 +45,7 @@ export function useSheetPrint({
 	const [count, setCount] = useState(0)
 	const sheet = grid.sheets.find(entry => entry.id === grid.sheet)
 	const open =
-		grid.failed !== null || sheet === undefined
+		!offered || grid.failed !== null || sheet === undefined
 			? undefined
 			: () => {
 					void model

@@ -102,6 +102,32 @@ const DOCX_REFUSALS: Readonly<Record<string, TextRefusalReason>> = {
 	tooLarge: "tooLarge"
 }
 
+// Word's footnote and endnote number formats with an ODF form (Part 3 §19.474, letters as Word repeats them).
+const NOTE_FORMATS: Readonly<Record<string, string>> = {
+	decimal: "1",
+	lowerRoman: "i",
+	upperRoman: "I",
+	lowerLetter: "a",
+	upperLetter: "A"
+}
+const NOTE_RESTARTS: Readonly<Record<string, string>> = { continuous: "document", eachPage: "page", eachSect: "chapter" }
+const FOOTNOTE_POSITIONS: Readonly<Record<string, string>> = {
+	pageBottom: "page",
+	beneathText: "text",
+	sectEnd: "section",
+	docEnd: "document"
+}
+const OFF = new Set(["0", "false", "off"])
+
+// An ST_OnOff element's w:val (or another attribute): off without the element, `unset` without the attribute.
+function isOn(document: XmlDocument, node: number, attribute = "w:val", unset = true): boolean {
+	if (node < 0) return false
+
+	const value = document.attribute(node, attribute)
+
+	return value === undefined ? unset : !OFF.has(value)
+}
+
 function child(document: XmlDocument, node: number, local: string): number {
 	for (let at = document.firstChildElement(node); at >= 0; at = document.nextSiblingElement(at))
 		if (document.localName(at) === local) return at
@@ -235,7 +261,9 @@ class Converter {
 	private readonly names = new StyleNames(this.taken)
 	// Pictures by source part: their path in the ODF package.
 	private readonly media = new Map<string, string>()
-	private readonly changes: string[] = []
+	// Tracked changes' regions as written (text:tracked-changes), and those whose blocks are still being written.
+	private readonly changes: Uint8Array[] = []
+	private pendingChanges: { readonly open: string; readonly deleted: string; readonly close: string }[] = []
 	private readonly lowered = new Map<string, XmlDocument>()
 	private readonly stories = new Map<string, XmlDocument | undefined>()
 	private readonly headerParts = new Map<string, string>()
@@ -283,6 +311,8 @@ class Converter {
 			settings === undefined ? Number.NaN : settings.attribute(child(settings, settingsRoot, "defaultTabStop"), "w:val")
 		)
 		const evenAndOdd = settings !== undefined && child(settings, settingsRoot, "evenAndOddHeaders") >= 0
+		const protection = this.protection(settings)
+		const tracking = protection.tracking || (settings !== undefined && isOn(settings, child(settings, settingsRoot, "trackRevisions")))
 		const theme = await themeOf(pkg)
 		const lowering = new Lowering(lossy, this.ids, theme)
 
@@ -364,6 +394,7 @@ class Converter {
 		const sheet = new OdfStyleSheet(sheetStyles, prologue)
 		const mapper = new StyleMapper(sheet, new OdfStyleResolver(sheet), { tabsRelativeToIndent: false })
 		const masters = this.masters(sections, body.blocks.length, evenAndOdd)
+		const notesConfiguration = this.notesConfiguration(settings, sections)
 		const masterOf = new Map<number, string>()
 		const run: { document: XmlDocument | undefined } = { document: undefined }
 		const content = this.stream("content", { sheet, mapper, chains, styles, lists, masterOf, body: run })
@@ -381,9 +412,34 @@ class Converter {
 		// written is held as bytes.
 		const written: Uint8Array[] = []
 		const referenced = new Set<string>()
+		// Forms protection: from each section's first block, whether Word protects it (w:formProt, on unless set off),
+		// written as a protected text:section (Part 3 §5.4) as LibreOffice reads it.
+		const formSections = new Map<number, boolean>()
+
+		if (protection.forms)
+			for (const section of sections) {
+				const formProt = child(section.sectPr, section.root, "formProt")
+
+				formSections.set(section.first, formProt < 0 || isOn(section.sectPr, formProt))
+			}
+
+		let inSection = false
+		const sectionAt = (at: number): void => {
+			const wanted = formSections.get(at)
+
+			if (wanted === undefined || wanted === inSection) return
+
+			written.push(
+				encodeUtf8(
+					inSection ? "</text:section>" : `<text:section text:name="${esc(this.names.name("Section"))}" text:protected="true">`
+				)
+			)
+			inSection = wanted
+		}
 
 		for (let from = 0; from < body.blocks.length;) {
 			await turn(this.job)
+			sectionAt(from)
 
 			// A long top-level table is written on its own, a few rows at a time.
 			const table = body.blocks[from] ?? -1
@@ -394,6 +450,7 @@ class Converter {
 				for await (const piece of this.streamTable(content, lowering, table, name, from + 1 >= body.blocks.length, run, masterOf)) {
 					collectReferences(piece, referenced)
 					written.push(encodeUtf8(piece))
+					this.flushChanges(referenced)
 				}
 
 				from++
@@ -403,7 +460,8 @@ class Converter {
 
 			let to = from + 1
 
-			while (to < body.blocks.length && to - from < RUN && !this.streamed(source, body.blocks[to] ?? -1)) to++
+			while (to < body.blocks.length && to - from < RUN && !this.streamed(source, body.blocks[to] ?? -1) && !formSections.has(to))
+				to++
 
 			const lowered = lowering.lowerBlocks(body.blocks.slice(from, to), to >= body.blocks.length)
 			const document = parseXml(encodeUtf8(lowered.xml))
@@ -429,8 +487,11 @@ class Converter {
 
 			// Charged as each block was written.
 			written.push(encodeUtf8(text))
+			this.flushChanges(referenced)
 			from = to
 		}
+
+		if (inSection) written.push(encodeUtf8("</text:section>"))
 
 		pkg.release(main)
 
@@ -468,32 +529,126 @@ class Converter {
 		}
 
 		await turn(this.job)
+		this.flushChanges(referenced)
 
-		const tracked =
+		// Whether changes are tracked (w:trackRevisions, or forced by the editing restriction): Part 3 §5.5.1.
+		const trackedChanges =
 			this.changes.length === 0
-				? ""
-				: `<text:tracked-changes text:track-changes="false">${this.changes.join("")}</text:tracked-changes>`
-
-		collectReferences(tracked, referenced)
-
+				? tracking
+					? [encodeUtf8('<text:tracked-changes text:track-changes="true"/>')]
+					: []
+				: [
+						encodeUtf8(`<text:tracked-changes text:track-changes="${String(tracking)}">`),
+						...this.changes,
+						encodeUtf8("</text:tracked-changes>")
+					]
 		const contentHead =
 			`${XML_DECLARATION}<office:document-content ${ROOT_NAMESPACES} office:version="1.3">${this.fonts.markup()}` +
 			`<office:automatic-styles>${content.registry.used([[...referenced].map(name => `="${name}"`).join("")])}</office:automatic-styles>` +
-			`<office:body><office:text>${tracked}`
-		const contentXml = [encodeUtf8(contentHead), ...written, encodeUtf8("</office:text></office:body></office:document-content>")]
+			"<office:body><office:text>"
+		const contentXml = [
+			encodeUtf8(contentHead),
+			...trackedChanges,
+			...written,
+			encodeUtf8("</office:text></office:body></office:document-content>")
+		]
 		const masterText = this.continuable(this.resolved(stylesStream, masterStyles))
 		const stylesXml =
 			`${XML_DECLARATION}<office:document-styles ${ROOT_NAMESPACES} office:version="1.3">${this.fonts.markup()}` +
-			`<office:styles>${commonStyles}</office:styles>` +
+			`<office:styles>${commonStyles}${notesConfiguration}</office:styles>` +
 			`<office:automatic-styles>${masters.layouts}${stylesStream.registry.used([masterText])}</office:automatic-styles>` +
 			`<office:master-styles>${masterText}</office:master-styles></office:document-styles>`
 		const settingsXml =
-			`${XML_DECLARATION}<office:document-settings ${ROOT_NAMESPACES} office:version="1.3"><office:settings>` +
+			// LibreOffice reads the set's name as a qualified name: without the ooo prefix declared it applies none of it.
+			`${XML_DECLARATION}<office:document-settings ${ROOT_NAMESPACES} xmlns:ooo="http://openoffice.org/2004/office" office:version="1.3"><office:settings>` +
 			// Word measures tab stops from the page margin, not the paragraph's indent.
-			'<config:config-item-set config:name="ooo:configuration-settings"><config:config-item config:name="TabsRelativeToIndent" config:type="boolean">false</config:config-item></config:config-item-set>' +
+			'<config:config-item-set config:name="ooo:configuration-settings"><config:config-item config:name="TabsRelativeToIndent" config:type="boolean">false</config:config-item>' +
+			(protection.readOnly ? '<config:config-item config:name="LoadReadonly" config:type="boolean">true</config:config-item>' : "") +
+			(protection.forms ? '<config:config-item config:name="ProtectForm" config:type="boolean">true</config:config-item>' : "") +
+			"</config:config-item-set>" +
 			"</office:settings></office:document-settings>"
 
 		return this.packageOf(contentXml, stylesXml, settingsXml, await this.metaXml())
+	}
+
+	// Word's editing restriction (w:documentProtection, when enforced) and its recommendation to open read-only
+	// (w:writeProtection) as LibreOffice keeps them: read-only as LoadReadonly, forms as ProtectForm (and protected
+	// sections), forced change tracking as tracking on. What an OpenDocument text has no form for is counted.
+	private protection(settings: XmlDocument | undefined): { readOnly: boolean; forms: boolean; tracking: boolean } {
+		const root = settings?.documentElement() ?? -1
+		const restriction = settings === undefined ? -1 : child(settings, root, "documentProtection")
+		const recommended = settings === undefined ? -1 : child(settings, root, "writeProtection")
+		const enforced = settings !== undefined && restriction >= 0 && isOn(settings, restriction, "w:enforcement", false)
+		const edit = enforced ? (settings.attribute(restriction, "w:edit") ?? "none") : "none"
+		const password = (node: number): boolean =>
+			settings !== undefined &&
+			node >= 0 &&
+			(settings.attribute(node, "w:hash") ?? settings.attribute(node, "w:hashValue")) !== undefined
+
+		// Comments-only editing has no ODF form; forced tracking's lock and a restriction's password neither.
+		if (edit === "comments" || edit === "trackedChanges") this.lossy.add("documentProtection")
+		if ((edit === "readOnly" || edit === "forms") && password(restriction)) this.lossy.add("documentProtection")
+		if (password(recommended)) this.lossy.add("documentProtection")
+
+		return { readOnly: edit === "readOnly" || recommended >= 0, forms: edit === "forms", tracking: edit === "trackedChanges" }
+	}
+
+	// Footnote and endnote numbering and placement (w:footnotePr, w:endnotePr: the document's, then each section's) as
+	// text:notes-configuration (Part 3 §16.31.3). Numbering from 1 leaves text:start-value out (its default, §19.874.5);
+	// another start is written counted from 0, as LibreOffice reads and writes it.
+	private notesConfiguration(settings: XmlDocument | undefined, sections: readonly Section[]): string {
+		let out = ""
+
+		for (const kind of ["footnote", "endnote"] as const) {
+			const fromSettings = settings === undefined ? -1 : child(settings, settings.documentElement(), `${kind}Pr`)
+			const value = (local: string, fallback: string): string[] =>
+				(sections.length === 0 ? [undefined] : sections).map(section => {
+					const own =
+						section === undefined || section.root < 0
+							? undefined
+							: section.sectPr.attribute(
+									child(section.sectPr, child(section.sectPr, section.root, `${kind}Pr`), local),
+									"w:val"
+								)
+
+					return own ?? settings?.attribute(child(settings, fromSettings, local), "w:val") ?? fallback
+				})
+			const settled = (values: readonly string[]): string => {
+				if (values.some(other => other !== values[0])) this.lossy.add("noteSettings")
+
+				return values[0] ?? ""
+			}
+			const format = settled(value("numFmt", kind === "footnote" ? "decimal" : "lowerRoman"))
+			const start = Number(settled(value("numStart", "1")))
+			const restart = settled(value("numRestart", "continuous"))
+			const position = settled(value("pos", kind === "footnote" ? "pageBottom" : "docEnd"))
+			const written = NOTE_FORMATS[format]
+
+			if (written === undefined) this.lossy.add("noteSettings")
+
+			let attributes = ` style:num-format="${written ?? "1"}"${written === "a" || written === "A" ? ' style:num-letter-sync="true"' : ""}`
+
+			if (Number.isInteger(start) && start > 1) attributes += ` text:start-value="${String(start - 1)}"`
+
+			if (kind === "footnote") {
+				const at = FOOTNOTE_POSITIONS[position]
+				const restarts = NOTE_RESTARTS[restart]
+
+				// Numbering per section has none (chapter: LibreOffice's nearest, §19.875).
+				if (at === undefined) this.lossy.add("noteSettings")
+				if (restarts === undefined || restart === "eachSect") this.lossy.add("noteSettings")
+
+				attributes += ` text:footnotes-position="${at ?? "page"}" text:start-numbering-at="${restarts ?? "document"}"`
+			} else {
+				// Endnotes number through the document, after its end.
+				if (restart !== "continuous") this.lossy.add("noteSettings")
+				if (position !== "docEnd") this.lossy.add("noteSettings")
+			}
+
+			out += `<text:notes-configuration text:note-class="${kind}"${attributes}/>`
+		}
+
+		return out
 	}
 
 	private withoutConditional(document: XmlDocument): XmlDocument {
@@ -579,10 +734,13 @@ class Converter {
 			hyperlink: id => this.ids.hyperlinks.get(id),
 			change: (kind, author, date, deleted) => {
 				const id = registry.name("ct", true)
+				const open = `<text:changed-region xml:id="${esc(id)}" text:id="${esc(id)}"><text:${kind}><office:change-info><dc:creator>${escText(author)}</dc:creator><dc:date>${escText((date ?? "1970-01-01T00:00:00").replace(/Z$/u, ""))}</dc:date></office:change-info>`
+				const close = `</text:${kind}></text:changed-region>`
+				// Its lists named by the stream that wrote it, and charged as written: held as bytes once its blocks are.
+				const region = { open, deleted: holder.stream === undefined ? deleted : this.resolved(holder.stream, deleted), close }
 
-				this.changes.push(
-					`<text:changed-region xml:id="${esc(id)}" text:id="${esc(id)}"><text:${kind}><office:change-info><dc:creator>${escText(author)}</dc:creator><dc:date>${escText((date ?? "1970-01-01T00:00:00").replace(/Z$/u, ""))}</dc:date></office:change-info>${deleted}</text:${kind}></text:changed-region>`
-				)
+				this.spend(open.length + region.deleted.length + close.length)
+				this.pendingChanges.push(region)
 
 				return id
 			},
@@ -656,6 +814,23 @@ class Converter {
 
 			return ""
 		})
+	}
+
+	// The change regions of blocks now written, as bytes: a list they continue is known by now (continuable).
+	private flushChanges(referenced: Set<string>): void {
+		if (this.pendingChanges.length === 0) return
+
+		let text = ""
+
+		for (const { open, deleted, close } of this.pendingChanges) {
+			const written = deleted.includes("<text:list") ? this.continuable(deleted) : deleted
+
+			collectReferences(written, referenced)
+			text += `${open}${written}${close}`
+		}
+
+		this.changes.push(encodeUtf8(text))
+		this.pendingChanges = []
 	}
 
 	// `held`: the markup of the block being written so far, past what one block may hold.
@@ -761,7 +936,7 @@ class Converter {
 				}
 			} else {
 				content.emitter.tableRows(document, node, from, state, (write, row) => {
-					const changes = this.changes.length
+					const changes = this.pendingChanges.length
 					const notes = content.context.notes?.size ?? 0
 					const spent = this.spent
 
@@ -775,7 +950,7 @@ class Converter {
 					} catch (error) {
 						if (!(error instanceof OdtWriteRefusal)) throw error
 
-						this.changes.length = changes
+						this.pendingChanges.length = changes
 						content.context.notes?.rollback(notes)
 						this.spent = spent
 						this.lossy.add("blockFormat")
@@ -820,7 +995,7 @@ class Converter {
 	// Blocks written by the emitter: a run at once, or (when the run refuses) each block on its own; a block that
 	// refuses alone is written plain.
 	private blocks(stream: Stream, document: XmlDocument, nodes: readonly number[]): string {
-		const changes = this.changes.length
+		const changes = this.pendingChanges.length
 		const notes = stream.context.notes?.size ?? 0
 		const spent = this.spent
 
@@ -829,7 +1004,7 @@ class Converter {
 		} catch (error) {
 			if (!(error instanceof OdtWriteRefusal)) throw error
 
-			this.changes.length = changes
+			this.pendingChanges.length = changes
 			stream.context.notes?.rollback(notes)
 			this.spent = spent
 		}
@@ -837,7 +1012,7 @@ class Converter {
 		let out = ""
 
 		for (const node of nodes) {
-			const before = this.changes.length
+			const before = this.pendingChanges.length
 			const notesBefore = stream.context.notes?.size ?? 0
 			const spentBefore = this.spent
 
@@ -846,7 +1021,7 @@ class Converter {
 			} catch (error) {
 				if (!(error instanceof OdtWriteRefusal)) throw error
 
-				this.changes.length = before
+				this.pendingChanges.length = before
 				stream.context.notes?.rollback(notesBefore)
 				this.spent = spentBefore
 				this.lossy.add("blockFormat")

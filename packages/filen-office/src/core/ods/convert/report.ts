@@ -2,6 +2,9 @@
 // Nothing is dropped unnamed: each item is converted, kept in a reduced form its kind states, or counted here.
 
 export type SheetLossyKind =
+	// The source was read as its values alone (an Excel 97–2003 workbook): its formulas are their results, and its
+	// formatting, column widths, row heights and names are not in the copy. Counted once, for the workbook.
+	| "valuesOnly"
 	// Formulas one grammar has and the other cannot say (OpenFormula ⟷ Excel): written as their cached values, an
 	// error as that error alone (of:=#N/A, shown as #N/A), one OpenFormula has no name for as its text.
 	| "formula"
@@ -62,6 +65,7 @@ export interface SheetLossyFeature {
 
 // The order kinds are listed in.
 const ORDER: readonly SheetLossyKind[] = [
+	"valuesOnly",
 	"formula",
 	"conditionalFormat",
 	"dataValidation",

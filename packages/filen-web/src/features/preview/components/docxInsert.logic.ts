@@ -205,21 +205,90 @@ export function fieldChipAction(
 }
 
 // A menu whose items run commands: the host gives the document the focus as one runs, so the menu gives it back
-// there when it closes after one (its trigger gets it otherwise). `ran` after running; `finalFocus` to the
-// menu's popup.
-export function useCommandMenuFocus(): { ran: () => void; finalFocus: () => HTMLElement | true } {
+// there when it closes after one (its trigger gets it otherwise). `ran` after running; `kept` after an item
+// that leaves focus alone (a setting, the zoom): focus goes back to where it was when the menu opened (the
+// document, as toolbar triggers keep it on a press). `opened` to the menu's onOpenChange and `finalFocus` to
+// its popup. An item that replaces the document's view (Mobile view) runs `afterClose`, with `closed` on the
+// menu's onOpenChangeComplete: the document takes focus back first, so the view shown in its place keeps it.
+// A select gives focus back to nothing once an option is picked (it is left on the page): `settled` on its
+// onOpenChangeComplete gives it to the document.
+export function useCommandMenuFocus(): {
+	ran: () => void
+	kept: () => void
+	afterClose: (action: () => void) => void
+	opened: (open: boolean) => void
+	finalFocus: () => HTMLElement | boolean
+	closed: (open: boolean) => void
+	settled: (open: boolean) => void
+} {
 	const focusedRef = useRef<HTMLElement | null>(null)
+	const beforeRef = useRef<HTMLElement | null>(null)
+	const pendingRef = useRef<(() => void) | null>(null)
+	// The pending action ran: focus is the new view's.
+	const handedRef = useRef(false)
 
 	return {
 		ran: () => {
-			focusedRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+			focusedRef.current = activeElement()
+		},
+		kept: () => {
+			focusedRef.current = beforeRef.current
+		},
+		afterClose: action => {
+			focusedRef.current = beforeRef.current
+			pendingRef.current = action
+		},
+		opened: open => {
+			if (open) {
+				beforeRef.current = activeElement()
+				focusedRef.current = null
+				pendingRef.current = null
+				handedRef.current = false
+			}
 		},
 		finalFocus: () => {
 			const focused = focusedRef.current
 
 			focusedRef.current = null
 
+			if (handedRef.current) {
+				handedRef.current = false
+
+				return false
+			}
+
 			return focused?.isConnected === true ? focused : true
+		},
+		closed: open => {
+			const pending = pendingRef.current
+
+			if (open || pending === null) {
+				return
+			}
+
+			pendingRef.current = null
+			handedRef.current = true
+
+			const before = beforeRef.current
+
+			if (before?.isConnected === true) {
+				before.focus({ preventScroll: true })
+			}
+
+			pending()
+		},
+		settled: open => {
+			const focused = focusedRef.current
+
+			focusedRef.current = null
+
+			if (!open && focused?.isConnected === true) {
+				focused.focus({ preventScroll: true })
+			}
 		}
 	}
+}
+
+function activeElement(): HTMLElement | null {
+	return document.activeElement instanceof HTMLElement ? document.activeElement : null
 }

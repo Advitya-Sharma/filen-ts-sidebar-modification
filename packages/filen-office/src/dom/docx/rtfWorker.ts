@@ -12,7 +12,7 @@ import { DocxRtfRefusal, type DocxRtf, type DocxRtfEdits, type RtfLockedBlock } 
 import { BytePieces, OpcPackage, bytesSource, memorySink, writeZip } from "../../core/opc/index"
 import { nativeDeflate } from "../../core/docx/write/zip"
 import { convertOdtEditToDocx, type TextConversion } from "../../core/convert/text/index"
-import { TextConversionError } from "../../core/convert/text/report"
+import { TextConversionError, type TextLossyKind } from "../../core/convert/text/report"
 import { odtTranslationToDocx, rtfLossy } from "../../core/convert/text/toDocx"
 import { answerOf } from "./convert"
 
@@ -28,6 +28,8 @@ export type DocxSourceFormat = "rtf" | "odt"
 interface SourceDocument {
 	// The translation's package.
 	readonly docx: Uint8Array
+	// What the file shows that the package leaves out (an equation, a shape, a form field...), counted.
+	readonly untranslated: number
 	prove(turns: RtfTurns): Promise<readonly RtfLockedBlock[]>
 	// The file as edited; `bytes` is the source itself for an untouched one.
 	write(edits: DocxRtfEdits, turns: RtfTurns): Promise<Uint8Array>
@@ -53,6 +55,10 @@ async function editedPackage(docx: Uint8Array, edits: DocxRtfEdits): Promise<Uin
 	return sink.bytes()
 }
 
+// What a conversion reports an RTF file lost that no page of it shows: unknown destinations (the generator's name,
+// tables of settings), bytes past its end and groups it left open.
+const UNSHOWN: ReadonlySet<TextLossyKind> = new Set<TextLossyKind>(["rtfDestination", "rtfTrailing", "rtfUnclosedGroup"])
+
 async function openSource(format: DocxSourceFormat, bytes: Uint8Array, turns: RtfTurns): Promise<SourceDocument | undefined> {
 	if (format === "rtf") {
 		if (!isRtf(bytes)) return undefined
@@ -63,6 +69,9 @@ async function openSource(format: DocxSourceFormat, bytes: Uint8Array, turns: Rt
 			? undefined
 			: {
 					docx: source.read.docx,
+					untranslated: rtfLossy(source.read)
+						.report("rtf", "docx")
+						.features.reduce((sum, feature) => (UNSHOWN.has(feature.kind) ? sum : sum + feature.count), 0),
 					bytes: source.bytes,
 					prove: async proofTurns => (await proveRtf(source, proofTurns)).locked.map(({ part, offset }) => ({ part, offset })),
 					write: async (edits, writeTurns) =>
@@ -94,6 +103,8 @@ async function openSource(format: DocxSourceFormat, bytes: Uint8Array, turns: Rt
 
 	return {
 		docx: source.docx,
+		// The engine lays out the same translation an ODT file is shown and exported as.
+		untranslated: 0,
 		bytes: source.bytes,
 		prove: async proofTurns => (await proveOdt(source, proofTurns)).locked,
 		write: async (edits, writeTurns) =>
@@ -102,7 +113,8 @@ async function openSource(format: DocxSourceFormat, bytes: Uint8Array, turns: Rt
 	}
 }
 
-export type DocxRtfOpened = { readonly ok: true; readonly size: number } | { readonly ok: false; readonly notRtf: boolean }
+export type DocxRtfOpened =
+	{ readonly ok: true; readonly size: number; readonly untranslated: number } | { readonly ok: false; readonly notRtf: boolean }
 
 export type DocxRtfWritten =
 	{ readonly ok: true; readonly bytes: Uint8Array } | { readonly ok: false; readonly reason: string; readonly message: string }
@@ -200,7 +212,7 @@ export function docxRtfServer(slicing?: Slicing): DocxRtfServer {
 
 			document.source = source
 
-			return { ok: true, size: source.docx.length }
+			return { ok: true, size: source.docx.length, untranslated: source.untranslated }
 		},
 		package(id) {
 			return held.get(id)?.source?.docx
@@ -292,6 +304,7 @@ export function inThreadDocxRtf(services: (options: DocxOpenOptions) => DocxEngi
 					host: (_source, listener, openOptions) =>
 						engines(bytesSource(server.package(0) ?? new Uint8Array(0)), listener, openOptions),
 					bytes: heldSource(opened.size),
+					untranslated: opened.untranslated,
 					take: () => Promise.resolve(server.take(0)),
 					prove: () => server.prove(0),
 					async write(edits) {

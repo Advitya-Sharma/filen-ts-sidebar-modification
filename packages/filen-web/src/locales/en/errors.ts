@@ -1,5 +1,6 @@
 import { type SdkErrorKind } from "@/lib/sdk/errorKinds.gen"
 import type { MediaErrorKind } from "@/lib/media/mediaFailure"
+import type { DOWNLOAD_NEEDS_RELOAD } from "@/lib/sdk/errors"
 
 // English source catalog — "errors" namespace, keyed by the SDK's finite `SdkErrorKind` taxonomy
 // (@/lib/sdk/errorKinds.gen, generated from @filen/sdk-rs@0.4.29's ErrorKind enum) so a lookup is
@@ -9,7 +10,7 @@ import type { MediaErrorKind } from "@/lib/media/mediaFailure"
 // time; every unseeded SdkErrorKind member (and any error with no `kind` at all — plain
 // marshalling errors) falls back to `labelFirst`'s LABEL-FIRST server/inner/message chain, never a
 // raw untranslated technical string. The app's own media failure kinds (lib/media/mediaFailure.ts) are
-// labelled here too, so every player shows one wording.
+// labelled here too, so every player shows one wording, as is a download refused on a page it cannot save from.
 export const errors = {
 	/** Fires when the server rejects a call because the session is no longer authenticated; surfaces via errorLabel wherever the failing operation reports */
 	Unauthenticated: "You're not signed in. Please sign in again.",
@@ -67,5 +68,7 @@ export const errors = {
 	/** Raised by the app (not the SDK) when the browser can't decode a video/audio file's format or codec; shown in the preview, a chat embed and the music player's error line */
 	MediaFormatUnsupported: "Your browser can't play this file's format.",
 	/** Raised by the app (not the SDK) when a video/audio file stopped playing for any other reason (the stream broke, the file couldn't be read); shown wherever the player reports */
-	MediaPlaybackFailed: "This file couldn't be played."
-} as const satisfies Partial<Record<SdkErrorKind | MediaErrorKind, string>>
+	MediaPlaybackFailed: "This file couldn't be played.",
+	/** Raised by the app (not the SDK) when a download starts on a page the service worker does not control (after a hard reload), which cannot save a streamed file; shown wherever the download reports (a drive download, Download as, an archive entry) */
+	DownloadNeedsReload: "Reload the page to download files."
+} as const satisfies Partial<Record<SdkErrorKind | MediaErrorKind | typeof DOWNLOAD_NEEDS_RELOAD, string>>

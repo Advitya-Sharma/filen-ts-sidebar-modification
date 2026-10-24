@@ -25,10 +25,18 @@ import { log } from "@/lib/log"
 // is exported is what the pages show: the file laid out again in the worker (Final view), or the editor's
 // layout with its unsaved edits.
 
+// `untranslated` (file and editor): what the file shows that the document exported leaves out (an RTF's equations,
+// DocxRtfDocument.untranslated), which the PDF's report counts.
 export type DocxPdfSource =
 	// The file as downloaded (not password-protected); an OpenDocument text file is laid out as the viewer does.
 	// `owned`: a buffer nothing else holds, handed to the worker as it is (else a copy is).
-	| { readonly kind: "file"; readonly bytes: Uint8Array; readonly format?: "docx" | "odt"; readonly owned?: boolean }
+	| {
+			readonly kind: "file"
+			readonly bytes: Uint8Array
+			readonly format?: "docx" | "odt"
+			readonly owned?: boolean
+			readonly untranslated?: number
+	  }
 	// A password-protected file's decrypted package, unlocked for this export.
 	| { readonly kind: "unlocked"; readonly document: DocxUnlockedDocument }
 	// The editor's document, unsaved edits included, in the Final view; `markup`: the editor shows tracked changes or
@@ -37,6 +45,7 @@ export type DocxPdfSource =
 			readonly kind: "editor"
 			readonly live: (signal: AbortSignal) => Promise<DocxPdfLive | undefined>
 			readonly markup: boolean
+			readonly untranslated?: number
 	  }
 
 function worker() {
@@ -112,6 +121,9 @@ export async function makeDocxPdf(source: DocxPdfSource, fileName: string, make:
 				title: pdfTitle(fileName),
 				lang: i18n.language,
 				...(source.kind === "file" && source.format !== undefined ? { format: source.format } : {}),
+				...(source.kind !== "unlocked" && source.untranslated !== undefined && source.untranslated > 0
+					? { untranslated: source.untranslated }
+					: {}),
 				...(make.password === undefined ? {} : { password: make.password }),
 				...(PDF_DETERMINISTIC ? { deterministic: true } : {})
 			},
