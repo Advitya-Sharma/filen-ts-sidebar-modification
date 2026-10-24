@@ -259,7 +259,13 @@ let executor: ToolExecutor
 type CallOutcome = AssistantToolExecution | AssistantToolFailure
 
 // One call the way the loop makes it: schema, check, then execute with the checked arguments.
-async function call(name: string, args: Record<string, unknown>, confirmed = false): Promise<CallOutcome> {
+// `calendar` pins what the machine's clock and locale would otherwise decide (its first weekday).
+async function call(
+	name: string,
+	args: Record<string, unknown>,
+	confirmed = false,
+	calendar?: Parameters<typeof executor.execute>[0]["calendar"]
+): Promise<CallOutcome> {
 	const tool = assistantToolByName(name)
 
 	if (!tool?.input.safeParse(args).success) {
@@ -272,7 +278,14 @@ async function call(name: string, args: Record<string, unknown>, confirmed = fal
 		return checked
 	}
 
-	return executor.execute({ callId: "call", tool, args: checked.args, confirmed, signal: new AbortController().signal })
+	return executor.execute({
+		callId: "call",
+		tool,
+		args: checked.args,
+		confirmed,
+		signal: new AbortController().signal,
+		...(calendar === undefined ? {} : { calendar })
+	})
 }
 
 // What the model reads.
@@ -1428,7 +1441,9 @@ describe("date filters and insights", () => {
 		expect(json(await call("list_notes", {}))["more"]).toBe(7)
 
 		// A period that alone empties a search by words gives way to the word matches.
-		expect(json(await call("list_notes", { query: "march", period: "this_week" }))).toMatchObject({
+		expect(
+			json(await call("list_notes", { query: "march", period: "this_week" }, false, { ...userCalendar(), weekStart: 1 }))
+		).toMatchObject({
 			notes: [{ title: "March plan" }],
 			note: "None of these is dated 2025-10-06 to 2025-10-12; they match the words at other dates."
 		})
