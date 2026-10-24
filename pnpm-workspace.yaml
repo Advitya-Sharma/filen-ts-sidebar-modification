@@ -10,6 +10,9 @@ strictDepBuilds: true
 # @filen/sdk-rs depends on a git fork of uniffi-bindgen-react-native; pnpm 12 blocks
 # git-resolved subdependencies by default. Remove once the SDK depends on a registry release.
 blockExoticSubdeps: false
+# Heap ceiling for every script pnpm runs (NODE_OPTIONS, replacing one set outside pnpm): filen-web's
+# type-aware eslint and tsc outgrow Node's default ~4 GB heap, locally and on the CI runners.
+nodeOptions: --max-old-space-size=16384
 
 packageExtensions:
   # Imports react-native without declaring it, so it would resolve whichever copy pnpm

@@ -29,9 +29,6 @@ concurrency:
   group: 'staging-web'
   cancel-in-progress: true
 
-env:
-  NODE_OPTIONS: --max-old-space-size=8192
-
 jobs:
   staging-web:
     runs-on: ubuntu-latest

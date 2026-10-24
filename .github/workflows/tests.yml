@@ -279,9 +279,6 @@ jobs:
     if: needs.changes.outputs.filen-web == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      # The Vite production build (SDK wasm + full module graph) needs more than the default heap.
-      NODE_OPTIONS: --max-old-space-size=8192
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -392,8 +389,6 @@ jobs:
       group: ${{ matrix.group }}
       cancel-in-progress: false
     env:
-      # The Vite production build (SDK wasm + full module graph) needs more than the default heap.
-      NODE_OPTIONS: --max-old-space-size=8192
       # The setup and teardown projects drive chromium whatever the lane browser.
       E2E_INSTALL: ${{ matrix.browser == 'all' && 'chromium firefox webkit' || matrix.browser == 'chromium' && 'chromium' || format('chromium {0}', matrix.browser) }}
     steps:

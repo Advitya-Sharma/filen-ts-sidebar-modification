@@ -17,9 +17,6 @@ concurrency:
   group: release-web
   cancel-in-progress: false
 
-env:
-  NODE_OPTIONS: --max-old-space-size=8192
-
 jobs:
   release-web:
     runs-on: ubuntu-latest

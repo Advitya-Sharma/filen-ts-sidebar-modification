@@ -343,8 +343,7 @@ export default defineConfig({
 		// runner needs real headroom for typecheck + vite build + preview boot before the first test.
 		timeout: 600_000,
 		env: {
-			VITE_E2E: "1",
-			NODE_OPTIONS: "--max-old-space-size=8192"
+			VITE_E2E: "1"
 		}
 	}
 })
