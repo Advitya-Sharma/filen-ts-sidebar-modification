@@ -713,7 +713,8 @@ export interface ResolvedTableProps {
 	readonly alignment: string
 	readonly physicalAlignment: "left" | "center" | "right"
 	readonly indent: WidthProps
-	readonly cellSpacing: WidthProps
+	// w:tblCellSpacing when set (cells then keep their own borders).
+	readonly cellSpacing: WidthProps | undefined
 	readonly borders: ResolvedTableBorders
 	readonly shading: ResolvedShading | undefined
 	readonly layout: "fixed" | "autofit"

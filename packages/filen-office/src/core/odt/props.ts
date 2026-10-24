@@ -597,8 +597,12 @@ export function paragraphProperties(
 
 	if (mode !== undefined) tail += onOff("bidi", mode.startsWith("rl"))
 
-	const before = parseLength(own.get("fo:margin-top"))
-	const after = parseLength(own.get("fo:margin-bottom"))
+	// LibreOffice reads a style's space above and below as one setting: one given without the other makes the other 0,
+	// not the parent's (measured).
+	const ownBefore = parseLength(own.get("fo:margin-top"))
+	const ownAfter = parseLength(own.get("fo:margin-bottom"))
+	const before = ownBefore ?? (ownAfter === undefined ? undefined : 0)
+	const after = ownAfter ?? (ownBefore === undefined ? undefined : 0)
 	const lineHeight = own.get("fo:line-height")
 	const atLeast = parseLength(own.get("style:line-height-at-least"))
 	const leading = parseLength(own.get("style:line-spacing"))

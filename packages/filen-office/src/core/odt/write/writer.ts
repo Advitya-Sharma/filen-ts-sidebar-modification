@@ -3141,7 +3141,7 @@ class OdtWrite {
 		set("fo:margin-left", point(twips(margins, "left")))
 		set("fo:margin-right", point(twips(margins, "right")))
 		// A header's or footer's extent sits inside the ODF margin (Part 3 §17.5): the margin is where the header starts
-		// (w:header), and the header style's minimum height and spacing reach to where the text starts (w:top).
+		// (w:header), and the header style's minimum height, its spacing included, reaches to where the text starts (w:top).
 		const regions = new Map<string, string>()
 		const region = (kind: "header" | "footer", edge: "top" | "bottom", spacing: string): void => {
 			const shown = [...references.keys()].some(key => key.startsWith(`${kind}Reference`))
@@ -3172,7 +3172,8 @@ class OdtWrite {
 			}
 
 			values.delete("svg:height")
-			values.set("fo:min-height", point(extent - gap))
+			// The minimum height includes the spacing (LibreOffice, measured; the translation reads it so).
+			values.set("fo:min-height", point(extent))
 			values.set(spacing, point(gap))
 
 			let inner = ""

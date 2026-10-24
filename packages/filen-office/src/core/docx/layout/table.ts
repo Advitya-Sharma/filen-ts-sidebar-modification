@@ -968,6 +968,39 @@ export class TableLayout {
 		return { top: px(margins.top), bottom: px(margins.bottom), start: px(margins.start), end: px(margins.end) }
 	}
 
+	// A cell's margins in row `index` with the room its horizontal borders take in a table translated from OpenDocument,
+	// as LibreOffice lays it out (measured): with collapsing borders the border between two rows once, above the lower
+	// row, and the table's bottom border under its last row; with separate borders (cell spacing) each cell's own top
+	// and bottom. Word draws borders over the margins instead.
+	private rowMargins(slot: Slot, info: RowInfo, index: number): { top: number; bottom: number; start: number; end: number } {
+		const margins = this.cellMargins(slot)
+
+		if (!this.engine.compat.libreOfficeSpacing || slot.continued) return margins
+
+		const table = info.table.props.borders
+		const borders = slot.format.props.borders
+		const last = index === this.rows.length - 1
+		const width = (border: ResolvedBorder | undefined): number =>
+			border === undefined || border.style === "nil" ? 0 : borderWidth(border)
+
+		if (info.table.props.cellSpacing !== undefined) {
+			margins.top += width(topEdge(borders, table, index === 0))
+			margins.bottom += width(last ? (borders.bottom ?? table.bottom) : (borders.bottom ?? table.insideH))
+
+			return margins
+		}
+
+		const above = index === 0 ? undefined : this.info(index - 1)?.slots.find(candidate => candidate.column === slot.column)
+
+		margins.top += width(
+			above === undefined ? topEdge(borders, table, index === 0) : bottomEdge(above.format.props.borders, table, false, borders)
+		)
+
+		if (last) margins.bottom += width(bottomEdge(borders, table, true, undefined))
+
+		return margins
+	}
+
 	// Lays out one row (or the rest of a split row). DONE when it ended in the area; OVERFLOW when it moved
 	// (nothing kept) or split (continuing); SUSPEND when fonts must load first (nothing kept).
 	private layoutRow(area: Area, index: number, pool: BlockFlow[], header: boolean, continuing: boolean): FlowStatus {
@@ -1028,7 +1061,7 @@ export class TableLayout {
 
 		info.slots.forEach((slot, k) => {
 			const flow = pool[k]
-			const margins = this.cellMargins(slot)
+			const margins = this.rowMargins(slot, info, index)
 
 			cellMarks.push(page.mark(new OutputMark()))
 			cellArea.left = slot.x + margins.start
@@ -1170,7 +1203,7 @@ export class TableLayout {
 
 		this.keepMerges(area, pool, started)
 
-		this.alignCells(area, info, pool, cellMarks, top, height)
+		this.alignCells(area, info, index, pool, cellMarks, top, height)
 
 		// A row of exact height cuts what its cells hold beyond it.
 		if (exact) {
@@ -1271,7 +1304,15 @@ export class TableLayout {
 	}
 
 	// Cell vertical alignment once the row's height is known.
-	private alignCells(area: Area, info: RowInfo, pool: BlockFlow[], marks: OutputMark[], top: number, height: number): void {
+	private alignCells(
+		area: Area,
+		info: RowInfo,
+		index: number,
+		pool: BlockFlow[],
+		marks: OutputMark[],
+		top: number,
+		height: number
+	): void {
 		const page = area.page
 
 		info.slots.forEach((slot, k) => {
@@ -1282,7 +1323,7 @@ export class TableLayout {
 			if ((align !== "center" && align !== "bottom") || flow === undefined || from === undefined || slot.continued || slot.rows !== 1)
 				return
 
-			const margins = this.cellMargins(slot)
+			const margins = this.rowMargins(slot, info, index)
 			const free = top + height - margins.bottom - flow.contentBottom()
 
 			if (free <= EPSILON) return
@@ -1301,7 +1342,11 @@ export class TableLayout {
 		const last = index === this.rows.length - 1 || split
 		const next = last ? undefined : this.info(index + 1)
 		const bidi = this.direct.props.bidiVisual
-		const line = (border: ResolvedBorder | undefined, x: number, y: number, horizontal: boolean, length: number): void => {
+		// Translated from OpenDocument, horizontal borders lie in the room rowMargins gives them: under the line they start
+		// from (`inward` 1), or over it (-1).
+		const odf = this.engine.compat.libreOfficeSpacing
+		const separate = odf && info.table.props.cellSpacing !== undefined
+		const line = (border: ResolvedBorder | undefined, x: number, y: number, horizontal: boolean, length: number, inward = 0): void => {
 			if (border === undefined || border.style === "nil" || length <= 0) return
 
 			const width = borderWidth(border)
@@ -1311,7 +1356,7 @@ export class TableLayout {
 				decorations.border(border),
 				Layer.TEXT,
 				horizontal ? x : x - width / 2,
-				horizontal ? y - width / 2 : y,
+				horizontal ? y - width / 2 + (odf ? (inward * width) / 2 : 0) : y,
 				horizontal ? length : width,
 				horizontal ? width : length
 			)
@@ -1323,12 +1368,32 @@ export class TableLayout {
 
 			if (fill !== 0) page.addGraphic(PageGraphic.SHADING, fill, Layer.BEHIND, slot.x, top, slot.width, height)
 
-			if (first && !slot.continued) line(topEdge(borders, tableBorders, index === 0), slot.x, top, true, slot.width)
+			if (separate) {
+				if (!slot.continued) line(topEdge(borders, tableBorders, index === 0), slot.x, top, true, slot.width, 1)
 
-			const below = next?.slots.find(candidate => candidate.column === slot.column)
+				line(
+					last ? (borders.bottom ?? tableBorders.bottom) : (borders.bottom ?? tableBorders.insideH),
+					slot.x,
+					top + height,
+					true,
+					slot.width,
+					-1
+				)
+			} else {
+				if (first && !slot.continued) line(topEdge(borders, tableBorders, index === 0), slot.x, top, true, slot.width, 1)
 
-			if (below === undefined || !below.continued)
-				line(bottomEdge(borders, tableBorders, last, below?.format.props.borders), slot.x, top + height, true, slot.width)
+				const below = next?.slots.find(candidate => candidate.column === slot.column)
+
+				if (below === undefined || !below.continued)
+					line(
+						bottomEdge(borders, tableBorders, last, below?.format.props.borders),
+						slot.x,
+						top + height,
+						true,
+						slot.width,
+						last ? -1 : 1
+					)
+			}
 
 			// The start edge is the right one in a right-to-left table (w:bidiVisual).
 			line(

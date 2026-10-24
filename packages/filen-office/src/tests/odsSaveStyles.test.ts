@@ -171,3 +171,30 @@ describe("the automatic styles of an ODS save", () => {
 		expect(unreferenced(content(first))).toEqual([])
 	})
 })
+
+describe("a sheet an ODS save created", () => {
+	// Saved, then the saved file saved again with the same content: the rows the first save wrote fresh are the second
+	// save's source rows. `target` is the sheet edited, by id (a reopened file numbers its sheets in order).
+	async function twice(bytes: Uint8Array, target: number, before: readonly SheetCommand[] = []) {
+		const first = await save(bytes, () => [...before, set(target, 0, 1, "RT 42"), set(target, 1, 1, "12.5")])
+		const second = await save(first, () => [set(target, 0, 1, "x"), set(target, 0, 1, "RT 42")])
+
+		return { first, second }
+	}
+
+	it("writes its rows again as they were, in a spreadsheet that had no table", async () => {
+		const { first, second } = await twice(odsBytes({ body: "" }), 0)
+
+		expect(content(second)).toBe(content(first))
+		expect(second).toEqual(first)
+	})
+
+	it("writes its rows again as they were, for a sheet added to a file", async () => {
+		const { first, second } = await twice(odsBytes(LIBRE), 1, [{ type: "sheet.add" }])
+
+		expect(unzipSync(first)["content.xml"]).toBeDefined()
+		expect(content(first).split("<table:table ").length - 1).toBe(2)
+		expect(content(second)).toBe(content(first))
+		expect(second).toEqual(first)
+	})
+})

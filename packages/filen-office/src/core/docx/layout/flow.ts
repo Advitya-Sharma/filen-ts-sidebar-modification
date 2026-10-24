@@ -412,7 +412,10 @@ export class Engine {
 		area.token = nextToken()
 		flow.run(area)
 
-		return (trailing ? flow.contentBottom() : flow.y) - top
+		// LibreOffice leaves a header's or footer's last line's proportional spacing out of its height (measured).
+		const lastLine = region === Region.HEADER || region === Region.FOOTER ? flow.extraBelow : 0
+
+		return (trailing ? flow.contentBottom() : flow.y) - top - lastLine
 	}
 }
 
@@ -616,6 +619,8 @@ export class BlockFlow {
 	y = 0
 	// Space after of the last paragraph placed (pending until the next block).
 	after = 0
+	// The last paragraph's proportional spacing under its last line (ParagraphLayouter.lastExtraBelow); 0 after a table.
+	extraBelow = 0
 	private contextual = false
 	private styleId: string | undefined = undefined
 	private hasPrevious = false
@@ -1335,6 +1340,7 @@ export class BlockFlow {
 			this.table = undefined
 			this.index++
 			this.after = 0
+			this.extraBelow = 0
 			this.contextual = false
 			this.styleId = undefined
 			this.hasPrevious = true
@@ -1718,6 +1724,7 @@ export class BlockFlow {
 		this.inParagraph = false
 		this.index = this.groupEnd
 		this.after = this.spaceAfter(props)
+		this.extraBelow = this.engine.layouter.lastExtraBelow
 		this.contextual = props.contextualSpacing
 		this.styleId = props.styleId
 		this.hasPrevious = true

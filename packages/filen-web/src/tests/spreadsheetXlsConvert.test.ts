@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { openXlsx } from "hucre/xlsx"
-import { xlsChart, xlsFile, xlsLabel, xlsNumber, xlsWorkbookStream, XLS_CHART } from "@filen/office/testing/encryption"
+import { xlsChart, xlsFile, xlsLabel, xlsNumber, xlsRecord, xlsWorkbookStream, XLS_CHART } from "@filen/office/testing/encryption"
 import { xlsToXlsx, xlsxCopyName } from "@/features/spreadsheet/lib/xlsConvert"
 
 const XLS = new Uint8Array(readFileSync(join(__dirname, "fixtures/spreadsheet/budget.xls")))
@@ -36,6 +36,32 @@ describe("xlsToXlsx", () => {
 		const workbook = await openXlsx(await xlsToXlsx(await xlsFile(stream)))
 
 		expect(workbook.sheets[0]?.rows).toEqual([["Title"], [12.5]])
+	})
+
+	// [MS-XLS] §2.1.7.20.6: FORMULA [ShrFmla | Array | Table] [String]; a string result's text is in the STRING record.
+	it("reads a formula's string result past the shared, array or table formula record before its STRING", async () => {
+		// FORMULA at (row, 0): a string result (FormulaValue byte 0 = 0, fExprO 0xFFFF), no parsed formula.
+		const formula = (row: number) =>
+			xlsRecord(0x0006, Uint8Array.of(row, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0))
+		const string = (text: string) => xlsRecord(0x0207, Uint8Array.of(text.length, 0, 0, ...Array.from(text, c => c.charCodeAt(0))))
+		const stream = xlsWorkbookStream([
+			{
+				name: "Data",
+				records: [
+					formula(0),
+					xlsRecord(0x04bc, new Uint8Array(10)),
+					string("2 Wow"),
+					formula(1),
+					xlsRecord(0x0221, new Uint8Array(14)),
+					string("10"),
+					formula(2),
+					string("plain")
+				]
+			}
+		])
+		const workbook = await openXlsx(await xlsToXlsx(await xlsFile(stream)))
+
+		expect(workbook.sheets[0]?.rows).toEqual([["2 Wow"], ["10"], ["plain"]])
 	})
 
 	it("gives a chart sheet no cells", async () => {

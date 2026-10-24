@@ -339,7 +339,9 @@ export class Pages {
 		)
 	}
 
-	// How far a header (footer) reaches into the page beyond the margin: its minimum height and spacing.
+	// How far a header (footer) reaches into the page beyond the margin at least: its minimum (or fixed) height, which
+	// includes its spacing, never less than that spacing (LibreOffice, measured). Taller content grows it, as a Word
+	// header grows past w:top.
 	private extent(properties: OdfProperties | undefined, spacing: string): number {
 		if (properties === undefined) return 0
 
@@ -348,7 +350,7 @@ export class Pages {
 
 		if (fixed !== undefined && minimum === undefined) this.translator.lossy("fixedHeaderHeight")
 
-		return (minimum ?? fixed ?? 0) + (parseLength(properties.attributes.get(spacing)) ?? 0)
+		return Math.max(minimum ?? fixed ?? 0, parseLength(properties.attributes.get(spacing)) ?? 0)
 	}
 
 	private displays(master: OdfMasterPage | undefined, kind: MasterRegionKind): boolean {

@@ -10,6 +10,7 @@ import {
 	type ResolvedFont,
 	type SymbolTable
 } from "../../fonts/index"
+import { SYMBOL_FALLBACK_METRICS } from "../../fonts/metrics"
 import { Caps, Strike, verticalAlignment, type StyleTable, type TextStyle } from "../../text/index"
 import type { DocxModel } from "../model/index"
 import type { ResolvedBorder, ResolvedRunProps, ResolvedShading } from "../props/types"
@@ -395,7 +396,17 @@ export class RunStyles {
 			slot
 		}
 		const ready = this.need(request)
-		const font = this.fonts.resolve(request)
+		const resolved = this.fonts.resolve(request)
+		const missing = resolved.source !== "embedded" && resolved.source !== "local"
+		const symbols = missing ? symbolTable(family) : undefined
+		// LibreOffice measures a symbol font it lacks (a code-table font, or one named a symbol font such as Segoe UI
+		// Symbol) by the one it ships for them, whatever face draws the characters (measured).
+		const font =
+			missing &&
+			(symbols !== undefined || family.toLowerCase().includes("symbol")) &&
+			(this.table.rule === "hheaGapBelow" || this.table.rule === "hhea")
+				? { ...resolved, metrics: SYMBOL_FALLBACK_METRICS, metricsBasis: "original" as const }
+				: resolved
 		const halfPointSize = complex ? run.sizeCs : run.size
 		let size = halfPoints(halfPointSize)
 		let shift = halfPoints(run.position)
@@ -438,7 +449,7 @@ export class RunStyles {
 		const id = this.table.add(style)
 
 		this.info[id] = { css: cssFont(font, size), color: run.color, run, revision, author: revision === TrackedLook.NONE ? 0 : author }
-		this.symbols[id] = font.source === "embedded" || font.source === "local" ? undefined : symbolTable(family)
+		this.symbols[id] = symbols
 
 		return { id, cacheable: ready }
 	}

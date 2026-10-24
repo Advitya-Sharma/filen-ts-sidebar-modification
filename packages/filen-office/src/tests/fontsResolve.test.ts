@@ -10,7 +10,6 @@ import {
 	CLONE_METRICS,
 	DEFAULT_FONT_LIMITS,
 	DEFAULT_SLOT_CONTEXT,
-	bundledFace,
 	declareDocxEmbeddedFonts,
 	eastAsiaUsesAscii,
 	cssFont,
@@ -119,8 +118,9 @@ describe("substitution", () => {
 			scale: 1,
 			source: "bundled"
 		})
-		expect(font.metricsBasis).toBe("substitute")
-		expect(font.metrics).toEqual(bundledFace("carlito", 400, false)?.metrics)
+		// Calibri's own vertical metrics, as Carlito first published them (the bundled build moved hhea to win).
+		expect(font.metricsBasis).toBe("original")
+		expect(font.metrics).toMatchObject({ hheaAscender: 1536, hheaDescender: -512, hheaLineGap: 452, winAscent: 1950, winDescent: 550 })
 		expect(assets.reads).toEqual(["carlito/Carlito-Regular.woff2"])
 		expect(host.faces[0]?.face).toEqual({ family: alias("carlito"), weight: 400, italic: false })
 

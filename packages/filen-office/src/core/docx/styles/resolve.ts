@@ -879,7 +879,7 @@ export class PropertyResolver {
 			alignment,
 			physicalAlignment: physicalTableAlignment(alignment, bidi),
 			indent: acc.indent ?? ZERO_DXA,
-			cellSpacing: acc.cellSpacing ?? ZERO_DXA,
+			cellSpacing: acc.cellSpacing,
 			borders: this.tableBorders(acc.borders),
 			shading: this.shading(acc.shading),
 			layout: acc.layout ?? "autofit",

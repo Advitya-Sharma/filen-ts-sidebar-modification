@@ -1,4 +1,5 @@
 import { cssFont, type LineSpacingRule, type ResolvedFont } from "../fonts/index"
+import { lineAscentDescent } from "../fonts/metrics"
 import type { MeasureCache } from "./measure"
 
 export const Caps = { NONE: 0, CAPS: 1, SMALL_CAPS: 2 } as const
@@ -53,21 +54,15 @@ export function verticalAlignment(size: number, kind: "superscript" | "subscript
 		: { size: size * SUBSCRIPT_SIZE, baselineShift: -size * SUBSCRIPT_DROP }
 }
 
-// Ascent and descent in em of a face's default line, split so they add up to lineSpacingUnits(): the
-// leading above the ascent, where Word puts it.
+// Ascent and descent in em of a face's default line, adding up to lineSpacingUnits().
 export function lineExtents(font: ResolvedFont, rule: LineSpacingRule): { ascent: number; descent: number } | null {
 	const m = font.metrics
 
 	if (m === null || m.unitsPerEm <= 0) return null
 
-	if (rule === "typoWhenFlagged" && m.useTypoMetrics) {
-		return { ascent: (m.typoAscender + m.typoLineGap) / m.unitsPerEm, descent: -m.typoDescender / m.unitsPerEm }
-	}
+	const { ascent, descent } = lineAscentDescent(m, rule)
 
-	const win = m.winAscent + m.winDescent
-	const hhea = m.hheaAscender - m.hheaDescender + m.hheaLineGap
-
-	return { ascent: (m.winAscent + Math.max(0, hhea - win)) / m.unitsPerEm, descent: m.winDescent / m.unitsPerEm }
+	return { ascent: ascent / m.unitsPerEm, descent: descent / m.unitsPerEm }
 }
 
 // Styles interned by identity, with what layout reads per item precomputed into typed arrays.

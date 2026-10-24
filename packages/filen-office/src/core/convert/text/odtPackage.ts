@@ -13,6 +13,8 @@ import type { LossyCounts } from "./report"
 //   no line as a border that draws nothing), which documents with start or end borders or such padding report, and
 //   with a line kept apart from the next paragraph's (w:frame, style:join-border false: Word and LibreOffice join
 //   paragraphs whose borders agree, and w:frame is Word's frame effect on a line);
+// - so is its line-gap setting (lines measured as LibreOffice measures them), unreported: no content goes, and a
+//   .docx's lines are laid out by its reader's own rules;
 // - border spacing in whole points (the translation keeps padding to the twip; ST_PointMeasure holds whole points);
 // - property children in schema order (CT_RPr, CT_PPr, CT_ParaRPr: Part 4 wml.xsd);
 // - font family lists (ODF svg:font-family) as their first family: ST_String of w:rFonts is at most 31 characters;
@@ -438,6 +440,8 @@ const FLOW_WITH_TEXT = /<w:compatSetting w:name="flow-with-text" w:uri="[^"]*" w
 const ANCHOR = encodeUtf8("<wp:anchor")
 const OBJECT_LINES = /<w:compatSetting w:name="object-line-height" w:uri="[^"]*" w:val="objects"\/>/u
 const INLINE = encodeUtf8("<wp:inline")
+// Lines measured as LibreOffice measures them; every translation carries it and a .docx's lines are its reader's.
+const LINE_GAP = /<w:compatSetting w:name="line-gap" w:uri="[^"]*" w:val="[a-z]+"\/>/u
 const PADDING = /<w:compatSetting w:name="paragraph-padding" w:uri="[^"]*" w:val="borders"\/>/u
 
 function includes(bytes: Uint8Array, needle: Uint8Array): boolean {
@@ -548,6 +552,8 @@ export function standaloneParts(parts: Map<string, Uint8Array>, lossy: LossyCoun
 
 			if ([...parts].some(([name, bytes]) => STORY.test(name) && includes(bytes, INLINE))) lossy.add("objectLineHeight")
 		}
+
+		text = text.replace(LINE_GAP, "")
 
 		if (PADDING.test(text)) {
 			text = text.replace(PADDING, "")

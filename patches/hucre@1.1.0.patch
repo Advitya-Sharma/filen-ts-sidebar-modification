@@ -164,7 +164,7 @@ index 0106cd5a6d4550a57f4669754d72accd7c946bce..8aaf7ac86b621daf84d886fdfcf2db09
  	* Merged ranges, as coordinates or as A1 strings — `"A1:C1"` and
  	* `{ startRow: 0, startCol: 0, endRow: 0, endCol: 2 }` mean the same
 diff --git a/dist/xls/reader.mjs b/dist/xls/reader.mjs
-index 194ef02d40af50e589c22d921d14c5826e80fbbc..528d5c5bb45bceba04e7ed04c15d8f54b29d3bf8 100644
+index 194ef02d40af50e589c22d921d14c5826e80fbbc..e254958da7695ff6b65020d2ccbaad9a3fad1906 100644
 --- a/dist/xls/reader.mjs
 +++ b/dist/xls/reader.mjs
 @@ -168,9 +168,27 @@ function parseSheet(records, startIdx, name, sst, isDate, date1904, cellLimit) {
@@ -195,6 +195,18 @@ index 194ef02d40af50e589c22d921d14c5826e80fbbc..528d5c5bb45bceba04e7ed04c15d8f54
  		const r = new Reader(rec.data);
  		switch (rec.id) {
  			case SID.LABELSST: {
+@@ -222,7 +240,10 @@ function parseSheet(records, startIdx, name, sst, isDate, date1904, cellLimit) {
+ 					else if (kind === 2) setCell(row, col, ERROR_TEXT[b[2]] ?? "#ERR!");
+ 					else if (kind === 0) {
+ 						
+-						const next = records[i + 1];
++						// FORMULA [ShrFmla | Array | Table] [String] ([MS-XLS] §2.1.7.20.6): the text follows those.
++						let k = i + 1;
++						while (k < records.length && (records[k].id === 1212 || records[k].id === 545 || records[k].id === 566)) k++;
++						const next = records[k];
+ 						if (next && next.id === SID.STRING) setCell(row, col, readXLString(new Reader(next.data)));
+ 					}
+ 				} else {
 diff --git a/dist/xlsx/comments-reader.mjs b/dist/xlsx/comments-reader.mjs
 index 5789f148386d398652231118fa623d7ed647419b..06b9a28e054b1124c9a2139f98fe26b1247c3d6c 100644
 --- a/dist/xlsx/comments-reader.mjs

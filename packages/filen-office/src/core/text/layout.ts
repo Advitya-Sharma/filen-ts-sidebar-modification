@@ -78,6 +78,10 @@ export interface ParagraphGeometry {
 	// The paragraph mark's font counts on a last line that holds only inline objects (Word). Default true; false:
 	// only an empty line takes its height.
 	readonly markSizesObjectLines?: boolean
+	// Lines as LibreOffice sizes and spaces them (measured): the paragraph mark's font sizes only an empty line, a
+	// proportional height's extra or shortfall goes under the text, an exact height's baseline sits at four fifths of
+	// it. Default false: Word's, the mark on the last line and the difference above the text.
+	readonly libreOfficeSpacing?: boolean
 }
 
 // Marks hyphenation opportunities: sets breaks[i] = BREAK_HYPHEN for positions i inside words of
@@ -309,6 +313,10 @@ export class ParagraphLayouter {
 	// The fitted row.
 	private rowHeight = 0
 	private rowBaseline = 0
+	private rowExtraBelow = 0
+	// The proportional spacing the last row laid out put under its text (libreOfficeSpacing), which LibreOffice leaves
+	// out after a header's or footer's last line.
+	lastExtraBelow = 0
 	private rowLast = false
 
 	// Fill state.
@@ -1342,20 +1350,29 @@ export class ParagraphLayouter {
 
 		this.rowLast = last
 
-		if (!any || (last && !(objectsOnly && g.markSizesObjectLines === false))) {
+		if (!any || (last && g.libreOfficeSpacing !== true && !(objectsOnly && g.markSizesObjectLines === false))) {
 			ascent = Math.max(ascent, styles.ascent[p.markStyle] ?? 0)
 			descent = Math.max(descent, styles.descent[p.markStyle] ?? 0)
 		}
 
 		this.rowHeight = lineHeightFor(g, ascent + descent)
-		// Extra line spacing goes above the text (and a smaller exact height clips its top).
-		this.rowBaseline = this.rowHeight - descent
+		// Extra line spacing goes above the text (and a smaller exact height clips its top), or where LibreOffice puts it.
+		this.rowBaseline =
+			g.libreOfficeSpacing !== true || g.lineRule === LineRule.AT_LEAST
+				? this.rowHeight - descent
+				: g.lineRule === LineRule.EXACT
+					? (this.rowHeight * 4) / 5
+					: ascent
+		this.rowExtraBelow =
+			g.libreOfficeSpacing === true && g.lineRule === LineRule.AUTO ? Math.max(0, this.rowHeight - ascent - descent) : 0
 	}
 
 	// Positions the fitted row's pieces and appends its lines; returns the break kind the row ended with,
 	// or -1.
 	private emitRow(p: PreparedParagraph, g: ParagraphGeometry, out: TextLayout, top: number, firstRow: boolean): number {
 		let ended = -1
+
+		this.lastExtraBelow = this.rowExtraBelow
 
 		for (let s = 0; s < this.segCount; s++) {
 			const from = this.segFrom[s] ?? 0

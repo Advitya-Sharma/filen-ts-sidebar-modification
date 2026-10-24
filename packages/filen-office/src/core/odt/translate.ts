@@ -7,13 +7,14 @@ import {
 	OdfStyleResolver,
 	OdfStyleSheet,
 	OdfTreeError,
+	canonicalAttributes,
 	elementName,
 	locateBody,
 	parseLength,
 	readContentPrologue,
 	type ContentPrologue
 } from "../odf/index"
-import { ODF_OBJECT_LINES, ODF_PADDING, ODF_STYLE_NS } from "../docx/layout/geometry"
+import { ODF_LINE_GAP, ODF_OBJECT_LINES, ODF_PADDING, ODF_STYLE_NS } from "../docx/layout/geometry"
 import { metaTitle } from "../odf/meta"
 import {
 	Namespaces,
@@ -183,6 +184,59 @@ export async function translateOdt(source: ByteSource, options: OdtTranslateOpti
 	}
 }
 
+const OOO_NS = "http://openoffice.org/2004/office"
+
+// The items of settings.xml's "ooo:configuration-settings" set (its prefix resolved, as LibreOffice reads it), by name;
+// undefined when the document has none.
+function configurationSettings(settings: XmlDocument | undefined): Map<string, string> | undefined {
+	if (settings === undefined) return undefined
+
+	const namespaces = new Namespaces(settings)
+
+	for (let block = settings.firstChildElement(settings.documentElement()); block >= 0; block = settings.nextSiblingElement(block)) {
+		if (elementName(settings, namespaces, block) !== "office:settings") continue
+
+		for (let set = settings.firstChildElement(block); set >= 0; set = settings.nextSiblingElement(set)) {
+			if (elementName(settings, namespaces, set) !== "config:config-item-set") continue
+
+			const name = canonicalAttributes(settings, namespaces, set).get("config:name") ?? ""
+			const colon = name.indexOf(":")
+
+			if (name.slice(colon + 1) !== "configuration-settings" || namespaces.uri(set, name.slice(0, Math.max(0, colon))) !== OOO_NS) {
+				continue
+			}
+
+			const items = new Map<string, string>()
+
+			for (let item = settings.firstChildElement(set); item >= 0; item = settings.nextSiblingElement(item)) {
+				const itemName = canonicalAttributes(settings, namespaces, item).get("config:name")
+
+				if (elementName(settings, namespaces, item) === "config:config-item" && itemName !== undefined) {
+					items.set(itemName, settings.textContent(item).trim())
+				}
+			}
+
+			return items
+		}
+	}
+
+	return undefined
+}
+
+// Whether LibreOffice adds a font's line gap (external leading) under each line (ODF_LINE_GAP; measured, LibreOffice
+// 7.5). A document without its configuration gets a new document's: external leading on, the high-resolution layout,
+// no forced zero leading. One with it, as an older document, has external leading off unless AddExternalLeading says
+// true, and the high-resolution layout's zero leading unless UnxForceZeroExtLeading says false.
+function lineGap(configuration: ReadonlyMap<string, string> | undefined): "below" | "none" {
+	if (configuration === undefined) return "below"
+
+	if (configuration.get("AddExternalLeading") !== "true") return "none"
+
+	return configuration.get("PrinterIndependentLayout") === "high-resolution" && configuration.get("UnxForceZeroExtLeading") !== "false"
+		? "none"
+		: "below"
+}
+
 async function translate(odf: OdfPackage, options: OdtTranslateOptions): Promise<OdtTranslateResult> {
 	const clock = options.slicing === undefined ? undefined : sliceClock(options.slicing)
 	const styles = await odf.xml("styles.xml", clock)
@@ -205,6 +259,7 @@ async function translate(odf: OdfPackage, options: OdtTranslateOptions): Promise
 	// Drawing shapes stay on their anchor's page (ODF 1.3 Part 3 §20.267, style:flow-with-text false) unless the
 	// document lets LibreOffice place them past it.
 	const floatsOnPage = !(configBoolean(settingsXml, "DoNotCaptureDrawObjsOnPage") ?? false)
+	const gap = lineGap(configurationSettings(settingsXml))
 	const kinds = new Map<string, ReturnType<typeof imageKind>>()
 
 	for (const entry of odf.archive.entries) {
@@ -360,7 +415,7 @@ async function translate(odf: OdfPackage, options: OdtTranslateOptions): Promise
 	body.finish(translator.pages.finalSectPr())
 	body.writer.add("</w:body></w:document>")
 
-	return { ok: true, translation: { ...assemble(odf, translator, body, origins, originsExact, floatsOnPage, title), endState } }
+	return { ok: true, translation: { ...assemble(odf, translator, body, origins, originsExact, floatsOnPage, gap, title), endState } }
 }
 
 const BODY = encodeUtf8("body")
@@ -394,6 +449,7 @@ function assemble(
 	origins: OdtOrigin[],
 	originsExact: boolean,
 	floatsOnPage: boolean,
+	gap: "below" | "none",
 	title: string | undefined
 ): OdtTranslation {
 	const parts = new Map<string, Uint8Array | LinkedPart>()
@@ -431,14 +487,14 @@ function assemble(
 	translator.takeDocumentLossy()
 
 	// A line of only as-char objects is as tall as they are (ODF_OBJECT_LINES, measured); paragraph borders and padding
-	// join as LibreOffice joins them (ODF_PADDING).
+	// join as LibreOffice joins them (ODF_PADDING); lines are measured as LibreOffice measures them (ODF_LINE_GAP).
 	// LibreOffice adds one paragraph's space after to the next one's space before whatever AddParaTableSpacing says
 	// (measured: that setting is about tables); the layout adds them only under w:doNotUseHTMLParagraphAutoSpacing,
 	// which otherwise changes only auto spacing, which a translation never writes.
 	parts.set(
 		"word/settings.xml",
 		encodeUtf8(
-			`${XML_DECLARATION}<w:settings ${PART_NAMESPACES}><w:defaultTabStop w:val="${Math.max(1, twips(tabStop))}"/>${translator.pages.evenAndOdd ? "<w:evenAndOddHeaders/>" : ""}${footnotePr}${endnotePr}<w:compat><w:doNotUseHTMLParagraphAutoSpacing/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/>${floatsOnPage ? `<w:compatSetting w:name="flow-with-text" w:uri="${ODF_STYLE_NS}" w:val="false"/>` : ""}<w:compatSetting w:name="${ODF_OBJECT_LINES}" w:uri="${ODF_STYLE_NS}" w:val="objects"/><w:compatSetting w:name="${ODF_PADDING}" w:uri="${ODF_STYLE_NS}" w:val="borders"/></w:compat></w:settings>`
+			`${XML_DECLARATION}<w:settings ${PART_NAMESPACES}><w:defaultTabStop w:val="${Math.max(1, twips(tabStop))}"/>${translator.pages.evenAndOdd ? "<w:evenAndOddHeaders/>" : ""}${footnotePr}${endnotePr}<w:compat><w:doNotUseHTMLParagraphAutoSpacing/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/>${floatsOnPage ? `<w:compatSetting w:name="flow-with-text" w:uri="${ODF_STYLE_NS}" w:val="false"/>` : ""}<w:compatSetting w:name="${ODF_OBJECT_LINES}" w:uri="${ODF_STYLE_NS}" w:val="objects"/><w:compatSetting w:name="${ODF_PADDING}" w:uri="${ODF_STYLE_NS}" w:val="borders"/><w:compatSetting w:name="${ODF_LINE_GAP}" w:uri="${ODF_STYLE_NS}" w:val="${gap}"/></w:compat></w:settings>`
 		)
 	)
 	override("word/settings.xml", "settings")

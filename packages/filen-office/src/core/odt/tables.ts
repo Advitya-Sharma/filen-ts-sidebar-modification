@@ -158,7 +158,10 @@ export function translateTable(translator: Translator, node: number, flow: Flow)
 	const jc = align === "center" ? "center" : align === "right" ? "right" : "left"
 	const indent = align === "left" || align === "margins" ? marginLeft : 0
 	const background = colorOf(properties.get("fo:background-color"))
-	let xml = `<w:tbl><w:tblPr><w:tblW w:w="${twips(width)}" w:type="dxa"/><w:jc w:val="${jc}"/>${indent !== 0 ? `<w:tblInd w:w="${twips(indent)}" w:type="dxa"/>` : ""}${background === undefined ? "" : `<w:shd w:val="clear" w:color="auto" w:fill="${background}"/>`}<w:tblLayout w:type="fixed"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar><w:tblLook w:val="0000"/></w:tblPr><w:tblGrid>`
+	// Separate borders (table:border-model, separating where nothing says: LibreOffice, measured) as cell spacing of zero:
+	// each cell keeps its own borders, which then both take room between rows.
+	const separating = (properties.get("table:border-model") ?? "separating") === "separating"
+	let xml = `<w:tbl><w:tblPr><w:tblW w:w="${twips(width)}" w:type="dxa"/><w:jc w:val="${jc}"/>${separating ? '<w:tblCellSpacing w:w="0" w:type="dxa"/>' : ""}${indent !== 0 ? `<w:tblInd w:w="${twips(indent)}" w:type="dxa"/>` : ""}${background === undefined ? "" : `<w:shd w:val="clear" w:color="auto" w:fill="${background}"/>`}<w:tblLayout w:type="fixed"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar><w:tblLook w:val="0000"/></w:tblPr><w:tblGrid>`
 
 	for (const columnWidth of widths) xml += `<w:gridCol w:w="${Math.max(1, twips(columnWidth))}"/>`
 

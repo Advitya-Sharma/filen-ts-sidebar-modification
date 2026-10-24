@@ -460,6 +460,10 @@ export class TableWriter {
 
 	// Columns the table spans: the source's, moved as the columns were, and every cell's.
 	private width(): number {
+		// A new table declares every column of the grid (columns()): its rows reach the last, as a source table's
+		// rows reach the columns it declares, so a later save writes them again as they are.
+		if (this.source === null) return SHEET_MAX_COLS
+
 		let width = 0
 
 		if (this.source !== null) {

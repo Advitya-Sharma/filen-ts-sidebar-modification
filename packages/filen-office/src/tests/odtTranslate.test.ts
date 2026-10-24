@@ -23,7 +23,8 @@ describe("ODT text and paragraphs", () => {
 
 		expect(xml).toContain('<w:pStyle w:val="Body"/>')
 		expect(xml).toContain('<w:jc w:val="center"/>')
-		expect(xml).toContain('<w:spacing w:after="283"/>')
+		// Space below alone sets space above to 0 (LibreOffice reads the pair as one setting).
+		expect(xml).toContain('<w:spacing w:before="0" w:after="283"/>')
 		// 150 % of the parent's 11 pt.
 		expect(xml).toMatch(/<w:b\/>.*<w:sz w:val="33"\/>/)
 	})
@@ -69,8 +70,8 @@ describe("ODT text and paragraphs", () => {
 		expect(xml).toContain("<w:titlePg/>")
 		expect(partText(translation, `word/${target("first")}`)).toContain("Cover")
 		expect(partText(translation, `word/${target("default")}`)).toContain("Running")
-		// The body starts below the header: margin, minimum height and spacing.
-		expect(xml).toContain(`w:top="${Math.round(((2.75 / 2.54) * 72 + 0) * 20)}"`)
+		// The body starts below the header: margin and minimum height, which includes the spacing.
+		expect(xml).toContain(`w:top="${Math.round(((2.5 / 2.54) * 72 + 0) * 20)}"`)
 		expect(xml).toContain('w:header="1134"')
 	})
 

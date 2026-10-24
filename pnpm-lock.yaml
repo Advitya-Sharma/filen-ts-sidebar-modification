@@ -187,7 +187,7 @@ patchedDependencies:
   expo-sharing@58.0.19: ed98c4c07321148b6fbb5ba427beb871cb1f1a281be1a6dcabdca0d34fabd168
   expo-video@58.0.12: 119f783c144337b03a556a73bb8cd88cd1783650f1776e5aed97b846d41bf8f8
   file-type@22.2.0: a25744dce2cc85b7b7df582aa7b56fd1bedf8ce9e2e2317655e87be4a4e3b24e
-  hucre@1.1.0: 6f083d3de01fd5ce4c81a0485b0405a6af25d3b007eac7f64dbad08d1ca6ec3d
+  hucre@1.1.0: c73e6bb88a52feb51cacc826bd982d7e4c026823306236faf57a0925a1bc723a
   mediabunny@1.61.3: 50db84306781df1849862e95e649ff1391986d14794336f0d8876e8cf85bf854
   pressto@0.7.0: ce80592e446002864888a4f51e2ceaf385c24a3f4c95a1266d5ff268deea4f4e
   react-native-ios-utilities@5.2.0: 5153d1d449fd7e01ce55ed1774332b5029f0065a7e968abc597635cade9b7954
@@ -1107,7 +1107,7 @@ importers:
         version: 4.12.0
       hucre:
         specifier: 1.1.0
-        version: 1.1.0(patch_hash=6f083d3de01fd5ce4c81a0485b0405a6af25d3b007eac7f64dbad08d1ca6ec3d)
+        version: 1.1.0(patch_hash=c73e6bb88a52feb51cacc826bd982d7e4c026823306236faf57a0925a1bc723a)
       i18next:
         specifier: ^26.4.2
         version: 26.4.2(typescript@6.0.3)
@@ -18232,7 +18232,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  hucre@1.1.0(patch_hash=6f083d3de01fd5ce4c81a0485b0405a6af25d3b007eac7f64dbad08d1ca6ec3d): {}
+  hucre@1.1.0(patch_hash=c73e6bb88a52feb51cacc826bd982d7e4c026823306236faf57a0925a1bc723a): {}
 
   human-signals@2.1.0: {}
 

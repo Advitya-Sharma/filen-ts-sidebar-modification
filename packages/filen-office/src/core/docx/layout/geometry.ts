@@ -8,6 +8,7 @@ import {
 	type ParagraphGeometry,
 	type TabStop
 } from "../../text/index"
+import type { LineSpacingRule } from "../../fonts/index"
 import type { DocxSettings } from "../model/settings"
 import type { ResolvedBorder, ResolvedParagraphProps, ResolvedSectionProps } from "../props/types"
 import { borderWidth } from "./styles"
@@ -33,6 +34,7 @@ export class Geometry implements ParagraphGeometry {
 	exclusions: Exclusions | null = null
 	decimalSeparator = 0x2e
 	markSizesObjectLines = true
+	libreOfficeSpacing = false
 }
 
 export interface LayoutCompat {
@@ -60,14 +62,26 @@ export interface LayoutCompat {
 	// (ODF_PADDING): inside the indents, and joined: neighbours whose lines (not the spacing above and below them) and
 	// text edges agree share one box, and so do paragraphs without borders (measured).
 	readonly joinsBoxes: boolean
+	// Lines measured and spaced, and table borders given room in their rows, as LibreOffice does, asked for by a
+	// document translated from OpenDocument (ODF_LINE_GAP).
+	readonly libreOfficeSpacing: boolean
 }
 
 // The compatibility settings an OpenDocument translation writes: style:flow-with-text, how tall a line of only
 // as-char objects is (ODF_OBJECT_LINES), and padding beside no line as borders that draw nothing (ODF_PADDING, see
-// StyleSettings.paddingBorders) joined as LibreOffice joins borders.
+// StyleSettings.paddingBorders) joined as LibreOffice joins borders, and how a line's height is measured
+// (ODF_LINE_GAP: "below" or "none", see lineSpacingRule).
 export const ODF_STYLE_NS = "urn:oasis:names:tc:opendocument:xmlns:style:1.0"
 export const ODF_OBJECT_LINES = "object-line-height"
 export const ODF_PADDING = "paragraph-padding"
+export const ODF_LINE_GAP = "line-gap"
+
+// How the layout measures a font's line: Word's way, or LibreOffice's for a translation that asks (ODF_LINE_GAP).
+export function lineSpacingRule(settings: DocxSettings): LineSpacingRule {
+	const gap = settings.compatSettings.find(setting => setting.name === ODF_LINE_GAP && setting.uri === ODF_STYLE_NS)?.value
+
+	return gap === "below" ? "hheaGapBelow" : gap === "none" ? "hhea" : "gdi"
+}
 
 export function layoutCompat(settings: DocxSettings): LayoutCompat {
 	const legacy = new Set(settings.legacyCompat)
@@ -90,7 +104,8 @@ export function layoutCompat(settings: DocxSettings): LayoutCompat {
 		markSizesObjectLines: !settings.compatSettings.some(
 			setting => setting.name === ODF_OBJECT_LINES && setting.uri === ODF_STYLE_NS && setting.value === "objects"
 		),
-		joinsBoxes: odfPadding(settings)
+		joinsBoxes: odfPadding(settings),
+		libreOfficeSpacing: lineSpacingRule(settings) !== "gdi"
 	}
 }
 
@@ -201,6 +216,7 @@ export function paragraphGeometry(
 	g.hangingIndentTab = compat.hangingIndentTab
 	g.decimalSeparator = compat.decimalSeparator
 	g.markSizesObjectLines = compat.markSizesObjectLines
+	g.libreOfficeSpacing = compat.libreOfficeSpacing
 	g.exclusions = null
 
 	if (spacing.lineRule === "exact") {

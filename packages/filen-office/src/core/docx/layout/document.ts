@@ -24,7 +24,7 @@ import {
 	type LayoutTuning,
 	type PageFrame
 } from "./flow"
-import { layoutCompat, pageGeometry, type LayoutCompat, type PageGeometry } from "./geometry"
+import { layoutCompat, lineSpacingRule, pageGeometry, type LayoutCompat, type PageGeometry } from "./geometry"
 import { FootnoteArea, NoteNumbering, type FootnoteState, type NoteNumberingSnapshot, type PlacedNote } from "./notes"
 import { ObjectTable, type ObjectSizer } from "./objects"
 import { PageGraphic, Layer, OutputMark, PageDisplayList, PageOutput, Region, SOURCE_INTS, SourceFlag, SourceInt } from "./output"
@@ -3337,7 +3337,7 @@ export function layoutDocument(
 	options: LayoutOptions = {}
 ): DocumentLayout {
 	const cache = new MeasureCache(measurer)
-	const table = new StyleTable(cache, options.lineSpacingRule ?? "gdi")
+	const table = new StyleTable(cache, options.lineSpacingRule ?? lineSpacingRule(model.settings))
 	const decorations = new DecorationTable()
 	const runStyles = new RunStyles(table, fonts, decorations)
 	const objects = new ObjectTable()

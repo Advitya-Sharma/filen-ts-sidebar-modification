@@ -208,7 +208,14 @@ export const BUNDLED_FACES: readonly BundledFace[] = [
 ]
 
 export const LINE_METRICS: ReadonlyMap<string, LineMetricsEntry> = new Map<string, LineMetricsEntry>([
-	["calibri", { basis: "substitute" }],
+	[
+		"calibri",
+		{
+			basis: "original",
+			source: "Carlito-Regular.ttf (Chrome OS extra fonts Carlito 20130920)",
+			metrics: verticalMetrics(2048, 1536, -512, 452, 1536, -512, 452, 1950, 550, false)
+		}
+	],
 	["calibri light", { basis: "substitute" }],
 	[
 		"cambria",
@@ -287,6 +294,13 @@ export const LINE_METRICS: ReadonlyMap<string, LineMetricsEntry> = new Map<strin
 ])
 
 export const CLONE_METRICS: ReadonlyMap<BundledFamily, OriginalMetrics> = new Map<BundledFamily, OriginalMetrics>([
+	[
+		"carlito",
+		{
+			source: "Carlito-Regular.ttf (Chrome OS extra fonts Carlito 20130920)",
+			metrics: verticalMetrics(2048, 1536, -512, 452, 1536, -512, 452, 1950, 550, false)
+		}
+	],
 	[
 		"arimo",
 		{
