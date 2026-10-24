@@ -1,6 +1,6 @@
 import { type LucideIcon } from "lucide-react"
 import { NOTE_ACTION_DEFS } from "@/features/notes/lib/actionDefs"
-import { isNoteOwner, isNoteUndecryptable, isTagUndecryptable } from "@/features/notes/lib/sort"
+import { hasNoteWriteAccess, isNoteOwner, isNoteUndecryptable, isTagUndecryptable } from "@/features/notes/lib/sort"
 import type { Note, NoteTag, NoteType } from "@filen/sdk-rs"
 import { type ActionDescriptor } from "@/lib/actionDescriptor"
 import type { NotesKey } from "@/lib/i18n"
@@ -100,8 +100,11 @@ export function noteMenuActions(note: Note, currentUserId: bigint | undefined): 
 		return owner ? [TRASH] : [LEAVE]
 	}
 
+	// Rename and type rewrite the note itself, so a participant without write access is not offered them
+	// (mobile parity, and the bulk bar's type gate). Pin, favorite and tags are this user's own.
+	const writable = hasNoteWriteAccess(note, currentUserId)
 	const actions: NoteActionDescriptor[] = [
-		RENAME,
+		...(writable ? [RENAME] : []),
 		DUPLICATE,
 		EXPORT,
 		COPY_ID,
@@ -109,7 +112,7 @@ export function noteMenuActions(note: Note, currentUserId: bigint | undefined): 
 		pinDescriptor(note),
 		favoriteDescriptor(note),
 		TAGS,
-		TYPE
+		...(writable ? [TYPE] : [])
 	]
 
 	// Participants management is owner-only, matching both mobile and old-web — a participant sees no

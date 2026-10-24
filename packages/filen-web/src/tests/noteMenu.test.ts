@@ -30,11 +30,16 @@ import {
 	NOTE_TYPE_SUBMENU,
 	type NoteActionDescriptor
 } from "@/features/notes/components/noteMenu.logic"
-import { mockNote, mockNoteTag, tagWithoutName, undecryptableNote } from "@/tests/fixtures/notes"
+import { mockNote, mockNoteParticipant, mockNoteTag, tagWithoutName, undecryptableNote } from "@/tests/fixtures/notes"
 import { testUuid } from "@/tests/support/uuid"
 
 function ids(note: Note, userId: bigint | undefined): string[] {
 	return noteMenuActions(note, userId).map(d => d.id)
+}
+
+// A note owned by user 1 that user 2 participates in, with or without write access.
+function sharedNote(permissionsWrite: boolean, overrides: Partial<Note> = {}): Note {
+	return mockNote({ ownerId: 1n, participants: [mockNoteParticipant({ userId: 2n, permissionsWrite })], ...overrides })
 }
 
 function facts(note: Note, userId: bigint | undefined): { id: string; labelKey: string; icon: unknown }[] {
@@ -63,7 +68,7 @@ describe("noteMenuActions — owner, normal (not trashed/archived) note", () => 
 
 describe("noteMenuActions — non-owner (participant), normal note", () => {
 	it("omits participants and archive; ends in leave instead of trash", () => {
-		expect(ids(mockNote({ ownerId: 1n }), 2n)).toEqual([
+		expect(ids(sharedNote(true), 2n)).toEqual([
 			"rename",
 			"duplicate",
 			"export",
@@ -73,6 +78,20 @@ describe("noteMenuActions — non-owner (participant), normal note", () => {
 			"favorite",
 			"tags",
 			"type",
+			"history",
+			"leave"
+		])
+	})
+
+	it("read-only: omits rename and type, keeps this user's own pin/favorite/tags", () => {
+		expect(ids(sharedNote(false), 2n)).toEqual([
+			"duplicate",
+			"export",
+			"copyId",
+			"copyContent",
+			"pin",
+			"favorite",
+			"tags",
 			"history",
 			"leave"
 		])
@@ -140,7 +159,7 @@ describe("noteMenuActions — archived (not trashed) note", () => {
 	})
 
 	it("non-owner: still offers restore (restoring out of archive is not owner-gated), still ends in leave", () => {
-		expect(ids(mockNote({ archive: true, ownerId: 1n }), 2n)).toEqual([
+		expect(ids(sharedNote(true, { archive: true }), 2n)).toEqual([
 			"rename",
 			"duplicate",
 			"export",
