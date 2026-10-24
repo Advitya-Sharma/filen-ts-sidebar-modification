@@ -1,5 +1,5 @@
 import { formatBytes } from "@filen/shared"
-import { formatShortDate } from "@/lib/formatDate"
+import { formatDateTime, formatShortDate } from "@/lib/formatDate"
 import { asDirectoryOrFile, getSharerIdentity, isSharedRootDriveItem, lastModifiedOf, type DriveItem } from "@/features/drive/lib/item"
 import { type DriveVariant } from "@/features/drive/lib/preferences"
 
@@ -23,33 +23,26 @@ export function formatModifiedDate(item: DriveItem): string {
 	return formatShortDate(lastModifiedOf(item))
 }
 
+// The info panel's three rows carry the clock time (formatDateTime): the row's date alone cannot tell an
+// upload from an edit made the same day.
+export function formatModifiedDateTime(item: DriveItem): string {
+	return formatDateTime(lastModifiedOf(item))
+}
+
 // The info panel's own "Created" row: both item types carry an OPTIONAL `created` field on their
 // decrypted meta (a file's `created` is optional, unlike its required `modified`), falling back to
 // the item's own raw timestamp — same fallback formatModifiedDate uses for a directory with no
 // `created` field, so an item missing this field never renders a blank/undefined date.
-export function formatCreatedDate(item: DriveItem): string {
-	return formatShortDate(item.data.decryptedMeta?.created ?? item.data.timestamp)
+export function formatCreatedDateTime(item: DriveItem): string {
+	return formatDateTime(item.data.decryptedMeta?.created ?? item.data.timestamp)
 }
 
 // The info panel's own "Uploaded" row: the item's raw server-side upload timestamp, distinct from the
 // meta-derived Created/Modified dates — a file re-uploaded over an older name can carry an upload time
 // later than its own recorded created/modified. Present on every arm (unlike the optional meta
 // fields), so this never falls back. Mirrors filen-mobile's rawUploadTimestamp row.
-export function formatUploadedDate(item: DriveItem): string {
-	return formatShortDate(item.data.timestamp)
-}
-
-// The versions panel's own per-row label. Unlike formatModifiedDate/formatCreatedDate this includes
-// the time of day: a file's version history can carry several entries from the same calendar day
-// (autosave, rapid re-uploads), where a date-only label would leave them indistinguishable.
-// Compiled once: toLocaleString with options builds a new formatter per call, and this runs per row.
-const VERSION_TIMESTAMP = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" })
-
-export function formatVersionTimestamp(timestamp: bigint): string {
-	const date = new Date(Number(timestamp))
-
-	// DateTimeFormat.format throws on an Invalid Date where toLocaleString returned a label.
-	return Number.isNaN(date.getTime()) ? date.toLocaleString() : VERSION_TIMESTAMP.format(date)
+export function formatUploadedDateTime(item: DriveItem): string {
+	return formatDateTime(item.data.timestamp)
 }
 
 // The shared counterparty a listing row/tile shows as a muted secondary segment on the two shared

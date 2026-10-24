@@ -9,7 +9,7 @@ import { useNoteHistoryQuery } from "@/features/notes/queries/noteHistory"
 import { restoreNoteFromHistory } from "@/features/notes/lib/history"
 import { noteTypeIcon } from "@/features/notes/lib/icon.logic"
 import { NoteReaderByType } from "@/features/notes/components/reader/noteReaderByType"
-import { formatVersionTimestamp } from "@/features/drive/lib/format"
+import { formatDateTime } from "@/lib/formatDate"
 import { errorLabel } from "@/lib/i18n/errorLabel"
 import { useIsOnline } from "@/lib/useIsOnline"
 import { pendingGuardedOpenChange } from "@/components/dialogs/dismissal.logic"
@@ -143,7 +143,7 @@ export function HistoryDialog({ note: initialNote, onClose }: HistoryDialogProps
 						>
 							<Icon className={`size-4 shrink-0 ${colorClass}`} />
 							<div className="min-w-0 flex-1">
-								<p className="truncate font-medium">{formatVersionTimestamp(history.editedTimestamp)}</p>
+								<p className="truncate font-medium">{formatDateTime(history.editedTimestamp)}</p>
 								<p className="truncate text-xs text-muted-foreground">{history.preview ?? t("noteHistoryNoPreview")}</p>
 							</div>
 							<Button

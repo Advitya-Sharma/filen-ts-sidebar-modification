@@ -61,7 +61,7 @@ async function resolveFilenLinkData(link: FilenPublicLink): Promise<ResolvedFile
 			type: "directory",
 			name: meta.type === "decoded" ? meta.data.name : null,
 			// A decoded dir's own optional `created` wins; otherwise the root's raw upload timestamp —
-			// mirrors formatCreatedDate's identical created-or-timestamp fallback (drive/lib/format.ts).
+			// mirrors formatCreatedDateTime's identical created-or-timestamp fallback (drive/lib/format.ts).
 			timestamp: (meta.type === "decoded" ? meta.data.created : undefined) ?? info.root.inner.timestamp
 		}
 	} catch {

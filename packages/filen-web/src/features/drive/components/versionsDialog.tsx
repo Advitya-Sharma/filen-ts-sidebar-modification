@@ -5,7 +5,7 @@ import { formatBytes, toggleInSet } from "@filen/shared"
 import { CheckIcon, HistoryIcon, RotateCcwIcon, Trash2Icon } from "lucide-react"
 import type { FileVersion } from "@filen/sdk-rs"
 import { type FileItem, restoreVersion, deleteVersion, deleteVersions } from "@/features/drive/lib/actions"
-import { formatVersionTimestamp } from "@/features/drive/lib/format"
+import { formatDateTime } from "@/lib/formatDate"
 import { fileVersionsQueryKey, useFileVersionsQuery } from "@/features/drive/queries/drive"
 import { queryClient } from "@/queries/client"
 import { errorLabel } from "@/lib/i18n/errorLabel"
@@ -144,7 +144,7 @@ export function VersionsDialog({ file, onClose }: VersionsDialogProps) {
 		await runBulkActivity({
 			items: targets,
 			keys: DRIVE_DELETE_VERSIONS,
-			name: version => formatVersionTimestamp(version.timestamp),
+			name: version => formatDateTime(version.timestamp),
 			run: (versions, onSettled) => deleteVersions(file, versions, onSettled),
 			onDone: outcome => {
 				// Widened to plain `Set<string>` (not the branded UuidStr the FileVersion arm carries) —
@@ -239,7 +239,7 @@ export function VersionsDialog({ file, onClose }: VersionsDialogProps) {
 							const meta = (
 								<div className="min-w-0 flex-1">
 									<div className="flex items-center gap-2">
-										<span>{formatVersionTimestamp(version.timestamp)}</span>
+										<span>{formatDateTime(version.timestamp)}</span>
 										{current ? <Badge variant="secondary">{t("driveVersionsCurrentBadge")}</Badge> : null}
 									</div>
 									<span className="text-xs text-muted-foreground">{formatBytes(Number(version.size))}</span>

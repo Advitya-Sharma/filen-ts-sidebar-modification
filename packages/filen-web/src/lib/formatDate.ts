@@ -8,3 +8,13 @@ export function formatShortDate(value: number | bigint | string): string {
 	// DateTimeFormat.format throws on an Invalid Date where toLocaleDateString returned a label.
 	return Number.isNaN(date.getTime()) ? date.toLocaleDateString() : SHORT_DATE.format(date)
 }
+
+const DATE_TIME = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" })
+
+// Date with its clock time, for where the day alone cannot tell timestamps apart (versions, an item's info).
+export function formatDateTime(value: number | bigint | string): string {
+	const date = new Date(typeof value === "bigint" ? Number(value) : value)
+
+	// DateTimeFormat.format throws on an Invalid Date where toLocaleString returned a label.
+	return Number.isNaN(date.getTime()) ? date.toLocaleString() : DATE_TIME.format(date)
+}

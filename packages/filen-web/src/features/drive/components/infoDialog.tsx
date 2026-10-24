@@ -6,7 +6,13 @@ import { StarIcon } from "lucide-react"
 import { asDirectoryOrFile, driveItemMime, isDirectoryItem, type DriveItem } from "@/features/drive/lib/item"
 import { type DriveVariant } from "@/features/drive/lib/preferences"
 import { ItemHeroTile } from "@/features/drive/components/itemThumbnail"
-import { formatCreatedDate, formatItemSize, formatModifiedDate, formatUploadedDate, sharedIdentityLabel } from "@/features/drive/lib/format"
+import {
+	formatCreatedDateTime,
+	formatItemSize,
+	formatModifiedDateTime,
+	formatUploadedDateTime,
+	sharedIdentityLabel
+} from "@/features/drive/lib/format"
 import { previewType } from "@/features/drive/lib/preview.logic"
 import { parentNavigationTarget } from "@/features/drive/lib/navigate"
 import { previewKindLabelKey } from "@/features/drive/components/infoDialog.logic"
@@ -177,9 +183,9 @@ export function InfoDialog({ item, variant, remoteInfoEnabled, onClose }: InfoDi
 
 					{mime !== undefined ? <InfoRow label={t("driveInfoMimeType")}>{mime}</InfoRow> : null}
 
-					<InfoRow label={t("driveInfoCreated")}>{formatCreatedDate(item)}</InfoRow>
-					<InfoRow label={t("driveInfoUploaded")}>{formatUploadedDate(item)}</InfoRow>
-					<InfoRow label={t("driveInfoModified")}>{formatModifiedDate(item)}</InfoRow>
+					<InfoRow label={t("driveInfoCreated")}>{formatCreatedDateTime(item)}</InfoRow>
+					<InfoRow label={t("driveInfoUploaded")}>{formatUploadedDateTime(item)}</InfoRow>
+					<InfoRow label={t("driveInfoModified")}>{formatModifiedDateTime(item)}</InfoRow>
 
 					{shared ? (
 						<InfoRow label={t(variant === "sharedIn" ? "driveInfoSharedBy" : "driveInfoSharedWith")}>{shared.name}</InfoRow>
