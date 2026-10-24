@@ -12,21 +12,33 @@ import { linkedFileItem } from "@/tests/fixtures/sdk"
 
 describe("chooseDownloadStrategy", () => {
 	it("streams via FSA whenever available, regardless of size", () => {
-		expect(chooseDownloadStrategy({ fsaAvailable: true, size: PUBLIC_BUFFERED_DOWNLOAD_MAX_BYTES + 1n })).toEqual({ kind: "fsa" })
+		expect(
+			chooseDownloadStrategy({ fsaAvailable: true, streamAvailable: false, size: PUBLIC_BUFFERED_DOWNLOAD_MAX_BYTES + 1n })
+		).toEqual({ kind: "fsa" })
 	})
 
 	it("buffers a small file when FSA is unavailable", () => {
-		expect(chooseDownloadStrategy({ fsaAvailable: false, size: 1024n })).toEqual({ kind: "buffered" })
+		expect(chooseDownloadStrategy({ fsaAvailable: false, streamAvailable: false, size: 1024n })).toEqual({ kind: "buffered" })
 	})
 
 	it("refuses a file over the buffered cap when FSA is unavailable", () => {
-		expect(chooseDownloadStrategy({ fsaAvailable: false, size: PUBLIC_BUFFERED_DOWNLOAD_MAX_BYTES + 1n })).toEqual({
+		expect(
+			chooseDownloadStrategy({ fsaAvailable: false, streamAvailable: false, size: PUBLIC_BUFFERED_DOWNLOAD_MAX_BYTES + 1n })
+		).toEqual({
 			kind: "too-large"
 		})
 	})
 
+	it("streams through the service worker without FSA, regardless of size", () => {
+		expect(
+			chooseDownloadStrategy({ fsaAvailable: false, streamAvailable: true, size: PUBLIC_BUFFERED_DOWNLOAD_MAX_BYTES + 1n })
+		).toEqual({ kind: "stream" })
+	})
+
 	it("honors an explicit cap override", () => {
-		expect(chooseDownloadStrategy({ fsaAvailable: false, size: 2048n, cap: 1024n })).toEqual({ kind: "too-large" })
+		expect(chooseDownloadStrategy({ fsaAvailable: false, streamAvailable: false, size: 2048n, cap: 1024n })).toEqual({
+			kind: "too-large"
+		})
 	})
 })
 

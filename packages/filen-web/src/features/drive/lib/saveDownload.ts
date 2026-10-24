@@ -241,7 +241,7 @@ export async function wipeSwClient(): Promise<void> {
 	])
 }
 
-function swTarget(suggestedName: string): SwSaveTarget {
+export function swTarget(suggestedName: string): SwSaveTarget {
 	const id = crypto.randomUUID()
 
 	return { kind: "sw", id, url: `${SW_DOWNLOAD_PREFIX}${id}`, name: suggestedName }
@@ -291,6 +291,12 @@ export function canTransferStreams(): boolean {
 	}
 
 	return streamsTransferable
+}
+
+// Whether bytes the page streams itself can save through the service worker (triggerSwStreamDownload): one
+// controls the page and a stream can be posted to it.
+export function canStreamToSw(): boolean {
+	return "serviceWorker" in navigator && navigator.serviceWorker.controller !== null && canTransferStreams()
 }
 
 // The row's Cancel for a download the service worker streams: the page's own SDK isn't running it, so

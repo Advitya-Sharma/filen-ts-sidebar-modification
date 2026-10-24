@@ -2,24 +2,32 @@ import { asDirectoryOrFile, type DriveItem } from "@/features/drive/lib/item"
 import { bufferedSizeCap, previewType, unprobedTransportStream } from "@/features/drive/lib/preview.logic"
 
 // Pure decisions behind the public-link download + preview surface — no worker, no DOM, no React, so
-// every cap and branch is directly unit-testable. The service worker cannot serve an anonymous
-// visitor (its wasm bundle is authed-only), so there is NO streaming download path here: FSA streams
-// to disk when the browser has it, otherwise the whole file is buffered in memory, which is what the
-// caps below bound.
+// every cap and branch is directly unit-testable. FSA streams to disk when the browser has it; otherwise the
+// page's own download streams through the service worker into the browser's download (it only pipes, so an
+// anonymous visitor needs no session there). Only where neither exists is the whole file buffered in memory,
+// which is what the caps below bound.
 
-// The one place the buffered ceiling lives. A non-FSA browser (Firefox/Safari) must hold the entire
-// file in memory as a Blob before the anchor-download fires; past this it would risk crashing the tab,
-// so the UI shows an honest "too large — use a Chromium browser or the desktop app" note instead.
-// Chromium's FSA path streams straight to the chosen file and is never bound by this.
+// The one place the buffered ceiling lives. A browser with neither FSA nor the service worker route must hold
+// the entire file in memory as a Blob before the anchor-download fires; past this it would risk crashing the
+// tab, so the UI shows an honest "too large — use a Chromium browser or the desktop app" note instead.
 export const PUBLIC_BUFFERED_DOWNLOAD_MAX_BYTES = 1_073_741_824n // 1 GiB
 
-export type DownloadStrategy = { kind: "fsa" } | { kind: "buffered" } | { kind: "too-large" }
+export type DownloadStrategy = { kind: "fsa" } | { kind: "stream" } | { kind: "buffered" } | { kind: "too-large" }
 
-// Chooses how a single file (or a non-FSA zip whose size is known) saves. FSA streams and is never
-// capped; otherwise a file over the buffered cap is refused up front rather than attempted and OOM'd.
-export function chooseDownloadStrategy(input: { fsaAvailable: boolean; size: bigint; cap?: bigint }): DownloadStrategy {
+// Chooses how a single file saves. FSA and the service worker stream and are never capped; otherwise a file over
+// the buffered cap is refused up front rather than attempted and OOM'd.
+export function chooseDownloadStrategy(input: {
+	fsaAvailable: boolean
+	streamAvailable: boolean
+	size: bigint
+	cap?: bigint
+}): DownloadStrategy {
 	if (input.fsaAvailable) {
 		return { kind: "fsa" }
+	}
+
+	if (input.streamAvailable) {
+		return { kind: "stream" }
 	}
 
 	if (input.size > (input.cap ?? PUBLIC_BUFFERED_DOWNLOAD_MAX_BYTES)) {
@@ -69,7 +77,7 @@ export function anonPreviewability(item: DriveItem): AnonPreviewability {
 	return cap === null || base.data.size <= cap ? "previewable" : "too-large"
 }
 
-// The in-memory sink for a non-FSA zip download: the SDK streams the archive into `writable`, chunks
+// The in-memory sink for a zip download with neither FSA nor the service worker route: the SDK streams the archive into `writable`, chunks
 // accumulate here, and `done` resolves a single Blob once the stream closes. A zip's total size is not
 // known up front, so the cap is enforced INCREMENTALLY — the moment accumulated bytes exceed it the
 // stream errors, which aborts the SDK's managed future, rather than letting an unbounded archive grow

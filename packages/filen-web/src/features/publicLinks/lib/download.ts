@@ -4,22 +4,26 @@ import { sdkApi } from "@/lib/sdk/client"
 import { asErrorDTO, type ErrorDTO } from "@/lib/sdk/errors"
 import { pipeWorkerToSink } from "@/lib/pipeWorkerToSink"
 import {
+	canStreamToSw,
 	discardPickedFile,
 	isFsaAvailable,
 	isPickerCancelled,
 	pickFsaTarget,
 	saveBlob,
+	swTarget,
 	writeBytesToPickedFile,
 	type FsaSaveTarget
 } from "@/features/drive/lib/saveDownload"
+import { streamProducerToSw } from "@/features/drive/lib/swStreamProducer"
 import { chooseDownloadStrategy, createCollectingSink, type CollectingSink } from "@/features/publicLinks/lib/download.logic"
 import { previewCacheScope } from "@/features/preview/lib/accessMode"
 import { joinPreviewBytes, loadPreviewBytes } from "@/features/preview/lib/previewCache"
 
-// Effectful anon-download wiring for the public-link routes. NO service worker (its wasm bundle is
-// authed-only) and NO authed transfers store (session-scoped machinery) — this surface is fully
-// self-contained: FSA streams straight to a picked file on Chromium, else the whole file/zip is
-// buffered in memory and saved via an anchor. Progress is reported to a caller-owned callback so the
+// Effectful anon-download wiring for the public-link routes. NO authed transfers store (session-scoped
+// machinery) and no session in the service worker (its wasm bundle is authed-only): FSA streams straight to a
+// picked file on Chromium; elsewhere the page's own SDK streams through the service worker, which only pipes the
+// bytes into the browser's download (its progress and Cancel included). Only where neither exists is the whole
+// file/zip buffered in memory and saved via an anchor. Progress is reported to a caller-owned callback so the
 // page renders its own inline indicator.
 
 // loaded/total in bytes; `total` is null while there is no share to show: a zip whose size the SDK
@@ -47,7 +51,7 @@ async function pickFsaFile(suggestedName: string): Promise<FsaSaveTarget | null>
 	}
 }
 
-// Single linked file → disk. FSA path streams; the buffered fallback refuses a file over the in-memory
+// Single linked file → disk. The FSA and service worker paths stream; the buffered fallback refuses a file over the in-memory
 // cap up front (the caller renders the "too large" note from that outcome) rather than attempting an
 // allocation that would crash the tab. A file the inline preview already loaded, or is still loading,
 // under this link's scope (`linkScope`, see previewCacheScope) is saved from those bytes on either path
@@ -80,7 +84,7 @@ export async function startAnonFileDownload(args: {
 		}
 	}
 
-	const strategy = chooseDownloadStrategy({ fsaAvailable: target !== null, size })
+	const strategy = chooseDownloadStrategy({ fsaAvailable: target !== null, streamAvailable: canStreamToSw(), size })
 
 	if (strategy.kind === "too-large") {
 		return { status: "too-large" }
@@ -88,6 +92,9 @@ export async function startAnonFileDownload(args: {
 
 	const transferId = crypto.randomUUID()
 	const scope = previewCacheScope("anon", linkScope)
+	const reportProgress = Comlink.proxy((bytes: bigint) => {
+		onProgress(Number(bytes), Number(size))
+	})
 
 	try {
 		const previewed = await joinPreviewBytes(scope, file.uuid)
@@ -102,14 +109,11 @@ export async function startAnonFileDownload(args: {
 			onProgress(Number(size), Number(size))
 		} else if (target !== null) {
 			await pipeWorkerToSink(target.writable, transferred =>
-				sdkApi.downloadLinkedFileToWriterAnon(
-					file,
-					transferId,
-					transferred,
-					Comlink.proxy((bytes: bigint) => {
-						onProgress(Number(bytes), Number(size))
-					})
-				)
+				sdkApi.downloadLinkedFileToWriterAnon(file, transferId, transferred, reportProgress)
+			)
+		} else if (strategy.kind === "stream") {
+			await streamProducerToSw(swTarget(name), transferId, Number(size), writable =>
+				sdkApi.downloadLinkedFileToWriterAnon(file, transferId, Comlink.transfer(writable, [writable]), reportProgress)
 			)
 		} else {
 			const bytes = await loadPreviewBytes(
@@ -138,8 +142,8 @@ export async function startAnonFileDownload(args: {
 	return { status: "success" }
 }
 
-// Whole linked directory → a single zip. FSA streams the archive to the picked file; the non-FSA
-// fallback collects it in memory (createCollectingSink, cap-enforced incrementally since a zip's total
+// Whole linked directory → a single zip. FSA streams the archive to the picked file, else the service worker
+// streams it into the browser's download; the fallback without either collects it in memory (createCollectingSink, cap-enforced incrementally since a zip's total
 // isn't known up front, reported as "too-large" once it trips) then saves one Blob. `<name>.zip` mirrors
 // old-web's naming.
 export async function startAnonDirZipDownload(args: {
@@ -174,6 +178,10 @@ export async function startAnonDirZipDownload(args: {
 		if (target !== null) {
 			await pipeWorkerToSink(target.writable, transferred =>
 				sdkApi.downloadLinkedDirToZipAnon(dir, transferId, transferred, reportProgress)
+			)
+		} else if (canStreamToSw()) {
+			await streamProducerToSw(swTarget(fileName), transferId, null, writable =>
+				sdkApi.downloadLinkedDirToZipAnon(dir, transferId, Comlink.transfer(writable, [writable]), reportProgress)
 			)
 		} else {
 			const buffered = createCollectingSink()

@@ -5,15 +5,14 @@ import { runOp } from "@/lib/actions/outcome"
 import { asErrorDTO, type ErrorDTO } from "@/lib/sdk/errors"
 import type { EntryBytes, EntryJobParams, EntryProgress } from "@/workers/sdk.worker"
 import {
-	assertSwControlled,
 	isPickerCancelled,
 	pipeToPickedFile,
 	saveStreamDownload,
-	triggerSwStreamDownload,
 	type FsaSaveTarget,
 	type SaveTarget,
 	type SwSaveTarget
 } from "@/features/drive/lib/saveDownload"
+import { streamProducerToSw } from "@/features/drive/lib/swStreamProducer"
 import { useTransfersStore, type TransfersStore } from "@/features/transfers/store/useTransfersStore"
 import { settleTransferFailure, type DownloadOutcome } from "@/features/transfers/lib/settle"
 import { toastTransferStarted } from "@/features/transfers/lib/transferStartToast"
@@ -155,71 +154,18 @@ function progressProxy(report: EntryDownloadReporters): (progress: EntryProgress
 	})
 }
 
-// Through the service worker: the SDK writes into a stream whose readable the worker pipes into the
-// browser's download. The navigation waits for the first byte (or the end of an empty entry), so a
-// download that fails before it (a wrong password) leaves no failed download in the browser. A failure of
-// either side stops the other. A cancel names the outcome whichever way it arrived (the browser's own
-// cancel reaches the SDK as a failed write), unless it is the stop this sent; else the first failure does.
-async function downloadEntryViaSw(
+// Through the service worker (streamProducerToSw), so a download that fails before its first byte (a wrong
+// password) leaves no failed download in the browser.
+function downloadEntryViaSw(
 	request: EntryRequest,
 	transferId: string,
 	save: SwSaveTarget,
 	password: string | undefined,
 	report: EntryDownloadReporters
 ): Promise<boolean> {
-	assertSwControlled()
-
-	let flowing: () => void = () => undefined
-	const firstChunk = new Promise<void>(resolve => {
-		flowing = resolve
-	})
-	// Room for one chunk on the readable side: with none, nothing reaches transform() before the worker
-	// reads, and the worker reads only after the navigation this waits on.
-	const pipe = new TransformStream<Uint8Array, Uint8Array>(
-		{
-			transform(chunk, controller) {
-				flowing()
-				controller.enqueue(chunk)
-			}
-		},
-		undefined,
-		{ highWaterMark: 1 }
+	return streamProducerToSw(save, transferId, request.size, writable =>
+		sdkApi.downloadArchiveEntry(transferId, request.params, password, Comlink.transfer(writable, [writable]), progressProxy(report))
 	)
-	// In the order they came; `ours` for the SDK's end once this stopped it.
-	const failures: { error: unknown; ours: boolean }[] = []
-	let stopped = false
-	const produced = sdkApi.downloadArchiveEntry(
-		transferId,
-		request.params,
-		password,
-		Comlink.transfer(pipe.writable, [pipe.writable]),
-		progressProxy(report)
-	)
-
-	produced.catch((e: unknown) => {
-		failures.push({ error: e, ours: stopped })
-	})
-
-	await Promise.race([firstChunk, produced])
-
-	const delivered = triggerSwStreamDownload(save, transferId, pipe.readable, request.size, () => {
-		void sdkApi.cancelTransfer(transferId)
-	}).catch((e: unknown) => {
-		failures.push({ error: e, ours: false })
-		// A browser download that died leaves the SDK writing into nothing.
-		stopped = true
-		void sdkApi.cancelTransfer(transferId)
-	})
-
-	const [checked] = await Promise.allSettled([produced, delivered])
-
-	const [first] = failures
-
-	if (first !== undefined) {
-		throw (failures.find(failure => !failure.ours && asErrorDTO(failure.error).kind === "Cancelled") ?? first).error
-	}
-
-	return checked.status === "fulfilled" && checked.value
 }
 
 // Through the picked file, which a failure discards.
