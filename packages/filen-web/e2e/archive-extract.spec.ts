@@ -110,15 +110,20 @@ async function openNestedDirectory(page: Page, listbox: Locator, name: string): 
 	await waitForListingSettled(page)
 }
 
-// Starts "Extract all" of the fixture gate tarball (8.5 MiB) from its gate into `path`, and pauses it
-// at once. Off WebKit the upload chunks are held until Pause is pressed, so the job cannot finish first;
-// on WebKit (no routing of worker requests) the tarball's size alone keeps it running that long.
+// Starts "Extract all" of the fixture gate tarball (8.5 MiB) from its gate into `path`, and pauses it.
+// Off WebKit the pause waits for the first held upload chunk: a file uploads only into its directory, so the
+// job has made that directory by then, and it cannot finish before Pause lands. On WebKit (no routing of
+// worker requests) it pauses at once, and the tarball's size alone keeps it running that long.
 async function pausedGateExtract(page: Page, browserName: string, path: readonly string[], holds: (ChunkHold | null)[]): Promise<Locator> {
 	const hold = await holdChunks(page, browserName, { hosts: "ingest" })
 
 	holds.push(hold)
 
 	const card = await startGateExtract(page, path)
+
+	if (hold !== null) {
+		await expect.poll(() => hold.held(), { timeout: ARCHIVE_JOB_TIMEOUT_MS }).toBeGreaterThan(0)
+	}
 
 	await cardButton(card, "Pause").click()
 	await hold?.dispose()
