@@ -35,10 +35,13 @@ function field(): HTMLInputElement {
 }
 
 describe("DocxPasswordPrompt", () => {
-	it("masks the password, and shows it on request", () => {
+	it("masks the password, and shows it on request", async () => {
 		prompt(() => Promise.resolve("accepted"))
 
-		expect(window.document.activeElement).toBe(field())
+		// The dialog focuses it on the next frame.
+		await waitFor(() => {
+			expect(window.document.activeElement).toBe(field())
+		})
 		expect(field().className).toContain("[-webkit-text-security:disc]")
 		expect(field().getAttribute("autocomplete")).toBe("off")
 

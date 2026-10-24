@@ -148,7 +148,12 @@ export function DocxPasswordPrompt({
 				onOpenChange(next)
 			}}
 		>
-			<DialogContent {...(finalFocus === undefined ? {} : { finalFocus })}>
+			{/* The dialog's own initial focus, not autoFocus: a preview overlay opened just before queues its initial
+			focus for the next frame, which only a newer request cancels. */}
+			<DialogContent
+				initialFocus={inputRef}
+				{...(finalFocus === undefined ? {} : { finalFocus })}
+			>
 				<form
 					onSubmit={submit}
 					className="flex flex-col gap-6"
@@ -162,7 +167,6 @@ export function DocxPasswordPrompt({
 						<ArchivePasswordInput
 							ref={inputRef}
 							id={fieldId}
-							autoFocus
 							value={password}
 							disabled={verifying !== null}
 							revealed={revealed}
