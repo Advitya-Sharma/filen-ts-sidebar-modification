@@ -14,7 +14,7 @@ const ANDROID_TARGET_SDK_VERSION: number = 36
 const ANDROID_COMPILE_SDK_VERSION: number = 37
 const ANDROID_BUILD_TOOLS_VERSION: string = "37.0.0"
 // Gradle ABIs and the Rust .so set must match. x86_64 first: withAndroidRustBuild reads targets[0] for uniffi-bindgen
-const ANDROID_ABIS: string[] = ["x86_64", "arm64-v8a"]
+const ANDROID_ABIS: string[] = ["arm64-v8a"]
 const IOS_DEPLOYMENT_TARGET: string = "26.0"
 const NAME: string = "Filen"
 const IDENTIFIER: string = "io.filen.app"
