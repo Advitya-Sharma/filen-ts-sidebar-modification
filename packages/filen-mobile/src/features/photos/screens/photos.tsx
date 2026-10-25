@@ -1,9 +1,9 @@
-import { Fragment, useCallback } from "react"
+import { Fragment, useCallback, useRef } from "react"
 import SafeAreaView from "@/components/ui/safeAreaView"
 import View from "@/components/ui/view"
 import useDriveItemsQuery from "@/features/drive/queries/useDriveItems.query"
 import { itemSorter, captureTimestamp } from "@/lib/sort"
-import VirtualList from "@/components/ui/virtualList"
+import VirtualList, { type ListRef } from "@/components/ui/virtualList"
 import ListEmpty from "@/components/ui/listEmpty"
 import { run } from "@filen/shared"
 import alerts from "@/lib/alerts"
@@ -22,7 +22,9 @@ import { useTranslation } from "react-i18next"
 import Header from "@/features/photos/components/photosHeader"
 import Photo from "@/features/photos/components/photoItem"
 import DateRange from "@/features/photos/components/dateRange"
-import { holdsAnyOf, isPhotoGridItem } from "@/features/photos/utils"
+import { holdsAnyOf, isPhotoGridItem, buildPhotoTimeline } from "@/features/photos/utils"
+import { monthYearLabel } from "@/lib/time"
+import { type DriveItemFileExtracted } from "@/types"
 import { LazyWrapper } from "@/components/lazyWrapper"
 import logger from "@/lib/logger"
 import { useFileKindVerdicts } from "@/hooks/useFileKindVerdict"
@@ -67,12 +69,24 @@ const Photos = () => {
 	const sorted = listing ? itemSorter.sortItems(listing, "captureDesc") : []
 	const verdicts = useFileKindVerdicts(changed => holdsAnyOf(listing, changed))
 	const items = sorted.filter(item => isPhotoGridItem(item, verdicts.get(item.data.uuid) ?? null))
+	const listRef = useRef<ListRef<DriveItemFileExtracted> | null>(null)
+	// Capture times + year/month boundaries for the scrubber and the "Jump to date" menu, one pass per listing.
+	const timeline = buildPhotoTimeline(items, captureTimestamp)
+
+	const jumpToIndex = (index: number) => {
+		listRef.current?.scrollToIndex({
+			index,
+			animated: false
+		})
+	}
 
 	return (
 		<Fragment>
 			<Header
 				items={items}
 				drivePath={drivePath}
+				timelineMonths={timeline.months}
+				onJumpToIndex={jumpToIndex}
 			/>
 			<SafeAreaView edges={["left", "right"]}>
 				<View
@@ -90,7 +104,16 @@ const Photos = () => {
 							/>
 						) : config.enabled && config.remoteDir ? (
 							<VirtualList
+								ref={listRef}
 								className="flex-1"
+								fastScroll={{
+									getLabel: index => {
+										const timestamp = timeline.timestamps[index]
+
+										return timestamp === undefined ? null : monthYearLabel(timestamp)
+									},
+									markers: timeline.yearMarkers
+								}}
 								contentContainerClassName="pb-40"
 								itemWidth={size}
 								keyExtractor={item => item.data.uuid}

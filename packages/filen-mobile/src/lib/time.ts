@@ -21,6 +21,8 @@ try {
 export function setIntlLanguage(lang: string): void {
 	intlLanguage = lang
 	cachedLocaleInfo = null
+	monthYearLabelCache.clear()
+	monthNameCache.clear()
 }
 
 /**
@@ -256,4 +258,55 @@ export function formatRelativeTime(
 		},
 		options?.absolute ?? simpleDate
 	)
+}
+
+const monthYearLabelCache = new Map<number, string>()
+const monthNameCache = new Map<number, string>()
+const MONTH_NAMES_FALLBACK = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const
+
+/**
+ * "Mar 2021" style label (locale month name), for scrubber bubbles and jump menus.
+ * Cached per calendar month, so Intl runs at most once per month ever seen — never per frame.
+ */
+export function monthYearLabel(timestamp: number | Date): string {
+	const date = toDate(timestamp)
+	const key = date.getFullYear() * 12 + date.getMonth()
+	const cached = monthYearLabelCache.get(key)
+
+	if (cached !== undefined) {
+		return cached
+	}
+
+	let label: string
+
+	try {
+		label = date.toLocaleDateString(intlLanguage, { month: "short", year: "numeric" })
+	} catch {
+		label = `${MONTH_NAMES_FALLBACK[date.getMonth()] ?? ""} ${date.getFullYear()}`
+	}
+
+	monthYearLabelCache.set(key, label)
+
+	return label
+}
+
+/** Locale month name alone ("March"), cached per month index. */
+export function monthName(month: number): string {
+	const cached = monthNameCache.get(month)
+
+	if (cached !== undefined) {
+		return cached
+	}
+
+	let label: string
+
+	try {
+		label = new Date(2000, month, 1).toLocaleDateString(intlLanguage, { month: "long" })
+	} catch {
+		label = MONTH_NAMES_FALLBACK[month] ?? String(month + 1)
+	}
+
+	monthNameCache.set(month, label)
+
+	return label
 }

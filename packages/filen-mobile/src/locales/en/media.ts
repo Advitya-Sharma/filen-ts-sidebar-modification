@@ -20,6 +20,8 @@ export const media = {
 	photos_per_row_one: "{{count}} photo per row",
 	/** Photos tab / header menu — plural form of photos_per_row_one */
 	photos_per_row_other: "{{count}} photos per row",
+	/** Photos tab / header menu — opens a Year → Month submenu that scrolls the grid to that month */
+	jump_to_date: "Jump to date",
 	// favorite_selected, unfavorite_selected, download_selected and trash_selected live in common.ts;
 	// make_available_offline, save_to_photos and are_you_sure_trash_selected in drive.ts.
 

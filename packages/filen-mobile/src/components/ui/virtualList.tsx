@@ -1,4 +1,4 @@
-import { useState, Fragment } from "react"
+import { useState, useRef, Fragment } from "react"
 import { withUniwind } from "uniwind"
 import { useResolveClassNames } from "@/hooks/useResolveClassNames"
 import { RefreshControl, ActivityIndicator } from "react-native"
@@ -16,6 +16,7 @@ import {
 } from "@shopify/flash-list"
 import logger from "@/lib/logger"
 import { onlineManager } from "@tanstack/react-query"
+import FastScroller, { useFastScrollController, type FastScrollOptions } from "@/components/ui/fastScroller"
 
 export type ListRenderItemInfo<T> = FlashListListRenderItemInfo<T>
 
@@ -31,6 +32,8 @@ export type VirtualListExtraProps = {
 	emptyComponent?: () => React.ReactNode
 	footerComponent?: () => React.ReactNode
 	headerComponent?: () => React.ReactNode
+	// Draggable scrubber on the right edge for jumping through long lists (labels/markers optional).
+	fastScroll?: FastScrollOptions
 }
 
 /**
@@ -101,6 +104,21 @@ function VirtualListInner<T>(props: FlashListProps<T> & React.RefAttributes<List
 	const { layout, onLayout } = useViewLayout()
 	const [refreshing, setRefreshing] = useState<boolean>(false)
 	const textForeground = useResolveClassNames("text-foreground")
+	const fastScrollController = useFastScrollController()
+	const innerListRef = useRef<ListRef<T> | null>(null)
+	const { fastScroll, ref: forwardedRef, ...flashListProps } = props
+	const fastScrollActive = fastScroll !== undefined && !props.horizontal
+
+	// Keep the caller's ref working while the scrubber holds its own handle on the list.
+	const setListRef = (instance: ListRef<T> | null) => {
+		innerListRef.current = instance
+
+		if (typeof forwardedRef === "function") {
+			forwardedRef(instance)
+		} else if (forwardedRef) {
+			forwardedRef.current = instance
+		}
+	}
 
 	const itemsPerRow = resolveItemsPerRow({
 		itemsPerRow: props.itemsPerRow,
@@ -190,7 +208,9 @@ function VirtualListInner<T>(props: FlashListProps<T> & React.RefAttributes<List
 						disabled: true
 					}}
 					showsHorizontalScrollIndicator={!props.horizontal ? false : (props.data ?? []).length > 0 && !props.loading}
-					showsVerticalScrollIndicator={props.horizontal ? false : (props.data ?? []).length > 0 && !props.loading}
+					showsVerticalScrollIndicator={
+						props.horizontal || fastScrollActive ? false : (props.data ?? []).length > 0 && !props.loading
+					}
 					scrollEnabled={resolveScrollEnabled({
 						loading: props.loading,
 						dataLength: (props.data ?? []).length,
@@ -199,11 +219,37 @@ function VirtualListInner<T>(props: FlashListProps<T> & React.RefAttributes<List
 					ListEmptyComponent={emptyComponent}
 					ListFooterComponent={props.footerComponent}
 					ListHeaderComponent={props.headerComponent}
-					{...props}
+					{...flashListProps}
+					ref={setListRef}
+					{...(fastScrollActive
+						? {
+								scrollEventThrottle: 16,
+								onScroll: e => {
+									fastScrollController.onScroll(e)
+									props.onScroll?.(e)
+								},
+								onContentSizeChange: (w, h) => {
+									fastScrollController.onContentSizeChange(w, h)
+									props.onContentSizeChange?.(w, h)
+								},
+								onLayout: e => {
+									fastScrollController.onLayout(e)
+									props.onLayout?.(e)
+								}
+							}
+						: {})}
 					contentContainerStyle={isEmpty ? [{ flexGrow: 1 }, props.contentContainerStyle] : props.contentContainerStyle}
 					refreshing={refreshing}
 					refreshControl={refreshControl}
 				/>
+				{fastScrollActive && !props.loading && (
+					<FastScroller
+						controller={fastScrollController}
+						getList={() => innerListRef.current}
+						itemCount={(props.data ?? []).length}
+						options={fastScroll}
+					/>
+				)}
 			</View>
 		</Fragment>
 	)

@@ -44,6 +44,7 @@ import Text from "@/components/ui/text"
 import Ionicons from "@expo/vector-icons/Ionicons"
 import logger from "@/lib/logger"
 import { useResolveClassNames } from "@/hooks/useResolveClassNames"
+import { buildDriveFastScroll } from "@/features/drive/driveFastScroll"
 
 // Subscribes to the clipboard itself so a copy or cut re-renders this button, not the whole listing.
 const EmptyAddMenu = ({ parent, drivePath }: { parent: AnyNormalDir | null; drivePath: DrivePath }) => {
@@ -300,6 +301,8 @@ const Drive = () => {
 								return item.data.uuid
 							}}
 							data={items}
+							// Drag the right-edge handle to jump anywhere; labelled by the active sort.
+							fastScroll={buildDriveFastScroll(items, sort)}
 							// Offline VIRTUAL ROOT only (nested offline dirs have a uuid): surfaces
 							// the last sync pass's error count as a pressable row above the listing.
 							// The row hides itself while there are no errors.

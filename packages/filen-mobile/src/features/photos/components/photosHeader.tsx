@@ -10,8 +10,49 @@ import useCameraUploadStore from "@/features/cameraUpload/store/useCameraUpload.
 import useDriveStore from "@/features/drive/store/useDrive.store"
 import { usePhotosGridTiles, PHOTOS_GRID_TILE_OPTIONS } from "@/features/photos/photosGridTiles"
 import usePhotoBulkActions from "@/features/photos/hooks/usePhotoBulkActions"
+import { type PhotoTimelineMonth } from "@/features/photos/utils"
+import { type MenuButton } from "@/components/ui/menu"
+import { monthName } from "@/lib/time"
 
-export const Header = ({ items, drivePath }: { items: DriveItemFileExtracted[]; drivePath: DrivePath }) => {
+// Year → Month submenu over the months that actually hold photos (newest first, as the grid is sorted).
+function buildJumpToDateButtons(months: readonly PhotoTimelineMonth[], onJumpToIndex: (index: number) => void): MenuButton[] {
+	const years: MenuButton[] = []
+	let currentYear: number | null = null
+	let currentMonths: MenuButton[] = []
+
+	for (const entry of months) {
+		if (entry.year !== currentYear) {
+			currentMonths = []
+			currentYear = entry.year
+
+			years.push({
+				id: `jumpToYear${entry.year}`,
+				title: String(entry.year),
+				subButtons: currentMonths
+			})
+		}
+
+		currentMonths.push({
+			id: `jumpToMonth${entry.year}-${entry.month}`,
+			title: monthName(entry.month),
+			onPress: () => onJumpToIndex(entry.index)
+		})
+	}
+
+	return years
+}
+
+export const Header = ({
+	items,
+	drivePath,
+	timelineMonths,
+	onJumpToIndex
+}: {
+	items: DriveItemFileExtracted[]
+	drivePath: DrivePath
+	timelineMonths: readonly PhotoTimelineMonth[]
+	onJumpToIndex: (index: number) => void
+}) => {
 	const { t } = useTranslation()
 	const textForeground = useResolveClassNames("text-foreground")
 	const syncing = useCameraUploadStore(useShallow(state => state.syncing))
@@ -81,6 +122,16 @@ export const Header = ({ items, drivePath }: { items: DriveItemFileExtracted[]; 
 			{
 				type: "ellipsisMenu",
 				buttons: [
+					...(timelineMonths.length > 1
+						? [
+								{
+									id: "jumpToDate",
+									title: t("jump_to_date"),
+									icon: "calendar" as const,
+									subButtons: buildJumpToDateButtons(timelineMonths, onJumpToIndex)
+								}
+							]
+						: []),
 					{
 						id: "settings",
 						title: t("settings"),

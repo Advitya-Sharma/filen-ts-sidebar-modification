@@ -1,0 +1,162 @@
+name: Build Android APK (fast scroll fork)
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+      - fast-scroll
+    paths:
+      - 'packages/filen-mobile/**'
+      - 'packages/filen-shared/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'patches/**'
+      - 'package.json'
+      - '.github/workflows/build-android-fast-scroll.yml'
+
+concurrency:
+  group: build-android-fast-scroll
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  NODE_ENV: production
+  APP_ENV: production
+  # Inlined into the JS bundle by Metro (EXPO_PUBLIC_*); encrypts the secureStore MMKV fallback used
+  # when the OS keychain is unavailable. Missing it crashes the app at launch (SecureStore
+  # constructor throws). Set the SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY org/repo secret.
+  EXPO_PUBLIC_SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY: ${{ secrets.SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY }}
+
+jobs:
+  build-android-without-publish:
+    runs-on: macos-26
+    defaults:
+      run:
+        working-directory: packages/filen-mobile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Write fallback encryption key to .env
+        run: |
+          # A fork has no Filen secrets: fall back to a fresh random key so the build works out of the box.
+          # Set the SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY repo secret to keep one stable key across builds.
+          if [ -z "${EXPO_PUBLIC_SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY}" ]; then
+            EXPO_PUBLIC_SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY=$(openssl rand -hex 32)
+            echo "::warning::No SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY secret set - using a random key for this build"
+          fi
+          # @expo/env loads packages/filen-mobile/.env (the run working-directory) at Metro bundle time,
+          # so EXPO_PUBLIC_* is inlined reliably even if the env var doesn't propagate into the native
+          # build's bundling subprocess. .env is gitignored; the always() Cleanup step removes it.
+          printf 'EXPO_PUBLIC_SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY=%s\n' "${EXPO_PUBLIC_SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY}" > .env
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          # The action defaults to 'tools platform-tools', and the obsolete `tools` package is gone
+          # from Google's repository: sdkmanager exits 1 on it and takes the whole job with it.
+          # Nothing here needs it — Gradle resolves its own platform and build-tools, and the NDK
+          # cargo-ndk builds against comes from the runner image.
+          packages: 'platform-tools'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-02-20
+          components: rust-src
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      # filen-rs heif-decoder builds its vendored dav1d with meson + ninja; nasm
+      # assembles the x86_64 slice's SIMD (prebuild builds x86_64 + arm64-v8a).
+      - name: Install build tools for heif-decoder's vendored dav1d
+        run: brew install meson ninja nasm
+
+      - name: Install cargo-ndk
+        uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          # cargo-ndk 4.x required: filen-rs heif-decoder/build.rs reads ANDROID_ABI (d454f4d); 3.5.4 set CARGO_NDK_ANDROID_TARGET (reverses bbqsrc/cargo-ndk#181)
+          tool: cargo-ndk@4.1.2
+
+      # The workflow-level NODE_ENV=production makes yarn skip the prepare script that builds the
+      # uniffi-bindgen-react-native git dependency; pnpm itself ignores NODE_ENV.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --filter @filen/mobile...
+        env:
+          NODE_ENV: development
+
+      # No Filen signing keystore in a fork: without credentials.json the release APK is signed with
+      # the debug key, which is fine for sideloading (it can't update the Play Store install, though).
+
+      - name: Prebuild
+        run: pnpm run prebuild:ci:android
+
+      - name: Build Android release APK
+        run: |
+          set -o pipefail
+          cd android
+          chmod +x ./gradlew
+          ./gradlew app:assembleRelease 2>&1 | tee "$RUNNER_TEMP/gradle.log"
+          cd ..
+
+      - name: Build diagnostics
+        if: failure()
+        run: |
+          echo "::group::disk and memory"; df -h; vm_stat; echo "::endgroup::"
+          echo "::group::last errors"; grep -nE 'error:|FAILURE:|What went wrong|Execution failed|OutOfMemory|No space left' "$RUNNER_TEMP/gradle.log" | tail -40; echo "::endgroup::"
+          grep -E 'error:|FAILURE:|What went wrong|Execution failed|OutOfMemory|No space left' "$RUNNER_TEMP/gradle.log" | tail -8 | while IFS= read -r line; do echo "::error::${line}"; done
+
+      - name: Cleanup
+        if: always()
+        run: |
+          # Remove the .env holding the fallback encryption key
+          rm -f .env
+          rm -f android/app/release.keystore
+          rm -f credentials.json
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Filen-android-fast-scroll
+          path: packages/filen-mobile/android/app/build/outputs/apk/release/*.apk
+
+      - name: Publish APK to rolling GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Attach the signed release APK to a rolling prerelease so it can be tapped-to-install
+          # directly on a phone. GitHub artifact downloads are always zipped; release assets are not.
+          APK=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
+          cp "$APK" "${RUNNER_TEMP}/Filen-android-fast-scroll.apk"
+          gh release delete fast-scroll-latest --cleanup-tag --yes || true
+          gh release create fast-scroll-latest \
+            "${RUNNER_TEMP}/Filen-android-fast-scroll.apk" \
+            --prerelease \
+            --target "${GITHUB_SHA}" \
+            --title "Filen Android – fast scroll build (latest)" \
+            --notes "Rolling latest signed release APK for on-device testing. Build #${{ github.run_number }} · commit ${GITHUB_SHA}. On your phone, tap **Filen-android-fast-scroll.apk** below to install (allow 'install unknown apps' if prompted)."
+          {
+            echo "## Android test build published"
+            echo ""
+            echo "Install on your phone from the [latest release](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/fast-scroll-latest) — tap **Filen-android-fast-scroll.apk**. Build #${{ github.run_number }}."
+          } >> "$GITHUB_STEP_SUMMARY"

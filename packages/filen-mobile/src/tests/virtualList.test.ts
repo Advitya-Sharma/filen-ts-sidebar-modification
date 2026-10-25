@@ -17,6 +17,11 @@ vi.mock("@/components/ui/view", () => ({ default: () => null }))
 
 vi.mock("@/components/ui/animated", () => ({ AnimatedView: () => null }))
 
+vi.mock("@/components/ui/fastScroller", () => ({
+	default: () => null,
+	useFastScrollController: () => ({})
+}))
+
 vi.mock("@/lib/alerts", async () => await import("@/tests/mocks/alerts"))
 
 vi.mock("@filen/shared", async () => await import("@/tests/mocks/filenShared"))

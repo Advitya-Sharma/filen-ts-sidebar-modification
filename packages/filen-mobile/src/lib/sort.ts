@@ -349,3 +349,13 @@ function group(
 }
 
 export const notesSorter = { sort, group }
+
+/**
+ * The timestamp a date sort orders by (ms or s, as stored), or null for name/size/mime sorts.
+ * Lets UI that labels a sorted list (the fast scroller) agree exactly with the sort itself.
+ */
+export function sortTimestampKey(sort: SortByType): ((item: DriveItem) => number) | null {
+	const mode = sortModes[sort]
+
+	return mode.kind === "timestamp" ? mode.timestampKey : null
+}
