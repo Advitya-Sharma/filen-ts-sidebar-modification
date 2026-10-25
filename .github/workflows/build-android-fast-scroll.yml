@@ -1,0 +1,117 @@
+name: Build Android APK (fast scroll fork)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'packages/filen-mobile/**'
+      - '.github/workflows/build-android-fast-scroll.yml'
+
+concurrency:
+  group: build-android-fast-scroll
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  NODE_ENV: production
+  APP_ENV: production
+  EXPO_PUBLIC_SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY: ${{ secrets.SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY }}
+
+jobs:
+  build-android:
+    runs-on: macos-26
+    defaults:
+      run:
+        working-directory: packages/filen-mobile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Write fallback encryption key to .env
+        run: |
+          if [ -z "${EXPO_PUBLIC_SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY}" ]; then
+            EXPO_PUBLIC_SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY=$(openssl rand -hex 32)
+          fi
+          printf 'EXPO_PUBLIC_SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY=%s\n' "${EXPO_PUBLIC_SECURE_STORE_UNSECURE_FALLBACK_ENCRYPTION_KEY}" > .env
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-02-20
+          components: rust-src
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Install meson, ninja, nasm
+        run: brew install meson ninja nasm
+
+      - name: Install cargo-ndk
+        uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-ndk@4.1.2
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --filter @filen/mobile...
+        env:
+          NODE_ENV: development
+
+      - name: Prebuild
+        run: pnpm run prebuild:ci:android
+
+      - name: Build Android release APK
+        run: |
+          set -o pipefail
+          cd android
+          chmod +x ./gradlew
+          ./gradlew app:assembleRelease 2>&1 | tee "$RUNNER_TEMP/gradle.log"
+
+      - name: Show build errors
+        if: failure()
+        run: grep -nE 'error:|FAILURE:|What went wrong|Execution failed' "$RUNNER_TEMP/gradle.log" | tail -40 || true
+
+      - name: Cleanup
+        if: always()
+        run: rm -f .env
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Filen-android-fast-scroll
+          path: packages/filen-mobile/android/app/build/outputs/apk/release/*.apk
+
+      - name: Publish APK to a GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
+          cp "$APK" "${RUNNER_TEMP}/Filen-android-fast-scroll.apk"
+          gh release delete fast-scroll-latest --cleanup-tag --yes || true
+          gh release create fast-scroll-latest "${RUNNER_TEMP}/Filen-android-fast-scroll.apk" \
+            --prerelease --target "${GITHUB_SHA}" \
+            --title "Filen Android - fast scroll build" \
+            --notes "Tap Filen-android-fast-scroll.apk to download and install."
